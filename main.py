@@ -11,7 +11,7 @@ from telegram.error import BadRequest, TimedOut, Forbidden
 import asyncio
 
 # === КОНФИГ ===
-TOKEN = "7932680631:AAG3DW6gwg0Ccvuiq45aPVCSSWsOallp_Pk"
+TOKEN = os.getenv("BOT_TOKEN", "7932680631:AAG3DW6gwg0Ccvuiq45aPVCSSWsOallp_Pk")
 MODERATION_CHAT_ID = -1002117586464
 ADMIN_ID = 881379104
 ARTISTS_CHAT = "https://t.me/+oVmX3_dkyWJhNjJi"
