@@ -13,7 +13,7 @@ import asyncio
 # === КОНФИГ ===
 TOKEN = os.getenv("BOT_TOKEN", "7932680631:AAG3DW6gwg0Ccvuiq45aPVCSSWsOallp_Pk")
 MODERATION_CHAT_ID = -1002117586464
-ADMIN_ID = 881379104
+ADMIN_IDS = [881379104]
 ARTISTS_CHAT = "https://t.me/+oVmX3_dkyWJhNjJi"
 CHANNEL = "https://t.me/cxrnermusic"
 DB_FILE = "releases.json"
@@ -50,7 +50,7 @@ WINTER_EMOJIS = {
 # === СОСТОЯНИЯ ===
 (REPORT, TYPE, NAME, NICK, FIO, DATE, VERSION, GENRE, LINK, MAT, PROMO, COMMENT, TG, CONFIRM,
  ALBUM_NICK, ALBUM_FIO, ALBUM_TRACKLIST, ALBUM_TG, SINGLE_NICK, SINGLE_FIO, SINGLE_TG,
- REJECT_REASON) = range(22)
+ REJECT_REASON, MODERATION_COMMENT) = range(23)
 
 # === БД ===
 def load_db():
@@ -77,36 +77,21 @@ user_data = {}
 db = load_db()
 moderation_db = load_moderation_db()
 
-# === ЭКРАНИРОВАНИЕ ===
-def escape_md(text):
+# === ЭКРАНИРОВАНИЕ HTML ===
+def escape_html(text):
     if not text:
         return ""
     return (str(text)
-            .replace('\\', '\\\\')
-            .replace('_', '\\_')
-            .replace('*', '\\*')
-            .replace('[', '\\[')
-            .replace(']', '\\]')
-            .replace('(', '\\(')
-            .replace(')', '\\)')
-            .replace('~', '\\~')
-            .replace('`', '\\`')
-            .replace('>', '\\>')
-            .replace('#', '\\#')
-            .replace('+', '\\+')
-            .replace('-', '\\-')
-            .replace('=', '\\=')
-            .replace('|', '\\|')
-            .replace('{', '\\{')
-            .replace('}', '\\}')
-            .replace('.', '\\.')
-            .replace('!', '\\!'))
+            .replace('&', '&amp;')
+            .replace('<', '&lt;')
+            .replace('>', '&gt;')
+            .replace('"', '&quot;'))
 
 def clean(text):
     return ' '.join([w for w in text.split() if not w.lower().startswith(('1.', '2.', '3.'))]).strip()
 
 # === БЕЗОПАСНАЯ ОТПРАВКА ===
-async def safe_send(target, text, reply_markup=None, parse_mode=ParseMode.MARKDOWN_V2):
+async def safe_send(target, text, reply_markup=None, parse_mode=ParseMode.HTML):
     message = target if hasattr(target, 'reply_text') else target.message
     for _ in range(3):
         try:
@@ -116,19 +101,19 @@ async def safe_send(target, text, reply_markup=None, parse_mode=ParseMode.MARKDO
             await asyncio.sleep(2)
         except BadRequest as e:
             if "can't parse entities" in str(e).lower():
-                await message.reply_text(text.replace('*', '').replace('_', '').replace('`', '').replace('\\', ''), reply_markup=reply_markup)
+                await message.reply_text(text.replace('<b>', '').replace('</b>', '').replace('<i>', '').replace('</i>', ''), reply_markup=reply_markup)
             else:
                 raise
         except Exception:
-            await message.reply_text(text.replace('*', '').replace('_', '').replace('`', ''), reply_markup=reply_markup)
+            await message.reply_text(text.replace('<b>', '').replace('</b>', '').replace('<i>', '').replace('</i>', ''), reply_markup=reply_markup)
             return
-    await message.reply_text("Не удалось отправить\\.")
+    await message.reply_text("Не удалось отправить.")
 
-async def safe_edit(query, text, reply_markup=None, parse_mode=ParseMode.MARKDOWN_V2):
+async def safe_edit(query, text, reply_markup=None, parse_mode=ParseMode.HTML):
     try:
         await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode, disable_web_page_preview=True)
     except (BadRequest, TimedOut, Forbidden):
-        await query.message.reply_text(text.replace('*', '').replace('_', '').replace('`', ''), reply_markup=reply_markup)
+        await query.message.reply_text(text.replace('<b>', '').replace('</b>', '').replace('<i>', '').replace('</i>', ''), reply_markup=reply_markup)
 
 # === ЗИМНЕЕ ОФОРМЛЕНИЕ ===
 def winter_text(text, emoji_key=None):
@@ -138,6 +123,10 @@ def winter_text(text, emoji_key=None):
 
 def winter_header(text):
     return f"{WINTER_EMOJIS['snowflake']} {text} {WINTER_EMOJIS['snowflake']}"
+
+# === ПРОВЕРКА АДМИНА ===
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
 
 # === ГЛАВНОЕ МЕНЮ (/start) ===
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,15 +140,15 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = f"""
 {winter_header("CXRNER MUSIC")}
 
-{escape_md("Добро пожаловать в зимнюю студию музыки!")} {WINTER_EMOJIS['tree']}
+{escape_html("Добро пожаловать в зимнюю студию музыки!")} {WINTER_EMOJIS['tree']}
 
-{escape_md("Выберите действие:")}
+{escape_html("Выберите действие:")}
 """
     
     await update.message.reply_text(
         welcome_text,
         reply_markup=keyboard,
-        parse_mode=ParseMode.MARKDOWN_V2
+        parse_mode=ParseMode.HTML
     )
     return REPORT
 
@@ -176,21 +165,21 @@ async def my_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     stats = (
         f"{winter_header('Твоя статистика')}\n\n"
-        f"{WINTER_EMOJIS['notes']} Всего релизов: *{total}*\n"
-        f"{WINTER_EMOJIS['waiting']} Ожидает: *{pending}*\n"
-        f"{WINTER_EMOJIS['check']} Одобрено: *{approved}*\n"
-        f"{WINTER_EMOJIS['cross']} Отклонено: *{rejected}*\n"
-        f"{WINTER_EMOJIS['published']} Опубликовано: *{published}*\n\n"
+        f"{WINTER_EMOJIS['notes']} Всего релизов: <b>{total}</b>\n"
+        f"{WINTER_EMOJIS['waiting']} Ожидает: <b>{pending}</b>\n"
+        f"{WINTER_EMOJIS['check']} Одобрено: <b>{approved}</b>\n"
+        f"{WINTER_EMOJIS['cross']} Отклонено: <b>{rejected}</b>\n"
+        f"{WINTER_EMOJIS['published']} Опубликовано: <b>{published}</b>\n\n"
     )
 
     if not releases:
         await update.message.reply_text(
-            f"{escape_md(stats)}_У вас пока нет релизов\\._\n\n/start {WINTER_EMOJIS['gift']} отправить первый\\!",
-            parse_mode=ParseMode.MARKDOWN_V2
+            f"{escape_html(stats)}<i>У вас пока нет релизов.</i>\n\n/start {WINTER_EMOJIS['gift']} отправить первый!",
+            parse_mode=ParseMode.HTML
         )
         return
 
-    text = f"{escape_md(stats)}*Твои релизы*:\n\n"
+    text = f"{escape_html(stats)}<b>Твои релизы:</b>\n\n"
     status_emoji = {"pending": WINTER_EMOJIS['waiting'], "approved": WINTER_EMOJIS['check'], 
                    "rejected": WINTER_EMOJIS['cross'], "published": WINTER_EMOJIS['published']}
     
@@ -199,30 +188,31 @@ async def my_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         emoji = status_emoji.get(status, WINTER_EMOJIS['waiting'])
         status_text = {"pending": "Ожидает", "approved": "Одобрено", 
                       "rejected": "Отклонено", "published": "Опубликовано"}.get(status, "Ожидает")
-        link = f"\n[Слушать]({rel.get('link_published', '')})" if status == 'published' and rel.get('link_published') else ""
+        link = f"\n<a href='{rel.get('link_published', '')}'>Слушать</a>" if status == 'published' and rel.get('link_published') else ""
         text += (
-            f"*{i}\\. {escape_md(rel.get('name', 'Без названия'))}* {escape_md(emoji)}\n"
-            f"_Тип:_ {escape_md(rel.get('type', '—'))}\n"
-            f"_Ник:_ {escape_md(rel.get('nick', '—'))}\n"
-            f"_Дата:_ {escape_md(rel.get('date', '—'))}\n"
-            f"_Жанр:_ {escape_md(rel.get('genre', '—'))}\n"
-            f"_Мат:_ {escape_md(rel.get('mat', '—'))}\n"
-            f"_Статус:_ {escape_md(status_text)}"
+            f"<b>{i}. {escape_html(rel.get('name', 'Без названия'))}</b> {escape_html(emoji)}\n"
+            f"<i>Тип:</i> {escape_html(rel.get('type', '—'))}\n"
+            f"<i>Ник:</i> {escape_html(rel.get('nick', '—'))}\n"
+            f"<i>Дата:</i> {escape_html(rel.get('date', '—'))}\n"
+            f"<i>Жанр:</i> {escape_html(rel.get('genre', '—'))}\n"
+            f"<i>Мат:</i> {escape_html(rel.get('mat', '—'))}\n"
+            f"<i>Статус:</i> {escape_html(status_text)}"
         )
         if status == 'rejected' and rel.get('reject_reason'):
-            text += f" \\({escape_md(rel['reject_reason'])}\\)"
+            text += f" ({escape_html(rel['reject_reason'])})"
         text += f"{link}\n\n"
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(winter_text("Отправить новый", "music"), callback_data='report')],
         [InlineKeyboardButton(winter_text("Меню", "tree"), callback_data='main')]
     ])
-    await update.message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN_V2, disable_web_page_preview=True)
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 # === РАСШИРЕННАЯ АДМИН-ПАНЕЛЬ (/admin) ===
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
-        await update.message.reply_text("Доступ запрещён\\.")
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("Доступ запрещён.")
         return
 
     # Статистика
@@ -248,23 +238,24 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"{winter_header('АДМИН-ПАНЕЛЬ')}\n\n"
-        f"{WINTER_EMOJIS['stats']} *ОБЩАЯ СТАТИСТИКА:*\n"
-        f"{WINTER_EMOJIS['users']} Пользователей: *{total_users}*\n"
-        f"{WINTER_EMOJIS['notes']} Всего релизов: *{total_releases}*\n"
-        f"{WINTER_EMOJIS['waiting']} Ожидает: *{pending}*\n"
-        f"{WINTER_EMOJIS['check']} Одобрено: *{approved}*\n"
-        f"{WINTER_EMOJIS['cross']} Отклонено: *{rejected}*\n"
-        f"{WINTER_EMOJIS['published']} Опубликовано: *{published}*\n"
-        f"{WINTER_EMOJIS['calendar']} За неделю: *{recent_releases}*\n\n"
+        f"{WINTER_EMOJIS['stats']} <b>ОБЩАЯ СТАТИСТИКА:</b>\n"
+        f"{WINTER_EMOJIS['users']} Пользователей: <b>{total_users}</b>\n"
+        f"{WINTER_EMOJIS['notes']} Всего релизов: <b>{total_releases}</b>\n"
+        f"{WINTER_EMOJIS['waiting']} Ожидает: <b>{pending}</b>\n"
+        f"{WINTER_EMOJIS['check']} Одобрено: <b>{approved}</b>\n"
+        f"{WINTER_EMOJIS['cross']} Отклонено: <b>{rejected}</b>\n"
+        f"{WINTER_EMOJIS['published']} Опубликовано: <b>{published}</b>\n"
+        f"{WINTER_EMOJIS['calendar']} За неделю: <b>{recent_releases}</b>\n\n"
         
-        f"{WINTER_EMOJIS['settings']} *УПРАВЛЕНИЕ:*\n"
-        f"/backup \\- 📦 База данных релизов\n"
-        f"/moderation_backup \\- 🗂️ Архив модерации\n"
-        f"/stats \\- 📊 Подробная статистика\n"
-        f"/broadcast \\- 📢 Рассылка пользователям\n"
-        f"/cleanup \\- 🧹 Очистка старых данных\n\n"
+        f"{WINTER_EMOJIS['settings']} <b>УПРАВЛЕНИЕ:</b>\n"
+        "/backup - 📦 База данных релизов\n"
+        "/moderation_backup - 🗂️ Архив модерации\n"
+        "/stats - 📊 Подробная статистика\n"
+        "/broadcast - 📢 Рассылка пользователям\n"
+        "/cleanup - 🧹 Очистка старых данных\n"
+        "/cleanbase - 💣 УДАЛИТЬ ВСЕ РЕЛИЗЫ\n\n"
         
-        f"{WINTER_EMOJIS['warning']} *БЫСТРЫЕ ДЕЙСТВИЯ:*"
+        f"{WINTER_EMOJIS['warning']} <b>БЫСТРЫЕ ДЕЙСТВИЯ:</b>"
     )
     
     keyboard = InlineKeyboardMarkup([
@@ -279,15 +270,20 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [
             InlineKeyboardButton(winter_text("Очистка", "refresh"), callback_data='cleanup_db'),
             InlineKeyboardButton(winter_text("Рассылка", "published"), callback_data='broadcast_menu')
+        ],
+        [
+            InlineKeyboardButton(winter_text("Все релизы", "list"), callback_data='all_releases'),
+            InlineKeyboardButton(winter_text("УДАЛИТЬ ВСЁ", "warning"), callback_data='confirm_cleanbase')
         ]
     ])
     
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 # === СТАТИСТИКА ДЛЯ АДМИНА ===
 async def admin_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
-        await update.message.reply_text("Доступ запрещён\\.")
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("Доступ запрещён.")
         return
 
     # Подробная статистика
@@ -313,22 +309,22 @@ async def admin_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = (
         f"{winter_header('ДЕТАЛЬНАЯ СТАТИСТИКА')}\n\n"
-        f"{WINTER_EMOJIS['users']} *ПОЛЬЗОВАТЕЛИ:*\n"
-        f"• Всего: *{total_users}*\n"
-        f"• Активных: *{active_users}*\n\n"
+        f"{WINTER_EMOJIS['users']} <b>ПОЛЬЗОВАТЕЛИ:</b>\n"
+        f"• Всего: <b>{total_users}</b>\n"
+        f"• Активных: <b>{active_users}</b>\n\n"
         
-        f"{WINTER_EMOJIS['notes']} *РЕЛИЗЫ:*\n"
-        f"• Всего: *{total_releases}*\n"
-        f"• Синглов: *{type_stats['сингл']}*\n"
-        f"• Альбомов: *{type_stats['альбом']}*\n\n"
+        f"{WINTER_EMOJIS['notes']} <b>РЕЛИЗЫ:</b>\n"
+        f"• Всего: <b>{total_releases}</b>\n"
+        f"• Синглов: <b>{type_stats['сингл']}</b>\n"
+        f"• Альбомов: <b>{type_stats['альбом']}</b>\n\n"
         
-        f"{WINTER_EMOJIS['stats']} *СТАТУСЫ:*\n"
-        f"• Ожидает: *{status_stats['pending']}*\n"
-        f"• Одобрено: *{status_stats['approved']}*\n"
-        f"• Отклонено: *{status_stats['rejected']}*\n"
-        f"• Опубликовано: *{status_stats['published']}*\n\n"
+        f"{WINTER_EMOJIS['stats']} <b>СТАТУСЫ:</b>\n"
+        f"• Ожидает: <b>{status_stats['pending']}</b>\n"
+        f"• Одобрено: <b>{status_stats['approved']}</b>\n"
+        f"• Отклонено: <b>{status_stats['rejected']}</b>\n"
+        f"• Опубликовано: <b>{status_stats['published']}</b>\n\n"
         
-        f"{WINTER_EMOJIS['calendar']} *ПОСЛЕДНИЕ ДЕЙСТВИЯ:*\n"
+        f"{WINTER_EMOJIS['calendar']} <b>ПОСЛЕДНИЕ ДЕЙСТВИЯ:</b>\n"
     )
     
     # Добавляем последние 5 релизов
@@ -348,18 +344,70 @@ async def admin_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'published': WINTER_EMOJIS['published']
         }
         status = release.get('status', 'pending')
-        text += f"{i}\\. {escape_md(release.get('name', 'Без названия'))} {status_emoji[status]}\n"
+        text += f"{i}. {escape_html(release.get('name', 'Без названия'))} {status_emoji[status]}\n"
     
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(winter_text("Назад", "tree"), callback_data='admin_back')]
     ])
     
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+# === СПИСОК ВСЕХ РЕЛИЗОВ ===
+async def all_releases_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("Доступ запрещён", show_alert=True)
+        return
+
+    all_releases = []
+    for user_id, releases in db.items():
+        for idx, release in enumerate(releases):
+            all_releases.append((user_id, idx, release))
+    
+    if not all_releases:
+        text = f"{WINTER_EMOJIS['check']} <b>Нет релизов!</b>"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(winter_text("Назад", "tree"), callback_data='admin_back')]
+        ])
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        return
+    
+    # Сортируем по времени отправки
+    all_releases.sort(key=lambda x: x[2].get('submission_time', ''), reverse=True)
+    
+    text = f"{winter_header('ВСЕ РЕЛИЗЫ')}\n\n"
+    for i, (user_id, idx, release) in enumerate(all_releases[:15], 1):  # Ограничиваем 15 записями
+        status_emoji = {
+            'pending': WINTER_EMOJIS['waiting'],
+            'approved': WINTER_EMOJIS['check'],
+            'rejected': WINTER_EMOJIS['cross'],
+            'published': WINTER_EMOJIS['published']
+        }
+        status = release.get('status', 'pending')
+        emoji = status_emoji.get(status, WINTER_EMOJIS['waiting'])
+        
+        text += (
+            f"<b>{i}. {escape_html(release.get('name', 'Без названия'))}</b> {emoji}\n"
+            f"Тип: {escape_html(release.get('type', '—'))}\n"
+            f"Артист: {escape_html(release.get('nick', '—'))}\n"
+            f"Статус: {escape_html(status)}\n"
+            f"ID: <code>{user_id}</code>\n\n"
+        )
+    
+    if len(all_releases) > 15:
+        text += f"<b>... и ещё {len(all_releases) - 15} релизов</b>"
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(winter_text("Назад", "tree"), callback_data='admin_back')]
+    ])
+    
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 # === СПИСОК ОЖИДАЮЩИХ РЕЛИЗОВ ===
 async def pending_releases_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query.from_user.id != ADMIN_ID:
-        await update.callback_query.answer("Доступ запрещён", show_alert=True)
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("Доступ запрещён", show_alert=True)
         return
 
     pending_list = []
@@ -369,36 +417,37 @@ async def pending_releases_list(update: Update, context: ContextTypes.DEFAULT_TY
                 pending_list.append((user_id, idx, release))
     
     if not pending_list:
-        text = f"{WINTER_EMOJIS['check']} *Нет ожидающих релизов\\!*"
+        text = f"{WINTER_EMOJIS['check']} <b>Нет ожидающих релизов!</b>"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton(winter_text("Назад", "tree"), callback_data='admin_back')]
         ])
-        await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
         return
     
     text = f"{winter_header('ОЖИДАЮЩИЕ РЕЛИЗЫ')}\n\n"
     for i, (user_id, idx, release) in enumerate(pending_list[:10], 1):  # Ограничиваем 10 записями
         text += (
-            f"*{i}\\. {escape_md(release.get('name', 'Без названия'))}*\n"
-            f"Тип: {escape_md(release.get('type', '—'))}\n"
-            f"Артист: {escape_md(release.get('nick', '—'))}\n"
-            f"Дата: {escape_md(release.get('date', '—'))}\n"
-            f"ID: `{user_id}`\n\n"
+            f"<b>{i}. {escape_html(release.get('name', 'Без названия'))}</b>\n"
+            f"Тип: {escape_html(release.get('type', '—'))}\n"
+            f"Артист: {escape_html(release.get('nick', '—'))}\n"
+            f"Дата: {escape_html(release.get('date', '—'))}\n"
+            f"ID: <code>{user_id}</code>\n\n"
         )
     
     if len(pending_list) > 10:
-        text += f"*... и ещё {len(pending_list) - 10} релизов*"
+        text += f"<b>... и ещё {len(pending_list) - 10} релизов</b>"
     
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(winter_text("Назад", "tree"), callback_data='admin_back')]
     ])
     
-    await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 # === ОЧИСТКА БАЗЫ ДАННЫХ ===
 async def cleanup_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query.from_user.id != ADMIN_ID:
-        await update.callback_query.answer("Доступ запрещён", show_alert=True)
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("Доступ запрещён", show_alert=True)
         return
 
     # Удаляем пользователей без релизов
@@ -414,16 +463,211 @@ async def cleanup_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_db(db)
     
     text = (
-        f"{WINTER_EMOJIS['refresh']} *ОЧИСТКА ЗАВЕРШЕНА\\!*\n\n"
-        f"Удалено пустых пользователей: *{users_removed}*\n"
-        f"Текущее количество пользователей: *{users_after}*"
+        f"{WINTER_EMOJIS['refresh']} <b>ОЧИСТКА ЗАВЕРШЕНА!</b>\n\n"
+        f"Удалено пустых пользователей: <b>{users_removed}</b>\n"
+        f"Текущее количество пользователей: <b>{users_after}</b>"
     )
     
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(winter_text("Назад", "tree"), callback_data='admin_back')]
     ])
     
-    await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+# === УДАЛЕНИЕ ВСЕХ РЕЛИЗОВ ===
+async def cleanbase_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(winter_text("ДА, УДАЛИТЬ ВСЁ", "cross"), callback_data='cleanbase_confirm'),
+            InlineKeyboardButton(winter_text("Отмена", "check"), callback_data='admin_back')
+        ]
+    ])
+    
+    text = (
+        f"{WINTER_EMOJIS['warning']} <b>ВНИМАНИЕ! ОПАСНАЯ КОМАНДА!</b>\n\n"
+        f"Вы собираетесь <b>ПОЛНОСТЬЮ ОЧИСТИТЬ</b> базу данных всех релизов!\n\n"
+        f"<b>Это действие нельзя отменить!</b>\n"
+        f"Все данные будут <b>БЕЗВОЗВРАТНО УТЕРЯНЫ!</b>\n\n"
+        f"Вы уверены, что хотите продолжить?"
+    )
+    
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+async def cleanbase_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("Доступ запрещён", show_alert=True)
+        return
+
+    # Полностью очищаем базу данных
+    global db
+    db = {}
+    save_db(db)
+    
+    text = (
+        f"{WINTER_EMOJIS['check']} <b>БАЗА ДАННЫХ ПОЛНОСТЬЮ ОЧИЩЕНА!</b>\n\n"
+        f"Все релизы были <b>удалены</b>!\n"
+        f"Количество пользователей: <b>0</b>\n"
+        f"Количество релизов: <b>0</b>"
+    )
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(winter_text("В админ-панель", "settings"), callback_data='admin_back')]
+    ])
+    
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+# === МЕНЮ РАССЫЛКИ ===
+async def broadcast_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not is_admin(query.from_user.id):
+        await query.answer("Доступ запрещён", show_alert=True)
+        return
+
+    text = (
+        f"{winter_header('РАССЫЛКА')}\n\n"
+        f"{WINTER_EMOJIS['warning']} <b>ВНИМАНИЕ:</b> Рассылка будет отправлена <b>ВСЕМ</b> пользователям бота!\n\n"
+        f"Используйте команду:\n"
+        f"<code>/broadcast ваш текст сообщения</code>\n\n"
+        f"Или отправьте сообщение ответом на это сообщение для рассылки."
+    )
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(winter_text("Назад", "tree"), callback_data='admin_back')]
+    ])
+    
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+# === РАССЫЛКА ===
+async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            f"{WINTER_EMOJIS['warning']} Использование: <code>/broadcast ваш текст</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    message_text = ' '.join(context.args)
+    broadcast_text = (
+        f"{WINTER_EMOJIS['published']} <b>ВАЖНОЕ ОБЪЯВЛЕНИЕ</b> {WINTER_EMOJIS['published']}\n\n"
+        f"{escape_html(message_text)}\n\n"
+        f"<i>С уважением, команда CXRNER MUSIC</i> {WINTER_EMOJIS['snowflake']}"
+    )
+
+    # Отправляем сообщение
+    sent_count = 0
+    error_count = 0
+    
+    progress_msg = await update.message.reply_text(
+        f"{WINTER_EMOJIS['waiting']} <b>Начинаю рассылку...</b>"
+    )
+
+    for user_id in db.keys():
+        try:
+            await context.bot.send_message(
+                int(user_id),
+                broadcast_text,
+                parse_mode=ParseMode.HTML
+            )
+            sent_count += 1
+            await asyncio.sleep(0.1)  # Задержка чтобы не превысить лимиты
+        except Exception as e:
+            error_count += 1
+            print(f"Ошибка отправки пользователю {user_id}: {e}")
+
+    await progress_msg.edit_text(
+        f"{WINTER_EMOJIS['check']} <b>РАССЫЛКА ЗАВЕРШЕНА!</b>\n\n"
+        f"• Успешно: <b>{sent_count}</b>\n"
+        f"• Ошибок: <b>{error_count}</b>\n"
+        f"• Всего: <b>{sent_count + error_count}</b>",
+        parse_mode=ParseMode.HTML
+    )
+
+# === ОТПРАВКА ФАЙЛОВ БАЗЫ ДАННЫХ ===
+async def send_database_backup(query, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(query.from_user.id):
+        await query.answer("Доступ запрещён", show_alert=True)
+        return
+        
+    try:
+        with open(DB_FILE, 'rb') as f:
+            await context.bot.send_document(
+                chat_id=query.from_user.id,
+                document=f,
+                filename=f"releases_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                caption=f"{WINTER_EMOJIS['snowflake']} Резервная копия базы данных релизов"
+            )
+        await query.answer("База данных отправлена!", show_alert=True)
+    except Exception as e:
+        await query.answer(f"Ошибка: {e}", show_alert=True)
+
+async def send_moderation_backup(query, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(query.from_user.id):
+        await query.answer("Доступ запрещён", show_alert=True)
+        return
+        
+    try:
+        with open(MODERATION_DB_FILE, 'rb') as f:
+            await context.bot.send_document(
+                chat_id=query.from_user.id,
+                document=f,
+                filename=f"moderation_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                caption=f"{WINTER_EMOJIS['snowman']} Архив модерации"
+            )
+        await query.answer("Архив модерации отправлен!", show_alert=True)
+    except Exception as e:
+        await query.answer(f"Ошибка: {e}", show_alert=True)
+
+# === КОМАНДЫ АДМИНА ДЛЯ БЭКАПА ===
+async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+    await send_database_backup(update.message, context)
+
+async def moderation_backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("Доступ запрещён.")
+        return
+    await send_moderation_backup(update.message, context)
+
+async def send_database_backup(message, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        with open(DB_FILE, 'rb') as f:
+            await context.bot.send_document(
+                chat_id=message.from_user.id,
+                document=f,
+                filename=f"releases_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                caption=f"{WINTER_EMOJIS['snowflake']} Резервная копия базы данных релизов"
+            )
+        await message.reply_text(f"{WINTER_EMOJIS['check']} База данных отправлена!")
+    except Exception as e:
+        await message.reply_text(f"{WINTER_EMOJIS['cross']} Ошибка: {e}")
+
+async def send_moderation_backup(message, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        with open(MODERATION_DB_FILE, 'rb') as f:
+            await context.bot.send_document(
+                chat_id=message.from_user.id,
+                document=f,
+                filename=f"moderation_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                caption=f"{WINTER_EMOJIS['snowman']} Архив модерации"
+            )
+        await message.reply_text(f"{WINTER_EMOJIS['check']} Архив модерации отправлен!")
+    except Exception as e:
+        await message.reply_text(f"{WINTER_EMOJIS['cross']} Ошибка: {e}")
 
 # === КНОПКИ АДМИН-ПАНЕЛИ ===
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -437,7 +681,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton(winter_text("Сингл", "music"), callback_data='single')],
             [InlineKeyboardButton(winter_text("Альбом", "notes"), callback_data='album')]
         ])
-        await safe_edit(query, f"{WINTER_EMOJIS['snowflake']} *Выберите тип релиза:*", keyboard)
+        await safe_edit(query, f"{WINTER_EMOJIS['snowflake']} <b>Выберите тип релиза:</b>", keyboard)
         return TYPE
 
     if data == 'my_releases':
@@ -446,12 +690,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == 'single':
         user_data[user_id] = {'type': 'сингл', 'status': 'pending'}
-        await safe_edit(query, f"{WINTER_EMOJIS['music']} *СИНГЛ*\\.\n\n1\\. Название релиза\nПример: Tokyo Rain")
+        await safe_edit(query, f"{WINTER_EMOJIS['music']} <b>СИНГЛ</b>\n\n1. Название релиза\nПример: Tokyo Rain")
         return NAME
 
     if data == 'album':
         user_data[user_id] = {'type': 'альбом', 'status': 'pending'}
-        await safe_edit(query, f"{WINTER_EMOJIS['notes']} *АЛЬБОМ*\\.\n\n1\\. Название релиза\nПример: Lost in the Void")
+        await safe_edit(query, f"{WINTER_EMOJIS['notes']} <b>АЛЬБОМ</b>\n\n1. Название релиза\nПример: Lost in the Void")
         return NAME
 
     if data == 'send':
@@ -478,6 +722,10 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await pending_releases_list(update, context)
         return
         
+    if data == 'all_releases':
+        await all_releases_list(update, context)
+        return
+        
     if data == 'cleanup_db':
         await cleanup_database(update, context)
         return
@@ -489,212 +737,77 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == 'broadcast_menu':
         await broadcast_menu(update, context)
         return
-
-# === МЕНЮ РАССЫЛКИ ===
-async def broadcast_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.callback_query.from_user.id != ADMIN_ID:
-        await update.callback_query.answer("Доступ запрещён", show_alert=True)
-        return
-
-    text = (
-        f"{winter_header('РАССЫЛКА')}\n\n"
-        f"{WINTER_EMOJIS['warning']} *ВНИМАНИЕ:* Рассылка будет отправлена *ВСЕМ* пользователям бота\\!\n\n"
-        f"Используйте команду:\n"
-        f"`/broadcast ваш текст сообщения`\n\n"
-        f"Или отправьте сообщение ответом на это сообщение для рассылки\\."
-    )
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(winter_text("Назад", "tree"), callback_data='admin_back')]
-    ])
-    
-    await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
-
-# === РАССЫЛКА ===
-async def broadcast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
-        await update.message.reply_text("Доступ запрещён\\.")
-        return
-
-    if not context.args:
-        await update.message.reply_text(
-            f"{WINTER_EMOJIS['warning']} Использование: `/broadcast ваш текст`",
-            parse_mode=ParseMode.MARKDOWN_V2
-        )
-        return
-
-    message_text = ' '.join(context.args)
-    broadcast_text = (
-        f"{WINTER_EMOJIS['published']} *ВАЖНОЕ ОБЪЯВЛЕНИЕ* {WINTER_EMOJIS['published']}\n\n"
-        f"{escape_md(message_text)}\n\n"
-        f"_С уважением, команда CXRNER MUSIC_ {WINTER_EMOJIS['snowflake']}"
-    )
-
-    # Отправляем сообщение
-    sent_count = 0
-    error_count = 0
-    
-    progress_msg = await update.message.reply_text(
-        f"{WINTER_EMOJIS['waiting']} *Начинаю рассылку\\.\\.\\.*"
-    )
-
-    for user_id in db.keys():
-        try:
-            await context.bot.send_message(
-                int(user_id),
-                broadcast_text,
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
-            sent_count += 1
-            await asyncio.sleep(0.1)  # Задержка чтобы не превысить лимиты
-        except Exception as e:
-            error_count += 1
-            print(f"Ошибка отправки пользователю {user_id}: {e}")
-
-    await progress_msg.edit_text(
-        f"{WINTER_EMOJIS['check']} *РАССЫЛКА ЗАВЕРШЕНА\\!*\n\n"
-        f"• Успешно: *{sent_count}*\n"
-        f"• Ошибок: *{error_count}*\n"
-        f"• Всего: *{sent_count + error_count}*",
-        parse_mode=ParseMode.MARKDOWN_V2
-    )
-
-# === ОТПРАВКА ФАЙЛОВ БАЗЫ ДАННЫХ ===
-async def send_database_backup(query, context: ContextTypes.DEFAULT_TYPE):
-    if query.from_user.id != ADMIN_ID:
-        await query.answer("Доступ запрещён", show_alert=True)
+        
+    if data == 'confirm_cleanbase':
+        await cleanbase_cmd(query, context)
         return
         
-    try:
-        with open(DB_FILE, 'rb') as f:
-            await context.bot.send_document(
-                chat_id=ADMIN_ID,
-                document=f,
-                filename=f"releases_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                caption=f"{WINTER_EMOJIS['snowflake']} Резервная копия базы данных релизов"
-            )
-        await query.answer("База данных отправлена!", show_alert=True)
-    except Exception as e:
-        await query.answer(f"Ошибка: {e}", show_alert=True)
-
-async def send_moderation_backup(query, context: ContextTypes.DEFAULT_TYPE):
-    if query.from_user.id != ADMIN_ID:
-        await query.answer("Доступ запрещён", show_alert=True)
+    if data == 'cleanbase_confirm':
+        await cleanbase_confirm(update, context)
         return
-        
-    try:
-        with open(MODERATION_DB_FILE, 'rb') as f:
-            await context.bot.send_document(
-                chat_id=ADMIN_ID,
-                document=f,
-                filename=f"moderation_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                caption=f"{WINTER_EMOJIS['snowman']} Архив модерации"
-            )
-        await query.answer("Архив модерации отправлен!", show_alert=True)
-    except Exception as e:
-        await query.answer(f"Ошибка: {e}", show_alert=True)
-
-# === КОМАНДЫ АДМИНА ДЛЯ БЭКАПА ===
-async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
-        await update.message.reply_text("Доступ запрещён\\.")
-        return
-    await send_database_backup(update.message, context)
-
-async def moderation_backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
-        await update.message.reply_text("Доступ запрещён\\.")
-        return
-    await send_moderation_backup(update.message, context)
-
-async def send_database_backup(message, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        with open(DB_FILE, 'rb') as f:
-            await context.bot.send_document(
-                chat_id=ADMIN_ID,
-                document=f,
-                filename=f"releases_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                caption=f"{WINTER_EMOJIS['snowflake']} Резервная копия базы данных релизов"
-            )
-        await message.reply_text(f"{WINTER_EMOJIS['check']} База данных отправлена!")
-    except Exception as e:
-        await message.reply_text(f"{WINTER_EMOJIS['cross']} Ошибка: {e}")
-
-async def send_moderation_backup(message, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        with open(MODERATION_DB_FILE, 'rb') as f:
-            await context.bot.send_document(
-                chat_id=ADMIN_ID,
-                document=f,
-                filename=f"moderation_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                caption=f"{WINTER_EMOJIS['snowman']} Архив модерации"
-            )
-        await message.reply_text(f"{WINTER_EMOJIS['check']} Архив модерации отправлен!")
-    except Exception as e:
-        await message.reply_text(f"{WINTER_EMOJIS['cross']} Ошибка: {e}")
 
 # === ПОЛЯ ===
 async def name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     user_data[user_id]['name'] = clean(update.message.text)
-    await safe_send(update.message, f"{WINTER_EMOJIS['star']} *2\\. Ник исполнителя\\(ей\\)*\nПример: MAKIZM")
+    await safe_send(update.message, f"{WINTER_EMOJIS['star']} <b>2. Ник исполнителя(ей)</b>\nПример: MAKIZM")
     return SINGLE_NICK if user_data[user_id]['type'] == 'сингл' else ALBUM_NICK
 
 async def single_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     user_data[user_id]['nick'] = clean(update.message.text)
-    await safe_send(update.message, f"{WINTER_EMOJIS['star']} *3\\. ФИО исполнителя\\(ей\\)*\nПример: Иванов Иван")
+    await safe_send(update.message, f"{WINTER_EMOJIS['star']} <b>3. ФИО исполнителя(ей)</b>\nПример: Иванов Иван")
     return SINGLE_FIO
 
 async def single_fio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     user_data[user_id]['fio'] = clean(update.message.text)
-    await safe_send(update.message, f"{WINTER_EMOJIS['calendar']} *4\\. Дата релиза*\nМинимум через 5 дней\nФормат: ДД\\.ММ\\.ГГГГ")
+    await safe_send(update.message, f"{WINTER_EMOJIS['calendar']} <b>4. Дата релиза</b>\nМинимум через 5 дней\nФормат: ДД.ММ.ГГГГ")
     return DATE
 
 async def album_nick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     user_data[user_id]['nick'] = clean(update.message.text)
-    await safe_send(update.message, f"{WINTER_EMOJIS['star']} *2\\. ФИО исполнителя\\(ей\\) \\(поочерёдно\\)*\nПример: Иванов Иван, Петров Пётр")
+    await safe_send(update.message, f"{WINTER_EMOJIS['star']} <b>2. ФИО исполнителя(ей) (поочерёдно)</b>\nПример: Иванов Иван, Петров Пётр")
     return ALBUM_FIO
 
 async def album_fio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     user_data[user_id]['fio'] = clean(update.message.text)
-    await safe_send(update.message, f"{WINTER_EMOJIS['calendar']} *3\\. Дата релиза*\nМинимум через 7 дней\nФормат: ДД\\.ММ\\.ГГГГ")
+    await safe_send(update.message, f"{WINTER_EMOJIS['calendar']} <b>3. Дата релиза</b>\nМинимум через 7 дней\nФормат: ДД.ММ.ГГГГ")
     return DATE
 
 async def date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     text = update.message.text.strip()
     if not all(part.isdigit() for part in text.split('.') if part):
-        await safe_send(update.message, f"{WINTER_EMOJIS['cross']} Неверный формат даты\\! Используйте: ДД\\.ММ\\.ГГГГ")
+        await safe_send(update.message, f"{WINTER_EMOJIS['cross']} Неверный формат даты! Используйте: ДД.ММ.ГГГГ")
         return DATE
     try:
         date_obj = datetime.strptime(text, "%d.%m.%Y")
         min_days = 5 if user_data[user_id]['type'] == 'сингл' else 7
         if date_obj < datetime.now() + timedelta(days=min_days):
-            await safe_send(update.message, f"{WINTER_EMOJIS['cross']} Дата должна быть минимум через {min_days} дней\\!")
+            await safe_send(update.message, f"{WINTER_EMOJIS['cross']} Дата должна быть минимум через {min_days} дней!")
             return DATE
         user_data[user_id]['date'] = text
-        await safe_send(update.message, f"{WINTER_EMOJIS['music']} *Версия релиза*\nSlowed, Speed Up\\.\nЕсли нет — напиши: —")
+        await safe_send(update.message, f"{WINTER_EMOJIS['music']} <b>Версия релиза</b>\nSlowed, Speed Up.\nЕсли нет — напиши: -")
         return VERSION
     except ValueError:
-        await safe_send(update.message, f"{WINTER_EMOJIS['cross']} Неверный формат даты\\! Пример: 25\\.12\\.2025")
+        await safe_send(update.message, f"{WINTER_EMOJIS['cross']} Неверный формат даты! Пример: 25.12.2025")
         return DATE
 
 async def version(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     ver = clean(update.message.text)
-    user_data[user_id]['version'] = ver if ver != '—' else 'Оригинал'
-    await safe_send(update.message, f"{WINTER_EMOJIS['notes']} *Жанр релиза*\nПример: Phonk, Trap")
+    user_data[user_id]['version'] = ver if ver != '-' else 'Оригинал'
+    await safe_send(update.message, f"{WINTER_EMOJIS['notes']} <b>Жанр релиза</b>\nПример: Phonk, Trap")
     return GENRE
 
 async def genre(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     user_data[user_id]['genre'] = clean(update.message.text)
     await safe_send(update.message,
-        f"{WINTER_EMOJIS['gift']} *Ссылка на файлы \\(Yandex/Google Диск\\)*\n\n"
+        f"{WINTER_EMOJIS['gift']} <b>Ссылка на файлы (Yandex/Google Диск)</b>\n\n"
         "В архиве:\n"
         "• WAV 16/24 бит, 44100 Гц\n"
         "• Обложка 3000x3000 JPG\n"
@@ -709,7 +822,7 @@ async def link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(winter_text("Да", "check"), callback_data='mat_yes')],
         [InlineKeyboardButton(winter_text("Нет", "cross"), callback_data='mat_no')]
     ])
-    await safe_send(update.message, f"{WINTER_EMOJIS['warning']} *Есть ли ненормативная лексика?*", keyboard)
+    await safe_send(update.message, f"{WINTER_EMOJIS['warning']} <b>Есть ли ненормативная лексика?</b>", keyboard)
     return MAT
 
 async def mat(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -717,29 +830,29 @@ async def mat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = str(query.from_user.id)
     user_data[user_id]['mat'] = 'Да' if query.data == 'mat_yes' else 'Нет'
-    await safe_edit(query, f"{WINTER_EMOJIS['sparkles']} *Промо текст \\(необязательно\\)*")
+    await safe_edit(query, f"{WINTER_EMOJIS['sparkles']} <b>Промо текст (необязательно)</b>")
     return PROMO
 
 async def promo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     user_data[user_id]['promo'] = clean(update.message.text)
-    await safe_send(update.message, f"{WINTER_EMOJIS['comment']} *Комментарий для модератора \\(необязательно\\)*")
+    await safe_send(update.message, f"{WINTER_EMOJIS['comment']} <b>Комментарий для модератора (необязательно)</b>")
     return COMMENT
 
 async def comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     user_data[user_id]['comment'] = clean(update.message.text)
     if user_data[user_id]['type'] == 'сингл':
-        await safe_send(update.message, f"{WINTER_EMOJIS['telegram']} *Ваш Telegram для связи*\n@username")
+        await safe_send(update.message, f"{WINTER_EMOJIS['telegram']} <b>Ваш Telegram для связи</b>\n@username")
         return SINGLE_TG
     else:
-        await safe_send(update.message, f"{WINTER_EMOJIS['list']} *Трек\\-лист альбома*\n1\\. Track 1")
+        await safe_send(update.message, f"{WINTER_EMOJIS['list']} <b>Трек-лист альбома</b>\n1. Track 1")
         return ALBUM_TRACKLIST
 
 async def album_tracklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.message.from_user.id)
     user_data[user_id]['tracklist'] = clean(update.message.text)
-    await safe_send(update.message, f"{WINTER_EMOJIS['telegram']} *Ваш Telegram для связи*\n@username")
+    await safe_send(update.message, f"{WINTER_EMOJIS['telegram']} <b>Ваш Telegram для связи</b>\n@username")
     return ALBUM_TG
 
 async def single_tg(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -757,10 +870,10 @@ async def album_tg(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_confirm(message, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(message.from_user.id)
     data = user_data[user_id]
-    text = f"{WINTER_EMOJIS['snowflake']} *ПРОВЕРЬТЕ АНКЕТУ:*\\.\n\n"
+    text = f"{WINTER_EMOJIS['snowflake']} <b>ПРОВЕРЬТЕ АНКЕТУ:</b>\n\n"
     for k, v in data.items():
         if k not in ['type', 'status']:
-            text += f"• *{k.capitalize()}:* {escape_md(v)}\n"
+            text += f"• <b>{k.capitalize()}:</b> {escape_html(v)}\n"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(winter_text("Отправить", "check"), callback_data='send')],
         [InlineKeyboardButton(winter_text("Назад", "cross"), callback_data='main')]
@@ -784,24 +897,27 @@ async def send_moderation(query, context: ContextTypes.DEFAULT_TYPE):
         'data': data.copy()
     }
 
+    # Клавиатура для модерации БЕЗ кнопки "Опубликовать"
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(winter_text("Одобрить", "check"), callback_data=f'approve_{user_id}_{idx}')],
-        [InlineKeyboardButton(winter_text("Отклонить", "cross"), callback_data=f'reject_{user_id}_{idx}')],
-        [InlineKeyboardButton(winter_text("Опубликовать", "published"), callback_data=f'publish_{user_id}_{idx}')]
+        [InlineKeyboardButton(winter_text("Отклонить", "cross"), callback_data=f'reject_{user_id}_{idx}')]
     ])
 
     msg = (
-        f"{WINTER_EMOJIS['snowflake']} *НОВАЯ АНКЕТА\\!* \\.\n"
-        f"От: @{escape_md(user.username) if user.username else 'нет'}\n"
-        f"ID: `{user_id}`\n"
-        f"Тип: {escape_md(data['type'])}\n\n"
+        f"{WINTER_EMOJIS['snowflake']} <b>НОВАЯ АНКЕТА!</b> \n"
+        f"От: @{escape_html(user.username) if user.username else 'нет'}\n"
+        f"ID: <code>{user_id}</code>\n"
+        f"Тип: {escape_html(data['type'])}\n\n"
     )
     for k, v in data.items():
         if k not in ['type', 'status', 'submission_time']:
-            msg += f"• *{k.capitalize()}:* {escape_md(v)}\n"
+            msg += f"• <b>{k.capitalize()}:</b> {escape_html(v)}\n"
     
     try:
-        moderation_msg = await context.bot.send_message(MODERATION_CHAT_ID, msg, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=keyboard)
+        moderation_msg = await context.bot.send_message(MODERATION_CHAT_ID, msg, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+        
+        # ЗАКРЕПЛЯЕМ сообщение автоматически
+        await context.bot.pin_chat_message(chat_id=MODERATION_CHAT_ID, message_id=moderation_msg.message_id)
         
         # Сохраняем ID сообщения для дальнейшего редактирования
         context.user_data['moderation_message_id'] = moderation_msg.message_id
@@ -826,10 +942,10 @@ async def send_moderation(query, context: ContextTypes.DEFAULT_TYPE):
     db[user_id].append(data.copy())
     save_db(db)
     
-    await safe_edit(query, f"{WINTER_EMOJIS['check']} *Анкета отправлена\\!* \\.\nОжидайте 12–72 часа\\.", parse_mode=ParseMode.MARKDOWN_V2)
+    await safe_edit(query, f"{WINTER_EMOJIS['check']} <b>Анкета отправлена!</b> \nОжидайте 12–72 часа.", parse_mode=ParseMode.HTML)
 
 # === ОБНОВЛЕНИЕ СООБЩЕНИЯ В МОДЕРАЦИИ ===
-async def update_moderation_message(context, user_id, idx, status, reason=None):
+async def update_moderation_message(context, user_id, idx, status, reason=None, moderator_username=None, moderator_comment=None):
     release = db[user_id][idx]
     
     # Создаем обновленное сообщение с сохранением исходной информации
@@ -847,28 +963,36 @@ async def update_moderation_message(context, user_id, idx, status, reason=None):
     
     # Форматируем дату с экранированием
     moderation_time = datetime.now().strftime('%d.%m.%Y %H:%M')
-    moderation_time_escaped = escape_md(moderation_time)
+    moderation_time_escaped = escape_html(moderation_time)
     
     msg = (
-        f"{status_emoji[status]} *АНКЕТА {status_text[status]}\\!* \n\n"
-        f"*Исходная информация:*\n"
-        f"От: @{escape_md(release.get('username', 'нет'))}\n"
-        f"ID: `{user_id}`\n"
-        f"Тип: {escape_md(release['type'])}\n\n"
+        f"{status_emoji[status]} <b>АНКЕТА {status_text[status]}!</b> \n\n"
+        f"<b>Исходная информация:</b>\n"
+        f"От: @{escape_html(release.get('username', 'нет'))}\n"
+        f"ID: <code>{user_id}</code>\n"
+        f"Тип: {escape_html(release['type'])}\n\n"
     )
     
     # Добавляем все поля анкеты
     for k, v in release.items():
         if k not in ['type', 'status', 'submission_time', 'username', 'moderation_time', 'publish_time', 'reject_reason', 'link_published']:
-            msg += f"• *{k.capitalize()}:* {escape_md(v)}\n"
+            msg += f"• <b>{k.capitalize()}:</b> {escape_html(v)}\n"
+    
+    # Добавляем информацию о модераторе
+    if moderator_username:
+        msg += f"\n<b>Модератор:</b> @{escape_html(moderator_username)}"
+    
+    # Добавляем комментарий модератора
+    if moderator_comment:
+        msg += f"\n<b>Комментарий модератора:</b> {escape_html(moderator_comment)}"
     
     # Добавляем информацию о статусе
     if status == 'rejected' and reason:
-        msg += f"\n*Причина отклонения:* {escape_md(reason)}"
+        msg += f"\n<b>Причина отклонения:</b> {escape_html(reason)}"
     elif status == 'published' and release.get('link_published'):
-        msg += f"\n*Ссылка на релиз:* {escape_md(release['link_published'])}"
+        msg += f"\n<b>Ссылка на релиз:</b> {escape_html(release['link_published'])}"
     
-    msg += f"\n\n*Время модерации:* {moderation_time_escaped}"
+    msg += f"\n\n<b>Время модерации:</b> {moderation_time_escaped}"
     
     # Обновляем сообщение в группе модерации (убираем кнопки)
     try:
@@ -876,11 +1000,62 @@ async def update_moderation_message(context, user_id, idx, status, reason=None):
             chat_id=MODERATION_CHAT_ID,
             message_id=context.user_data.get('moderation_message_id'),
             text=msg,
-            parse_mode=ParseMode.MARKDOWN_V2,
+            parse_mode=ParseMode.HTML,
             disable_web_page_preview=True
         )
     except Exception as e:
         print(f"Ошибка при обновлении сообщения: {e}")
+
+# === УПРОЩЕННАЯ ОБРАБОТКА ОДОБРЕНИЯ ===
+async def handle_approve_with_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        return
+    
+    if update.message.chat_id != MODERATION_CHAT_ID:
+        return
+        
+    replied_message = update.message.reply_to_message
+    comment_text = clean(update.message.text)
+    moderator_username = update.message.from_user.username or update.message.from_user.first_name
+    
+    # Проверяем, является ли это ответом на сообщение с запросом комментария
+    if "комментарий для одобрения" in replied_message.text.lower():
+        # Ищем соответствующую анкету в базе данных
+        for user_id, releases in db.items():
+            for idx, release in enumerate(releases):
+                if release.get('status') == 'pending':
+                    # Проверяем, соответствует ли это анкета текущему процессу модерации
+                    if context.user_data.get('moderation_user_id') == user_id and context.user_data.get('moderation_idx') == idx:
+                        # Одобряем релиз с комментарием
+                        release['status'] = 'approved'
+                        release['moderator'] = moderator_username
+                        release['moderator_comment'] = comment_text
+                        release['moderation_time'] = datetime.now().isoformat()
+                        save_db(db)
+                        
+                        # Обновляем сообщение в группе модерации
+                        await update_moderation_message(context, user_id, idx, 'approved', moderator_username=moderator_username, moderator_comment=comment_text)
+                        
+                        # Уведомляем пользователя
+                        try:
+                            await context.bot.send_message(
+                                int(user_id),
+                                f"{WINTER_EMOJIS['check']} <b>ВАШ РЕЛИЗ ОДОБРЕН!</b> \n\n"
+                                f"<b>{escape_html(release['name'])}</b>\n"
+                                f"<i>Тип:</i> {escape_html(release['type'])}\n"
+                                f"<i>Дата:</i> {escape_html(release['date'])}\n\n"
+                                f"<b>Комментарий модератора:</b> {escape_html(comment_text)}\n\n"
+                                f"Готов к публикации! {WINTER_EMOJIS['sparkles']}",
+                                parse_mode=ParseMode.HTML
+                            )
+                        except Exception as e:
+                            print(f"Ошибка отправки пользователю: {e}")
+                        
+                        await update.message.reply_text(
+                            f"{WINTER_EMOJIS['check']} Релиз одобрен с комментарием!",
+                            parse_mode=ParseMode.HTML
+                        )
+                        return
 
 # === ОБРАБОТКА ОТВЕТОВ НА СООБЩЕНИЯ ===
 async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -914,20 +1089,20 @@ async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         try:
                             await context.bot.send_message(
                                 int(user_id),
-                                f"{WINTER_EMOJIS['cross']} *ВАШ РЕЛИЗ ОТКЛОНЁН\\!* \\.\n\n"
-                                f"*{escape_md(release['name'])}*\n"
-                                f"_Тип:_ {escape_md(release['type'])}\n"
-                                f"_Дата:_ {escape_md(release['date'])}\n\n"
-                                f"*Причина:* {escape_md(reply_text)}\n\n"
-                                f"Можете исправить и отправить заново\\! {WINTER_EMOJIS['sparkles']}",
-                                parse_mode=ParseMode.MARKDOWN_V2
+                                f"{WINTER_EMOJIS['cross']} <b>ВАШ РЕЛИЗ ОТКЛОНЁН!</b> \n\n"
+                                f"<b>{escape_html(release['name'])}</b>\n"
+                                f"<i>Тип:</i> {escape_html(release['type'])}\n"
+                                f"<i>Дата:</i> {escape_html(release['date'])}\n\n"
+                                f"<b>Причина:</b> {escape_html(reply_text)}\n\n"
+                                f"Можете исправить и отправить заново! {WINTER_EMOJIS['sparkles']}",
+                                parse_mode=ParseMode.HTML
                             )
                         except Exception as e:
                             print(f"Ошибка отправки пользователю: {e}")
                         
                         await update.message.reply_text(
-                            f"{WINTER_EMOJIS['check']} Релиз отклонён с причиной\\!",
-                            parse_mode=ParseMode.MARKDOWN_V2
+                            f"{WINTER_EMOJIS['check']} Релиз отклонён с причиной!",
+                            parse_mode=ParseMode.HTML
                         )
                         return
 
@@ -948,60 +1123,57 @@ async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data['moderation_idx'] = idx
 
     if action == 'approve':
+        # Создаем клавиатуру с опцией комментария
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(winter_text("Одобрить без комментария", "check"), callback_data=f'approve_nocomment_{user_id}_{idx}')],
+            [InlineKeyboardButton(winter_text("Одобрить с комментарием", "comment"), callback_data=f'approve_withcomment_{user_id}_{idx}')],
+            [InlineKeyboardButton(winter_text("Отмена", "cross"), callback_data=f'cancel_{user_id}_{idx}')]
+        ])
+        
+        await safe_edit(query, f"{WINTER_EMOJIS['comment']} <b>Выберите тип одобрения:</b>", keyboard)
+
+    elif action == 'approve_nocomment':
+        # Одобряем без комментария
         release['status'] = 'approved'
+        release['moderator'] = query.from_user.username or query.from_user.first_name
         release['moderation_time'] = datetime.now().isoformat()
         save_db(db)
         
         # Обновляем сообщение в группе модерации
-        await update_moderation_message(context, user_id, idx, 'approved')
+        await update_moderation_message(context, user_id, idx, 'approved', moderator_username=release['moderator'])
         
+        # Уведомляем пользователя
         try:
             await context.bot.send_message(
                 int(user_id),
-                f"{WINTER_EMOJIS['check']} *ВАШ РЕЛИЗ ОДОБРЕН\\!* \\.\n\n"
-                f"*{escape_md(release['name'])}*\n"
-                f"_Тип:_ {escape_md(release['type'])}\n"
-                f"_Дата:_ {escape_md(release['date'])}\n\n"
-                f"Готов к публикации\\! {WINTER_EMOJIS['sparkles']}",
-                parse_mode=ParseMode.MARKDOWN_V2
+                f"{WINTER_EMOJIS['check']} <b>ВАШ РЕЛИЗ ОДОБРЕН!</b> \n\n"
+                f"<b>{escape_html(release['name'])}</b>\n"
+                f"<i>Тип:</i> {escape_html(release['type'])}\n"
+                f"<i>Дата:</i> {escape_html(release['date'])}\n\n"
+                f"Готов к публикации! {WINTER_EMOJIS['sparkles']}",
+                parse_mode=ParseMode.HTML
             )
         except Exception as e:
             print(f"Ошибка отправки пользователю: {e}")
+
+    elif action == 'approve_withcomment':
+        # Запрашиваем комментарий
+        await safe_edit(query, f"{WINTER_EMOJIS['comment']} <b>Введите комментарий для одобрения ОТВЕТОМ на это сообщение:</b>")
 
     elif action == 'reject':
         # Сохраняем данные для обработки ответа
         context.user_data['moderation_user_id'] = user_id
         context.user_data['moderation_idx'] = idx
         
-        await safe_edit(query, f"{WINTER_EMOJIS['cross']} *Введите причину отклонения ОТВЕТОМ на это сообщение:*")
+        await safe_edit(query, f"{WINTER_EMOJIS['cross']} <b>Введите причину отклонения ОТВЕТОМ на это сообщение:</b>")
 
-    elif action == 'publish':
-        release['status'] = 'published'
-        release['link_published'] = "https://t.me/cxrnermusic/123"
-        release['publish_time'] = datetime.now().isoformat()
-        save_db(db)
-        
-        # Обновляем сообщение в группе модерации
-        await update_moderation_message(context, user_id, idx, 'published')
-        
-        post = f"*{escape_md(release['name'])}* \\- {escape_md(release['nick'])}\n[Слушать]({release['link_published']}) {WINTER_EMOJIS['music']}"
-        try:
-            await context.bot.send_message(CHANNEL, post, parse_mode=ParseMode.MARKDOWN_V2)
-        except Exception as e:
-            print(f"Ошибка публикации в канале: {e}")
-        
-        try:
-            await context.bot.send_message(
-                int(user_id),
-                f"{WINTER_EMOJIS['published']} *ВАШ РЕЛИЗ ОПУБЛИКОВАН\\!* \\.\n\n"
-                f"*{escape_md(release['name'])}*\n"
-                f"_Тип:_ {escape_md(release['type'])}\n"
-                f"_Дата:_ {escape_md(release['date'])}\n\n"
-                f"[Слушать]({release['link_published']}) {WINTER_EMOJIS['headphones']}",
-                parse_mode=ParseMode.MARKDOWN_V2
-            )
-        except Exception as e:
-            print(f"Ошибка отправки пользователю: {e}")
+    elif action == 'cancel':
+        # Возвращаемся к исходной клавиатуре
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(winter_text("Одобрить", "check"), callback_data=f'approve_{user_id}_{idx}')],
+            [InlineKeyboardButton(winter_text("Отклонить", "cross"), callback_data=f'reject_{user_id}_{idx}')]
+        ])
+        await safe_edit(query, f"{WINTER_EMOJIS['snowflake']} <b>АНКЕТА ДЛЯ МОДЕРАЦИИ:</b>\n\nОт: @{escape_html(release.get('username', 'нет'))}\nID: <code>{user_id}</code>", keyboard)
 
 # === ОБРАБОТКА ОШИБОК ===
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -1017,8 +1189,10 @@ def main():
     app.add_handler(CommandHandler('moderation_backup', moderation_backup_cmd))
     app.add_handler(CommandHandler('stats', admin_stats_cmd))
     app.add_handler(CommandHandler('broadcast', broadcast_cmd))
-    app.add_handler(CallbackQueryHandler(moderation_handler, pattern='^(approve|reject|publish)_'))
+    app.add_handler(CommandHandler('cleanbase', cleanbase_cmd))
+    app.add_handler(CallbackQueryHandler(moderation_handler, pattern='^(approve|reject|approve_nocomment|approve_withcomment|cancel)_'))
     app.add_handler(MessageHandler(filters.TEXT & filters.REPLY & filters.ChatType.GROUPS, handle_reply))
+    app.add_handler(MessageHandler(filters.TEXT & filters.REPLY & filters.ChatType.GROUPS, handle_approve_with_comment))
     app.add_error_handler(error_handler)
 
     conv = ConversationHandler(
