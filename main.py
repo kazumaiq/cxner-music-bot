@@ -1,9 +1,7 @@
 import json
 import os
-import threading
-import urllib.parse
 from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
@@ -20,10 +18,6 @@ ARTISTS_CHAT = "https://t.me/+oVmX3_dkyWJhNjJi"
 CHANNEL = "https://t.me/cxrnermusic"
 DB_FILE = "releases.json"
 MODERATION_DB_FILE = "moderation_releases.json"
-# URL для Mini App (замените на ваш реальный URL bothost.ru)
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://cxrnerlink.ct.ws/panel.html")
-# Username бота (для ссылок в Mini App)
-BOT_USERNAME = os.getenv("BOT_USERNAME", "moder_cxrner_bot")
 
 # === ЗИМНИЕ ЭМОДЗИ ===
 WINTER_EMOJIS = {
@@ -137,7 +131,6 @@ def is_admin(user_id):
 # === ГЛАВНОЕ МЕНЮ (/start) ===
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(winter_text("📱 Панель управления", "settings"), web_app=WebAppInfo(url=WEBAPP_URL))],
         [InlineKeyboardButton(winter_text("Отправить релиз", "music"), callback_data='report')],
         [InlineKeyboardButton(winter_text("Мои релизы", "notes"), callback_data='my_releases')],
         [InlineKeyboardButton(winter_text("Канал", "published"), url=CHANNEL)],
@@ -152,16 +145,27 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 {escape_html("Выберите действие:")}
 """
     
-    await update.message.reply_text(
-        welcome_text,
-        reply_markup=keyboard,
-        parse_mode=ParseMode.HTML
-    )
+    if update.message:
+        await update.message.reply_text(
+            welcome_text,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+    elif update.callback_query:
+        await safe_edit(update.callback_query, welcome_text, reply_markup=keyboard)
     return REPORT
 
 # === МОИ РЕЛИЗЫ (/my) ===
 async def my_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.message.from_user.id)
+    # Поддержка как message, так и callback_query
+    if update.message:
+        message = update.message
+        user_id = str(update.message.from_user.id)
+    elif update.callback_query:
+        message = update.callback_query.message
+        user_id = str(update.callback_query.from_user.id)
+    else:
+        return
     releases = db.get(user_id, [])
     
     total = len(releases)
@@ -180,7 +184,7 @@ async def my_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     if not releases:
-        await update.message.reply_text(
+        await message.reply_text(
             f"{stats}\n\n<i>У вас пока нет релизов.</i>\n\n/start {WINTER_EMOJIS['gift']} отправить первый!",
             parse_mode=ParseMode.HTML
         )
@@ -213,13 +217,27 @@ async def my_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(winter_text("Отправить новый", "music"), callback_data='report')],
         [InlineKeyboardButton(winter_text("Меню", "tree"), callback_data='main')]
     ])
-    await update.message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    await message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 # === РАСШИРЕННАЯ АДМИН-ПАНЕЛЬ (/admin) ===
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
+    # Поддержка как message, так и callback_query
+    if update.message:
+        user_id = update.message.from_user.id
+        message_target = update.message
+        send_method = update.message.reply_text
+    elif update.callback_query:
+        user_id = update.callback_query.from_user.id
+        message_target = update.callback_query.message
+        send_method = lambda text, **kwargs: safe_edit(update.callback_query, text, **kwargs)
+    else:
+        return
+    
     if not is_admin(user_id):
-        await update.message.reply_text("Доступ запрещён.")
+        if update.message:
+            await update.message.reply_text("Доступ запрещён.")
+        elif update.callback_query:
+            await update.callback_query.answer("Доступ запрещён", show_alert=True)
         return
 
     # Статистика
@@ -284,13 +302,27 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     ])
     
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    if update.message:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    elif update.callback_query:
+        await safe_edit(update.callback_query, text, reply_markup=keyboard)
 
 # === СТАТИСТИКА ДЛЯ АДМИНА ===
 async def admin_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
+    # Поддержка как message, так и callback_query
+    if update.message:
+        user_id = update.message.from_user.id
+    elif update.callback_query:
+        user_id = update.callback_query.from_user.id
+        query = update.callback_query
+    else:
+        return
+    
     if not is_admin(user_id):
-        await update.message.reply_text("Доступ запрещён.")
+        if update.message:
+            await update.message.reply_text("Доступ запрещён.")
+        elif update.callback_query:
+            await update.callback_query.answer("Доступ запрещён", show_alert=True)
         return
 
     # Подробная статистика
@@ -357,7 +389,10 @@ async def admin_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(winter_text("Назад", "tree"), callback_data='admin_back')]
     ])
     
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    if update.message:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    elif update.callback_query:
+        await safe_edit(update.callback_query, text, reply_markup=keyboard)
 
 # === СПИСОК ВСЕХ РЕЛИЗОВ ===
 async def all_releases_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -452,16 +487,28 @@ async def pending_releases_list(update: Update, context: ContextTypes.DEFAULT_TY
 
 # === ОЧИСТКА БАЗЫ ДАННЫХ ===
 async def cleanup_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not is_admin(query.from_user.id):
-        await query.answer("Доступ запрещён", show_alert=True)
+    # Поддержка как message, так и callback_query
+    if update.message:
+        user_id = update.message.from_user.id
+        query = None
+    elif update.callback_query:
+        user_id = update.callback_query.from_user.id
+        query = update.callback_query
+    else:
+        return
+    
+    if not is_admin(user_id):
+        if update.message:
+            await update.message.reply_text("Доступ запрещён.")
+        elif query:
+            await query.answer("Доступ запрещён", show_alert=True)
         return
 
     # Удаляем пользователей без релизов
     users_before = len(db)
-    empty_users = [user_id for user_id, releases in db.items() if not releases]
-    for user_id in empty_users:
-        del db[user_id]
+    empty_users = [uid for uid, releases in db.items() if not releases]
+    for uid in empty_users:
+        del db[uid]
     
     users_after = len(db)
     users_removed = users_before - users_after
@@ -479,13 +526,27 @@ async def cleanup_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton(winter_text("Назад", "tree"), callback_data='admin_back')]
     ])
     
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    if update.message:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    elif query:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 # === УДАЛЕНИЕ ВСЕХ РЕЛИЗОВ ===
 async def cleanbase_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
+    # Поддержка как message, так и callback_query
+    if update.message:
+        user_id = update.message.from_user.id
+    elif update.callback_query:
+        user_id = update.callback_query.from_user.id
+        query = update.callback_query
+    else:
+        return
+    
     if not is_admin(user_id):
-        await update.message.reply_text("Доступ запрещён.")
+        if update.message:
+            await update.message.reply_text("Доступ запрещён.")
+        elif update.callback_query:
+            await update.callback_query.answer("Доступ запрещён", show_alert=True)
         return
 
     keyboard = InlineKeyboardMarkup([
@@ -503,7 +564,10 @@ async def cleanbase_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Вы уверены, что хотите продолжить?"
     )
     
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    if update.message:
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+    elif update.callback_query:
+        await safe_edit(update.callback_query, text, reply_markup=keyboard)
 
 async def cleanbase_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -710,7 +774,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return REPORT
 
     if data == 'main':
-        return await start_cmd(query, context)
+        return await start_cmd(update, context)
         
     if data == 'get_db':
         await send_database_backup(query, context)
@@ -738,7 +802,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     if data == 'admin_back':
-        await admin_panel(query, context)
+        # Создаем фейковый update для admin_panel
+        fake_update = Update(update_id=update.update_id, callback_query=query)
+        await admin_panel(fake_update, context)
         return
         
     if data == 'broadcast_menu':
@@ -1197,6 +1263,7 @@ def main():
     app.add_handler(CommandHandler('stats', admin_stats_cmd))
     app.add_handler(CommandHandler('broadcast', broadcast_cmd))
     app.add_handler(CommandHandler('cleanbase', cleanbase_cmd))
+    app.add_handler(CommandHandler('cleanup', cleanup_database))
     app.add_handler(CallbackQueryHandler(moderation_handler, pattern='^(approve|reject|approve_nocomment|approve_withcomment|cancel)_'))
     app.add_handler(MessageHandler(filters.TEXT & filters.REPLY & filters.ChatType.GROUPS, handle_reply))
     app.add_handler(MessageHandler(filters.TEXT & filters.REPLY & filters.ChatType.GROUPS, handle_approve_with_comment))
@@ -1236,130 +1303,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-# === HTTP СЕРВЕР ДЛЯ MINI APP ===
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
-
-class WebAppHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        parsed_path = urlparse(self.path)
-        
-        # API endpoint для получения релизов
-        if parsed_path.path == '/api/releases':
-            self.handle_api_releases(parsed_path.query)
-            return
-        
-        # API endpoint для получения конфига
-        if parsed_path.path == '/api/config':
-            self.handle_api_config()
-            return
-        
-        # Отдаем HTML страницу
-        if parsed_path.path == '/panel.html' or parsed_path.path == '/':
-            self.serve_html()
-            return
-        
-        # Health check
-        if parsed_path.path == '/health':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(b'OK')
-            return
-        
-        # 404 для остальных запросов
-        self.send_response(404)
-        self.end_headers()
-        self.wfile.write(b'Not Found')
-    
-    def handle_api_releases(self, query_string):
-        try:
-            params = parse_qs(query_string)
-            user_id = params.get('user_id', [None])[0]
-            
-            if not user_id:
-                self.send_json_response({'error': 'user_id required'}, 400)
-                return
-            
-            # Загружаем БД
-            releases = load_db().get(user_id, [])
-            
-            # Вычисляем статистику
-            stats = {
-                'total': len(releases),
-                'pending': sum(1 for r in releases if r.get('status', 'pending') == 'pending'),
-                'approved': sum(1 for r in releases if r.get('status') == 'approved'),
-                'rejected': sum(1 for r in releases if r.get('status') == 'rejected'),
-                'published': sum(1 for r in releases if r.get('status') == 'published')
-            }
-            
-            # Сортируем релизы по дате отправки (новые первые)
-            sorted_releases = sorted(
-                releases,
-                key=lambda x: x.get('submission_time', ''),
-                reverse=True
-            )
-            
-            response = {
-                'stats': stats,
-                'releases': sorted_releases
-            }
-            
-            self.send_json_response(response, 200)
-            
-        except Exception as e:
-            print(f"Error in API: {e}")
-            self.send_json_response({'error': str(e)}, 500)
-    
-    def handle_api_config(self):
-        """Возвращает конфигурацию для Mini App"""
-        config = {
-            'bot_username': BOT_USERNAME
-        }
-        self.send_json_response(config, 200)
-    
-    def serve_html(self):
-        try:
-            html_path = os.path.join(os.path.dirname(__file__), 'panel.html')
-            if not os.path.exists(html_path):
-                self.send_response(404)
-                self.end_headers()
-                self.wfile.write(b'HTML file not found')
-                return
-            
-            with open(html_path, 'r', encoding='utf-8') as f:
-                html_content = f.read()
-            
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html; charset=utf-8')
-            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
-            self.end_headers()
-            self.wfile.write(html_content.encode('utf-8'))
-            
-        except Exception as e:
-            print(f"Error serving HTML: {e}")
-            self.send_response(500)
-            self.end_headers()
-            self.wfile.write(f'Error: {str(e)}'.encode('utf-8'))
-    
-    def send_json_response(self, data, status_code=200):
-        self.send_response(status_code)
-        self.send_header('Content-type', 'application/json; charset=utf-8')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.end_headers()
-        self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
-    
-    def log_message(self, format, *args):
-        # Отключаем логирование каждого запроса
-        pass
-
-def run_webapp_server():
-    # Используем порт из переменной окружения или 10000 по умолчанию
-    PORT = int(os.getenv("PORT", "10000"))
-    server = HTTPServer(('0.0.0.0', PORT), WebAppHandler)
-    print(f"🌐 WebApp сервер запущен на порту {PORT}")
-    server.serve_forever()
-
-# Запускаем HTTP сервер в отдельном потоке
-threading.Thread(target=run_webapp_server, daemon=True).start()
