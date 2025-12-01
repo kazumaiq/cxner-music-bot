@@ -1,7 +1,9 @@
 import json
 import os
+import threading
+import urllib.parse
 from datetime import datetime, timedelta
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
@@ -18,6 +20,10 @@ ARTISTS_CHAT = "https://t.me/+oVmX3_dkyWJhNjJi"
 CHANNEL = "https://t.me/cxrnermusic"
 DB_FILE = "releases.json"
 MODERATION_DB_FILE = "moderation_releases.json"
+# URL для Mini App (замените на ваш реальный URL bothost.ru)
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://cxrnerlink.ct.ws/panel.html")
+# Username бота (для ссылок в Mini App)
+BOT_USERNAME = os.getenv("BOT_USERNAME", "moder_cxrner_bot")
 
 # === ЗИМНИЕ ЭМОДЗИ ===
 WINTER_EMOJIS = {
@@ -131,6 +137,7 @@ def is_admin(user_id):
 # === ГЛАВНОЕ МЕНЮ (/start) ===
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(winter_text("📱 Панель управления", "settings"), web_app=WebAppInfo(url=WEBAPP_URL))],
         [InlineKeyboardButton(winter_text("Отправить релиз", "music"), callback_data='report')],
         [InlineKeyboardButton(winter_text("Мои релизы", "notes"), callback_data='my_releases')],
         [InlineKeyboardButton(winter_text("Канал", "published"), url=CHANNEL)],
@@ -164,22 +171,22 @@ async def my_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     published = sum(1 for r in releases if r.get('status') == 'published')
 
     stats = (
-        f"{winter_header('Твоя статистика')}\n\n"
+        f"{winter_header('Твоя статистика')}\n"
         f"{WINTER_EMOJIS['notes']} Всего релизов: <b>{total}</b>\n"
         f"{WINTER_EMOJIS['waiting']} Ожидает: <b>{pending}</b>\n"
         f"{WINTER_EMOJIS['check']} Одобрено: <b>{approved}</b>\n"
         f"{WINTER_EMOJIS['cross']} Отклонено: <b>{rejected}</b>\n"
-        f"{WINTER_EMOJIS['published']} Опубликовано: <b>{published}</b>\n\n"
+        f"{WINTER_EMOJIS['published']} Опубликовано: <b>{published}</b>"
     )
 
     if not releases:
         await update.message.reply_text(
-            f"{escape_html(stats)}<i>У вас пока нет релизов.</i>\n\n/start {WINTER_EMOJIS['gift']} отправить первый!",
+            f"{stats}\n\n<i>У вас пока нет релизов.</i>\n\n/start {WINTER_EMOJIS['gift']} отправить первый!",
             parse_mode=ParseMode.HTML
         )
         return
 
-    text = f"{escape_html(stats)}<b>Твои релизы:</b>\n\n"
+    text = f"{stats}\n\n<b>Твои релизы:</b>\n\n"
     status_emoji = {"pending": WINTER_EMOJIS['waiting'], "approved": WINTER_EMOJIS['check'], 
                    "rejected": WINTER_EMOJIS['cross'], "published": WINTER_EMOJIS['published']}
     
@@ -1230,17 +1237,129 @@ def main():
 if __name__ == '__main__':
     main()
 
-# В конец main.py
-import threading
+# === HTTP СЕРВЕР ДЛЯ MINI APP ===
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
-class Handler(BaseHTTPRequestHandler):
+class WebAppHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
+        parsed_path = urlparse(self.path)
+        
+        # API endpoint для получения релизов
+        if parsed_path.path == '/api/releases':
+            self.handle_api_releases(parsed_path.query)
+            return
+        
+        # API endpoint для получения конфига
+        if parsed_path.path == '/api/config':
+            self.handle_api_config()
+            return
+        
+        # Отдаем HTML страницу
+        if parsed_path.path == '/panel.html' or parsed_path.path == '/':
+            self.serve_html()
+            return
+        
+        # Health check
+        if parsed_path.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
+            return
+        
+        # 404 для остальных запросов
+        self.send_response(404)
         self.end_headers()
-        self.wfile.write(b"OK")
+        self.wfile.write(b'Not Found')
+    
+    def handle_api_releases(self, query_string):
+        try:
+            params = parse_qs(query_string)
+            user_id = params.get('user_id', [None])[0]
+            
+            if not user_id:
+                self.send_json_response({'error': 'user_id required'}, 400)
+                return
+            
+            # Загружаем БД
+            releases = load_db().get(user_id, [])
+            
+            # Вычисляем статистику
+            stats = {
+                'total': len(releases),
+                'pending': sum(1 for r in releases if r.get('status', 'pending') == 'pending'),
+                'approved': sum(1 for r in releases if r.get('status') == 'approved'),
+                'rejected': sum(1 for r in releases if r.get('status') == 'rejected'),
+                'published': sum(1 for r in releases if r.get('status') == 'published')
+            }
+            
+            # Сортируем релизы по дате отправки (новые первые)
+            sorted_releases = sorted(
+                releases,
+                key=lambda x: x.get('submission_time', ''),
+                reverse=True
+            )
+            
+            response = {
+                'stats': stats,
+                'releases': sorted_releases
+            }
+            
+            self.send_json_response(response, 200)
+            
+        except Exception as e:
+            print(f"Error in API: {e}")
+            self.send_json_response({'error': str(e)}, 500)
+    
+    def handle_api_config(self):
+        """Возвращает конфигурацию для Mini App"""
+        config = {
+            'bot_username': BOT_USERNAME
+        }
+        self.send_json_response(config, 200)
+    
+    def serve_html(self):
+        try:
+            html_path = os.path.join(os.path.dirname(__file__), 'panel.html')
+            if not os.path.exists(html_path):
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b'HTML file not found')
+                return
+            
+            with open(html_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.end_headers()
+            self.wfile.write(html_content.encode('utf-8'))
+            
+        except Exception as e:
+            print(f"Error serving HTML: {e}")
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(f'Error: {str(e)}'.encode('utf-8'))
+    
+    def send_json_response(self, data, status_code=200):
+        self.send_response(status_code)
+        self.send_header('Content-type', 'application/json; charset=utf-8')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+    
+    def log_message(self, format, *args):
+        # Отключаем логирование каждого запроса
+        pass
 
-def run_server():
-    HTTPServer(('0.0.0.0', 10000), Handler).serve_forever()
+def run_webapp_server():
+    # Используем порт из переменной окружения или 10000 по умолчанию
+    PORT = int(os.getenv("PORT", "10000"))
+    server = HTTPServer(('0.0.0.0', PORT), WebAppHandler)
+    print(f"🌐 WebApp сервер запущен на порту {PORT}")
+    server.serve_forever()
 
-threading.Thread(target=run_server, daemon=True).start()
+# Запускаем HTTP сервер в отдельном потоке
+threading.Thread(target=run_webapp_server, daemon=True).start()
