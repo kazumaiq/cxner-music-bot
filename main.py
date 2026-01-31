@@ -147,6 +147,25 @@ def load_moderation_db():
 def save_moderation_db(moderation_db_obj):
     _atomic_write_json(MODERATION_DB_FILE, moderation_db_obj)
 
+def update_moderation_record(user_id, idx, release_data):
+    """Обновляет запись в moderation_releases.json при изменении статуса"""
+    try:
+        moderation_db = load_moderation_db()
+        if 'moderation_messages' in moderation_db:
+            for msg in moderation_db['moderation_messages']:
+                if msg.get('user_id') == user_id:
+                    # Сравниваем submission_time как ID релиза
+                    if msg.get('submission_time') == release_data.get('submission_time'):
+                        # Обновляем статус
+                        msg['status'] = release_data.get('status')
+                        msg['moderator'] = release_data.get('moderator')
+                        msg['moderation_time'] = release_data.get('moderation_time')
+                        msg['reject_reason'] = release_data.get('reject_reason')
+                        save_moderation_db(moderation_db)
+                        break
+    except Exception as e:
+        print(f"Ошибка при обновлении записи в модерации: {e}")
+
 # === ИСТОРИЯ ИЗМЕНЕНИЙ ===
 def load_history():
     return _load_json_or_default(HISTORY_FILE, {})
@@ -236,7 +255,11 @@ def _looks_like_drive_link(text: str) -> bool:
     if not _looks_like_url(text):
         return False
     lower = text.lower()
-    return "drive.google.com" in lower or "docs.google.com" in lower or "drive.google" in lower
+    # Проверяем наличие drive.google.com или docs.google.com в любой части URL
+    return ("drive.google.com" in lower or 
+            "docs.google.com" in lower or 
+            "drive.google" in lower or
+            "/d/" in text)  # Google Drive файл/папка всегда содержит /d/
 
 
 def _looks_like_yandex_music_link(text: str) -> bool:
@@ -1354,24 +1377,56 @@ def _format_status_append(status: str, moderator_username: str | None = None, re
     return "\n".join(lines)
 
 
-async def _append_status_to_moderation_message(context: ContextTypes.DEFAULT_TYPE, message_id: int, original_text: str, status: str, moderator_username: str | None = None, reason: str | None = None, comment: str | None = None):
-    final_text = original_text + _format_status_append(status, moderator_username=moderator_username, reason=reason, comment=comment)
-    for attempt in range(5):
+async def _append_status_to_moderation_message(context: ContextTypes.DEFAULT_TYPE, message_id: int, original_text: str, status: str, moderator_username: str | None = None, reason: str | None = None, comment: str | None = None, reply_markup=None):
+    """Добавляет служебный блок статуса и пытается отредактировать исходное сообщение,
+    при этом сохраняя клавиатуру (через параметр `reply_markup`). Если редактировать нельзя —
+    Fall back: отправляем отдельное сообщение-штамп со статусом (как раньше).
+    """
+    status_text = _format_status_append(status, moderator_username=moderator_username, reason=reason, comment=comment)
+
+    # Короткий статус для шапки анкеты
+    status_short = {
+        STATUS_ON_UPLOAD: "На отгрузке",
+        STATUS_MODERATION: "На модерации",
+        STATUS_APPROVED: "Одобрено",
+        STATUS_REJECTED: "Отклонено",
+        STATUS_NEEDS_FIX: "Требует правок",
+        STATUS_DELETED: "Удалено",
+    }.get(status, status)
+
+    emoji = {
+        STATUS_ON_UPLOAD: WINTER_EMOJIS.get('upload', ''),
+        STATUS_MODERATION: WINTER_EMOJIS.get('brain', WINTER_EMOJIS.get('waiting')),
+        STATUS_APPROVED: WINTER_EMOJIS.get('check', ''),
+        STATUS_REJECTED: WINTER_EMOJIS.get('cross', ''),
+        STATUS_NEEDS_FIX: WINTER_EMOJIS.get('warning', WINTER_EMOJIS.get('waiting')),
+        STATUS_DELETED: WINTER_EMOJIS.get('delete', ''),
+    }.get(status, '')
+
+    header = f"{emoji} <b>СТАТУС: {escape_html(status_short)}</b>\n\n"
+
+    # Попробуем отредактировать исходное сообщение, добавив шапку статуса и сохранив клавиатуру
+    try:
+        await context.bot.edit_message_text(
+            chat_id=MODERATION_CHAT_ID,
+            message_id=message_id,
+            text=header + (original_text or ""),
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        # Если редактировать нельзя (например, срок истёк) — шлём отдельным сообщением-штампом
         try:
-            await context.bot.edit_message_text(
+            await context.bot.send_message(
                 chat_id=MODERATION_CHAT_ID,
-                message_id=message_id,
-                text=final_text,
+                text=status_text,
                 parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
+                reply_to_message_id=message_id,
             )
-            return
-        except Exception as e:
-            if _is_remote_protocol_error(e) or isinstance(e, TimedOut):
-                await asyncio.sleep(1 + attempt)
-                continue
-            print(f"❌ _append_status_to_moderation_message: {e}")
-            return
+        except Exception as e2:
+            if not (_is_remote_protocol_error(e2) or isinstance(e2, TimedOut)):
+                print(f"❌ _append_status_to_moderation_message: {e2}")
 
 
 # === CALLBACK-РОУТЕР (глобально) ===
@@ -1409,6 +1464,11 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == 'single':
         user_data[user_id] = {"type": "сингл", "status": "pending"}
+        await safe_edit(query, f"{WINTER_EMOJIS['notes']} <b>СИНГЛ</b>\n\n<b>1. Название релиза</b>\nПример: Lost in the Void")
+        return NAME
+
+    if data == 'album':
+        user_data[user_id] = {"type": "альбом", "status": "pending"}
         await safe_edit(query, f"{WINTER_EMOJIS['notes']} <b>АЛЬБОМ</b>\n\n<b>1. Название релиза</b>\nПример: Lost in the Void")
         return NAME
 
@@ -1617,6 +1677,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await my_cmd(update, context)
         return
     
+    # NOTE: Обработчик для изменения статуса релиза артистом (окно выбора статусов для модерации)
     if data.startswith('delete_release_'):
         # Мягкое удаление релиза пользователем (пометка, без физического удаления)
         parts = data.split('_', 3)  # delete_release_userid_idx
@@ -2077,6 +2138,27 @@ async def send_moderation(query, context: ContextTypes.DEFAULT_TYPE):
     data["username"] = user.username or ""
     db[user_id].append(data.copy())
     save_db(db)
+    # Добавляем шапку статуса в исходную анкету (чтобы вверху была текущая отметка статуса)
+    try:
+        await _append_status_to_moderation_message(context, moderation_msg.message_id, msg, data.get('status', STATUS_ON_UPLOAD), reply_markup=moderation_msg.reply_markup)
+    except Exception as e:
+        print(f"Ошибка при добавлении шапки статуса: {e}")
+    
+    # Отправляем сообщение с кнопкой для добавления UPC на все релизы
+    try:
+        upc_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📦 Присвоить UPC", callback_data=f"m_add_upc_{user_id}_{idx}")]
+        ])
+        await context.bot.send_message(
+            chat_id=MODERATION_CHAT_ID,
+            text="💾 <b>Добавьте UPC код для этого релиза</b>\n\n"
+                 "Нажмите кнопку и ответьте UPC кодом на исходное сообщение анкеты.",
+            reply_to_message_id=moderation_msg.message_id,
+            parse_mode=ParseMode.HTML,
+            reply_markup=upc_keyboard
+        )
+    except Exception as e:
+        print(f"Ошибка отправки кнопки UPC: {e}")
     
     await safe_edit(query, f"{WINTER_EMOJIS['check']} <b>Анкета отправлена!</b>\nОжидайте 12–72 часа.", parse_mode=ParseMode.HTML)
 
@@ -2133,8 +2215,7 @@ async def manual_reject_handler(update: Update, context: ContextTypes.DEFAULT_TY
             break
     
     if not user_id or idx is None:
-        await update.message.reply_text("❌ Не удалось найти анкету. Ответьте на сообщение с анкетой бота.")
-        return
+        return  # Молчаливо игнорируем обычные сообщения
     
     release = db[user_id][idx]
     
@@ -2154,6 +2235,7 @@ async def manual_reject_handler(update: Update, context: ContextTypes.DEFAULT_TY
     release["moderation_time"] = datetime.now().isoformat()
     add_history_entry(user_id, idx, old_status, STATUS_REJECTED, update.message.from_user.id, moderator_username, reject_reason)
     save_db(db)
+    update_moderation_record(user_id, idx, release)
     
     # MANUAL_REJECT: Удаляем кнопки у исходного сообщения анкеты
     try:
@@ -2173,7 +2255,8 @@ async def manual_reject_handler(update: Update, context: ContextTypes.DEFAULT_TY
         original,
         STATUS_REJECTED,
         moderator_username=moderator_username,
-        reason=reject_reason
+        reason=reject_reason,
+        reply_markup=None
     )
     
     # MANUAL_REJECT: Отправляем уведомление артисту
@@ -2227,15 +2310,9 @@ async def add_upc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             break
     
     if not user_id or idx is None:
-        await update.message.reply_text("❌ Не удалось найти анкету. Ответьте на сообщение с анкетой бота.")
-        return
+        return  # Молчаливо игнорируем обычные сообщения
     
     release = db[user_id][idx]
-    
-    # Проверяем что релиз одобрен
-    if release.get("status") != STATUS_APPROVED:
-        await update.message.reply_text(f"❌ Можно добавлять UPC только одобренным релизам (текущий статус: {release.get('status')})")
-        return
     
     # Получаем UPC из сообщения
     upc_code = clean(update.message.text)
@@ -2248,9 +2325,10 @@ async def add_upc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ UPC должен быть числовым кодом (обычно 12-14 цифр)")
         return
     
-    # Сохраняем UPC
+    # Сохраняем UPC в релизе
     release["upc"] = upc_code
     save_db(db)
+    update_moderation_record(user_id, idx, release)
     
     # Уведомляем модератора
     await update.message.reply_text(f"{WINTER_EMOJIS['check']} UPC код <code>{upc_code}</code> добавлен и сохранен!")
@@ -2279,13 +2357,26 @@ async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     
     try:
-        # Формат: m_*_USERID_IDX
+        # Разбор callback_data. Поддерживаем случаи типа:
+        # m_upload_<user>_<idx>
+        # m_rejectreason_<user>_<idx>_<reason_idx>
+        # m_add_upc_<user>_<idx>
         parts = query.data.split("_")
         if len(parts) < 4 or parts[0] != "m":
             return
-        action = parts[1]
-        user_id = parts[2]
-        idx = int(parts[3])
+        # Специальный случай: m_add_upc_<user>_<idx>
+        if parts[1] == 'add' and len(parts) >= 5 and parts[2] == 'upc':
+            action = 'add_upc'
+            user_id = parts[3]
+            idx = int(parts[4])
+        else:
+            action = parts[1]
+            user_id = parts[2]
+            try:
+                idx = int(parts[3])
+            except Exception:
+                await query.answer("Релиз не найден", show_alert=True)
+                return
         
         if user_id not in db:
             await query.answer("Релиз не найден", show_alert=True)
@@ -2308,10 +2399,11 @@ async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             release["moderation_time"] = datetime.now().isoformat()
             add_history_entry(user_id, idx, old_status, STATUS_ON_UPLOAD, query.from_user.id, moderator_name)
             save_db(db)
+            update_moderation_record(user_id, idx, release)
 
             # Обновляем сообщение в модерации
             original = release.get("moderation_original_text") or (query.message.text or "")
-            await _append_status_to_moderation_message(context, query.message.message_id, original, STATUS_ON_UPLOAD, moderator_username=moderator_name)
+            await _append_status_to_moderation_message(context, query.message.message_id, original, STATUS_ON_UPLOAD, moderator_username=moderator_name, reply_markup=query.message.reply_markup)
             
             # Уведомление артисту
             try:
@@ -2331,7 +2423,20 @@ async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except Exception as e:
                 print(f"Ошибка отправки уведомления на отгрузку: {e}")
             
-            # Кнопки остаются активны (промежуточный статус)
+            # Восстанавливаем кнопки статусов (промежуточный статус - кнопки остаются активны)
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🕓 На отгрузке", callback_data=f"m_upload_{user_id}_{idx}"),
+                    InlineKeyboardButton("🧠 Модерация", callback_data=f"m_moderate_{user_id}_{idx}"),
+                    InlineKeyboardButton("✅ Принято", callback_data=f"m_approve_{user_id}_{idx}")
+                ],
+                [
+                    InlineKeyboardButton("❌ Отклонить", callback_data=f"m_reject_{user_id}_{idx}"),
+                    InlineKeyboardButton("✏️ На исправлении", callback_data=f"m_needfix_{user_id}_{idx}"),
+                    InlineKeyboardButton("🗑 Удален", callback_data=f"m_delete_{user_id}_{idx}")
+                ],
+            ])
+            await safe_edit_reply_markup(query, reply_markup=keyboard)
             return
 
         if action == "moderate":
@@ -2342,10 +2447,11 @@ async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             release["moderation_time"] = datetime.now().isoformat()
             add_history_entry(user_id, idx, old_status, STATUS_MODERATION, query.from_user.id, moderator_name)
             save_db(db)
+            update_moderation_record(user_id, idx, release)
 
             # Обновляем сообщение в модерации
             original = release.get("moderation_original_text") or (query.message.text or "")
-            await _append_status_to_moderation_message(context, query.message.message_id, original, STATUS_MODERATION, moderator_username=moderator_name)
+            await _append_status_to_moderation_message(context, query.message.message_id, original, STATUS_MODERATION, moderator_username=moderator_name, reply_markup=query.message.reply_markup)
             
             # Уведомление артисту
             try:
@@ -2365,7 +2471,20 @@ async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except Exception as e:
                 print(f"Ошибка отправки уведомления о модерации: {e}")
             
-            # Кнопки остаются активны (промежуточный статус)
+            # Восстанавливаем кнопки статусов (промежуточный статус - кнопки остаются активны)
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🕓 На отгрузке", callback_data=f"m_upload_{user_id}_{idx}"),
+                    InlineKeyboardButton("🧠 Модерация", callback_data=f"m_moderate_{user_id}_{idx}"),
+                    InlineKeyboardButton("✅ Принято", callback_data=f"m_approve_{user_id}_{idx}")
+                ],
+                [
+                    InlineKeyboardButton("❌ Отклонить", callback_data=f"m_reject_{user_id}_{idx}"),
+                    InlineKeyboardButton("✏️ На исправлении", callback_data=f"m_needfix_{user_id}_{idx}"),
+                    InlineKeyboardButton("🗑 Удален", callback_data=f"m_delete_{user_id}_{idx}")
+                ],
+            ])
+            await safe_edit_reply_markup(query, reply_markup=keyboard)
             return
 
         if action == "approve":
@@ -2376,24 +2495,21 @@ async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             release["moderation_time"] = datetime.now().isoformat()
             add_history_entry(user_id, idx, old_status, STATUS_APPROVED, query.from_user.id, moderator_name)
             save_db(db)
+            update_moderation_record(user_id, idx, release)
 
-            # Заменяем клавиатуру на кнопку "Изменить статус"
-            edit_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Изменить статус", callback_data=f"m_restore_buttons_{user_id}_{idx}")]
-            ])
-            await safe_edit_reply_markup(query, reply_markup=edit_keyboard)
+            # Обновляем сообщение в модерации (отправляем отдельное сообщение со статусом)
             original = release.get("moderation_original_text") or (query.message.text or "")
-            await _append_status_to_moderation_message(context, query.message.message_id, original, STATUS_APPROVED, moderator_username=moderator_name)
+            await _append_status_to_moderation_message(context, query.message.message_id, original, STATUS_APPROVED, moderator_username=moderator_name, reply_markup=query.message.reply_markup)
 
-            # Отправляем кнопку для добавления UPC (ответом на сообщение анкеты)
+            # Отправляем сообщение с кнопкой для добавления UPC
             try:
                 upc_keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📦 Добавить UPC", callback_data=f"m_add_upc_{user_id}_{idx}")]
+                    [InlineKeyboardButton("📦 Присвоить UPC", callback_data=f"m_add_upc_{user_id}_{idx}")]
                 ])
                 await context.bot.send_message(
                     chat_id=MODERATION_CHAT_ID,
                     text="💾 <b>Добавьте UPC код для этого релиза</b>\n\n"
-                         "Нажмите кнопку ниже и ответьте UPC кодом на исходное сообщение анкеты.",
+                         "Нажмите кнопку и ответьте UPC кодом на исходное сообщение анкеты.",
                     reply_to_message_id=query.message.message_id,
                     parse_mode=ParseMode.HTML,
                     reply_markup=upc_keyboard
@@ -2459,14 +2575,17 @@ async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 release["moderation_time"] = datetime.now().isoformat()
                 add_history_entry(user_id, idx, old_status, STATUS_REJECTED, query.from_user.id, moderator_name, reason=reason_text)
                 save_db(db)
+                update_moderation_record(user_id, idx, release)
 
-                # Заменяем клавиатуру на кнопку "Изменить статус"
+                # Обновляем сообщение в модерации (сохраняя существующую клавиатуру)
+                original = release.get("moderation_original_text") or (query.message.text or "")
+                await _append_status_to_moderation_message(context, query.message.message_id, original, STATUS_REJECTED, moderator_username=moderator_name, reason=reason_text, reply_markup=query.message.reply_markup)
+                
+                # Заменяем клавиатуру на кнопку "Изменить статус" после обновления текста
                 edit_keyboard = InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔄 Изменить статус", callback_data=f"m_restore_buttons_{user_id}_{idx}")]
                 ])
                 await safe_edit_reply_markup(query, reply_markup=edit_keyboard)
-                original = release.get("moderation_original_text") or (query.message.text or "")
-                await _append_status_to_moderation_message(context, query.message.message_id, original, STATUS_REJECTED, moderator_username=moderator_name, reason=reason_text)
                 
                 # Уведомление артисту
                 try:
@@ -2495,14 +2614,17 @@ async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             release["moderation_time"] = datetime.now().isoformat()
             add_history_entry(user_id, idx, old_status, STATUS_NEEDS_FIX, query.from_user.id, moderator_name)
             save_db(db)
+            update_moderation_record(user_id, idx, release)
 
-            # Заменяем кнопки на "Изменить статус"
+            # Обновляем сообщение в модерации (сохраняя существующую клавиатуру)
+            original = release.get("moderation_original_text") or (query.message.text or "")
+            await _append_status_to_moderation_message(context, query.message.message_id, original, STATUS_NEEDS_FIX, moderator_username=moderator_name, reason="Требуются правки", reply_markup=query.message.reply_markup)
+
+            # Заменяем кнопки на "Изменить статус" после обновления текста
             edit_keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Изменить статус", callback_data=f"m_restore_buttons_{user_id}_{idx}")]
             ])
             await safe_edit_reply_markup(query, reply_markup=edit_keyboard)
-            original = release.get("moderation_original_text") or (query.message.text or "")
-            await _append_status_to_moderation_message(context, query.message.message_id, original, STATUS_NEEDS_FIX, moderator_username=moderator_name, reason="Требуются правки")
 
             try:
                 moderation_time = datetime.now().strftime("%d.%m.%Y в %H:%M")
@@ -2533,7 +2655,7 @@ async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
             await safe_edit_reply_markup(query, reply_markup=None)
             original = release.get("moderation_original_text") or (query.message.text or "")
-            await _append_status_to_moderation_message(context, query.message.message_id, original, STATUS_NEEDS_FIX, moderator_username=moderator_name, reason="Проблема со ссылкой")
+            await _append_status_to_moderation_message(context, query.message.message_id, original, STATUS_NEEDS_FIX, moderator_username=moderator_name, reason="Проблема со ссылкой", reply_markup=query.message.reply_markup)
             try:
                 await context.bot.send_message(int(user_id), f"{WINTER_EMOJIS['warning']} <b>Проблема со ссылкой</b>\n\nПроверьте ссылку на файлы или карточку Яндекс Музыки и отправьте заново.")
             except Exception:
@@ -2546,10 +2668,17 @@ async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             release["moderation_time"] = datetime.now().isoformat()
             add_history_entry(user_id, idx, old_status, STATUS_DELETED, query.from_user.id, moderator_name)
             save_db(db)
+            update_moderation_record(user_id, idx, release)
 
-            await safe_edit_reply_markup(query, reply_markup=None)
+            # Обновляем сообщение в модерации (сохраняя существующую клавиатуру)
             original = release.get("moderation_original_text") or (query.message.text or "")
-            await _append_status_to_moderation_message(context, query.message.message_id, original, STATUS_DELETED, moderator_username=moderator_name, reason="Служебно удалено")
+            await _append_status_to_moderation_message(context, query.message.message_id, original, STATUS_DELETED, moderator_username=moderator_name, reason="Служебно удалено", reply_markup=query.message.reply_markup)
+            
+            # Заменяем клавиатуру на кнопку "Изменить статус" после обновления текста
+            edit_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Изменить статус", callback_data=f"m_restore_buttons_{user_id}_{idx}")]
+            ])
+            await safe_edit_reply_markup(query, reply_markup=edit_keyboard)
             
             try:
                 moderation_time = datetime.now().strftime("%d.%m.%Y в %H:%M")
@@ -2571,6 +2700,24 @@ async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if action == "add_upc":
             # Показываем сообщение что нужно ответить UPC кодом
             await query.answer("ℹ️ Ответьте на исходное сообщение анкеты только UPC кодом (например: 5099994682101)", show_alert=True)
+            return
+        
+        if action == "restore_buttons":
+            # Восстанавливаем исходные кнопки статусов вместо "Изменить статус"
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("🕓 На отгрузке", callback_data=f"m_upload_{user_id}_{idx}"),
+                    InlineKeyboardButton("🧠 Модерация", callback_data=f"m_moderate_{user_id}_{idx}"),
+                    InlineKeyboardButton("✅ Принято", callback_data=f"m_approve_{user_id}_{idx}")
+                ],
+                [
+                    InlineKeyboardButton("❌ Отклонить", callback_data=f"m_reject_{user_id}_{idx}"),
+                    InlineKeyboardButton("✏️ На исправлении", callback_data=f"m_needfix_{user_id}_{idx}"),
+                    InlineKeyboardButton("🗑 Удален", callback_data=f"m_delete_{user_id}_{idx}")
+                ],
+            ])
+            await safe_edit_reply_markup(query, reply_markup=keyboard)
+            await query.answer("✅ Кнопки восстановлены", show_alert=False)
             return
     except Exception as e:
         import traceback
