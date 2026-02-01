@@ -92,6 +92,31 @@ WINTER_EMOJIS = {
     CONFIRM,
 ) = range(21)
 
+# --- Новые состояния для заказа обложки и промо-текста
+COVER_REF = 21
+COVER_COLORS = 22
+COVER_TITLE = 23
+COVER_PREFS = 24
+COVER_TG = 25
+COVER_PAYMENT = 26
+COVER_WAIT_SCREENSHOT = 27
+
+PROMO_ARTIST = 28
+PROMO_PROJECT = 29
+PROMO_RELEASE_NAME = 30
+PROMO_RELEASE_KIND = 31
+PROMO_GENRE_MAIN = 32
+PROMO_GENRE_EXTRA = 33
+PROMO_MOOD = 34
+PROMO_VIBE = 35
+PROMO_SOUND = 36
+PROMO_VOCAL = 37
+PROMO_LANGUAGE = 38
+PROMO_EMOTION = 39
+PROMO_USECASE = 40
+PROMO_COUNTRY = 41
+PROMO_DONE = 42
+
 # Статусы анкет (используйте эти значения в `status` полях)
 STATUS_ON_UPLOAD = "on_upload"      # На отгрузке (поставляется при отправке)
 STATUS_MODERATION = "moderation"    # На модерации (модератор взял в работу)
@@ -386,6 +411,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(winter_text("Отправить релиз", "music"), callback_data='report')],
         [InlineKeyboardButton(winter_text("Мои релизы", "notes"), callback_data='my_releases')],
+        [InlineKeyboardButton(winter_text("Заказать обложку (500₽)", "gift"), callback_data='order_cover')],
+        [InlineKeyboardButton(winter_text("Промо-текст под релиз", "comment"), callback_data='promo_text')],
         [InlineKeyboardButton(winter_text("Канал", "published"), url=CHANNEL)],
         [InlineKeyboardButton(winter_text("Чат артистов", "headphones"), url=ARTISTS_CHAT)]
     ])
@@ -1324,6 +1351,12 @@ def _format_release_form_for_group(user, user_id: str, data: dict) -> str:
         "",
     ]
 
+    # Добавляем UPC если есть
+    upc = data.get("upc")
+    if upc:
+        lines.append(f"📦 <b>UPC:</b> <code>{escape_html(upc)}</code>")
+        lines.append("")
+
     def add(label: str, key: str, default: str = "—"):
         val = data.get(key)
         if val is None or str(val).strip() == "":
@@ -1432,9 +1465,34 @@ async def _append_status_to_moderation_message(context: ContextTypes.DEFAULT_TYP
 # === CALLBACK-РОУТЕР (глобально) ===
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
     data = query.data
     user_id = str(query.from_user.id)
+    try:
+        msg = query.message
+        print(f"[BUTTON] callback received: data={data} from_user={user_id} chat_id={getattr(msg, 'chat_id', None)} msg_id={getattr(msg, 'message_id', None)}")
+    except Exception as e:
+        print(f"[BUTTON] callback debug error: {e}")
+    # Показать пользователю подтверждение выбора для промо-кнопок
+    try:
+        if data and data.startswith('promo_'):
+            pretty = {
+                'promo_project_solo': 'Solo',
+                'promo_project_feat': 'Feat',
+                'promo_kind_single': 'Single',
+                'promo_kind_ep': 'EP',
+                'promo_kind_album': 'Album',
+                'promo_vocal_no': 'Instrumental',
+                'promo_vocal_male': 'Male vocal',
+                'promo_vocal_female': 'Female vocal',
+                'promo_text': 'Start promo',
+            }.get(data, data)
+            await query.answer(text=f"Выбрано: {pretty}", show_alert=False)
+    except Exception:
+        pass
 
     if data == 'report':
         keyboard = InlineKeyboardMarkup([
@@ -1443,6 +1501,12 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         await safe_edit(query, f"{WINTER_EMOJIS['snowflake']} <b>Выберите тип релиза:</b>", keyboard)
         return TYPE
+
+    if data == 'order_cover':
+        return await order_cover_start(update, context)
+
+    if data == 'promo_text':
+        return await promo_start(update, context)
 
     if data == 'my_releases':
         await my_cmd(update, context)
@@ -1811,6 +1875,57 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id]["has_lyrics"] = "Нет, это инструментал"
         await safe_send(query.message, f"{WINTER_EMOJIS['star']} <b>Ник исполнителя(ей)</b>\nПример: MAKIZM")
         return NICK
+
+    # Промо-текст: выбор типа проекта
+    if data == 'promo_project_solo':
+        p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+        p['project_type'] = 'solo'
+        await query.edit_message_text("Название релиза:", parse_mode=ParseMode.HTML)
+        return PROMO_RELEASE_NAME
+
+    if data == 'promo_project_feat':
+        p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+        p['project_type'] = 'feat'
+        await query.edit_message_text("Название релиза:", parse_mode=ParseMode.HTML)
+        return PROMO_RELEASE_NAME
+
+    # Промо-текст: выбор типа релиза
+    if data == 'promo_kind_single':
+        p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+        p['release_kind'] = 'сингл'
+        await query.edit_message_text("Жанр (основной):", parse_mode=ParseMode.HTML)
+        return PROMO_GENRE_MAIN
+
+    if data == 'promo_kind_ep':
+        p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+        p['release_kind'] = 'EP'
+        await query.edit_message_text("Жанр (основной):", parse_mode=ParseMode.HTML)
+        return PROMO_GENRE_MAIN
+
+    if data == 'promo_kind_album':
+        p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+        p['release_kind'] = 'альбом'
+        await query.edit_message_text("Жанр (основной):", parse_mode=ParseMode.HTML)
+        return PROMO_GENRE_MAIN
+
+    # Промо-текст: выбор вокала
+    if data == 'promo_vocal_no':
+        p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+        p['vocal'] = 'instrumental'
+        await query.edit_message_text("Эмоция (что должен почувствовать слушатель):", parse_mode=ParseMode.HTML)
+        return PROMO_EMOTION
+
+    if data == 'promo_vocal_male':
+        p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+        p['vocal'] = 'male'
+        await query.edit_message_text("Эмоция (что должен почувствовать слушатель):", parse_mode=ParseMode.HTML)
+        return PROMO_EMOTION
+
+    if data == 'promo_vocal_female':
+        p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+        p['vocal'] = 'female'
+        await query.edit_message_text("Эмоция (что должен почувствовать слушатель):", parse_mode=ParseMode.HTML)
+        return PROMO_EMOTION
 
     # removed snippet_auto/snippet_manual flow: сразу переходим к NICK
 
@@ -2202,12 +2317,16 @@ async def manual_reject_handler(update: Update, context: ContextTypes.DEFAULT_TY
     replied_msg = update.message.reply_to_message
     replied_msg_id = replied_msg.message_id
     
-    # MANUAL_REJECT: Ищем анкету в БД по moderation_message_id
+    # MANUAL_REJECT: Ищем анкету в БД по moderation_message_id или reject_instruction_message_id
     user_id = None
     idx = None
     for uid, releases in db.items():
         for idx_rel, rel in enumerate(releases):
-            if rel.get('moderation_message_id') == replied_msg_id:
+            # Проверяем оба типа сообщений:
+            # 1. Ответ на инструкционное сообщение отклонения (новый способ)
+            # 2. Ответ на исходное сообщение анкеты (старый способ для совместимости)
+            if (rel.get('reject_instruction_message_id') == replied_msg_id or
+                rel.get('moderation_message_id') == replied_msg_id):
                 user_id = uid
                 idx = idx_rel
                 break
@@ -2237,21 +2356,40 @@ async def manual_reject_handler(update: Update, context: ContextTypes.DEFAULT_TY
     save_db(db)
     update_moderation_record(user_id, idx, release)
     
-    # MANUAL_REJECT: Удаляем кнопки у исходного сообщения анкеты
-    try:
-        await context.bot.edit_message_reply_markup(
-            chat_id=MODERATION_CHAT_ID,
-            message_id=replied_msg_id,
-            reply_markup=None
-        )
-    except Exception as e:
-        print(f"Ошибка при удалении кнопок: {e}")
+    # MANUAL_REJECT: Удаляем кнопки у исходного сообщения анкеты (только если это был ответ на исходное сообщение)
+    if release.get('moderation_message_id') == replied_msg_id:
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=MODERATION_CHAT_ID,
+                message_id=replied_msg_id,
+                reply_markup=None
+            )
+        except Exception as e:
+            print(f"Ошибка при удалении кнопок: {e}")
+        
+        reply_markup_to_preserve = None
+    else:
+        # Если это был ответ на инструкционное сообщение, берём клавиатуру из исходного сообщения
+        moderation_msg_id = release.get('moderation_message_id')
+        if moderation_msg_id:
+            try:
+                msg = await context.bot.get_file(moderation_msg_id)
+                # На самом деле get_file не вернёт message — нужно edit_message_reply_markup на исходное
+                await context.bot.edit_message_reply_markup(
+                    chat_id=MODERATION_CHAT_ID,
+                    message_id=moderation_msg_id,
+                    reply_markup=None
+                )
+            except Exception as e:
+                print(f"Ошибка при удалении кнопок из исходного сообщения: {e}")
+        reply_markup_to_preserve = None
     
     # MANUAL_REJECT: Дописываем статус к анкете
     original = release.get("moderation_original_text") or (replied_msg.text or "")
+    moderation_msg_id = release.get('moderation_message_id')
     await _append_status_to_moderation_message(
         context,
-        replied_msg_id,
+        moderation_msg_id,
         original,
         STATUS_REJECTED,
         moderator_username=moderator_username,
@@ -2282,7 +2420,7 @@ async def manual_reject_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def add_upc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик добавления UPC кода через reply на сообщение анкеты."""
+    """Обработчик добавления UPC кода через reply на сообщение анкеты или на инструкционное сообщение."""
     if not update.message or not update.message.reply_to_message:
         return
     if update.message.chat_id != MODERATION_CHAT_ID:
@@ -2293,16 +2431,29 @@ async def add_upc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Только администраторы могут добавлять UPC.")
         return
     
+    # Получаем UPC из сообщения
+    upc_code = clean(update.message.text)
+    if not upc_code:
+        return  # Пустые сообщения игнорируем
+    
+    # Проверяем что это выглядит как UPC (обычно 12-14 цифр, не менее 10)
+    if not upc_code.isdigit() or len(upc_code) < 10:
+        return  # Не похоже на UPC, игнорируем
+    
     # Получаем сообщение на которое ответили
     replied_msg = update.message.reply_to_message
     replied_msg_id = replied_msg.message_id
     
-    # Ищем анкету в БД по moderation_message_id
+    # Ищем анкету в БД по moderation_message_id или по upc_instruction_message_id
     user_id = None
     idx = None
     for uid, releases in db.items():
         for idx_rel, rel in enumerate(releases):
-            if rel.get('moderation_message_id') == replied_msg_id:
+            # Проверяем оба типа ответов:
+            # 1. Ответ на инструкционное сообщение (новый способ)
+            # 2. Ответ на исходное сообщение анкеты (старый способ для совместимости)
+            if (rel.get('upc_instruction_message_id') == replied_msg_id or 
+                rel.get('moderation_message_id') == replied_msg_id):
                 user_id = uid
                 idx = idx_rel
                 break
@@ -2310,20 +2461,9 @@ async def add_upc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             break
     
     if not user_id or idx is None:
-        return  # Молчаливо игнорируем обычные сообщения
+        return  # Молчаливо игнорируем сообщения, которые не принадлежат известным анкетам
     
     release = db[user_id][idx]
-    
-    # Получаем UPC из сообщения
-    upc_code = clean(update.message.text)
-    if not upc_code:
-        await update.message.reply_text("❌ UPC код не может быть пустым. Отправьте UPC числа.")
-        return
-    
-    # Проверяем что это выглядит как UPC (обычно 12-14 цифр)
-    if not upc_code.isdigit() or len(upc_code) < 10:
-        await update.message.reply_text("❌ UPC должен быть числовым кодом (обычно 12-14 цифр)")
-        return
     
     # Сохраняем UPC в релизе
     release["upc"] = upc_code
@@ -2332,6 +2472,27 @@ async def add_upc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Уведомляем модератора
     await update.message.reply_text(f"{WINTER_EMOJIS['check']} UPC код <code>{upc_code}</code> добавлен и сохранен!")
+    
+    # Обновляем исходное сообщение анкеты в чате модерации, чтобы UPC отобразился
+    moderation_msg_id = release.get('moderation_message_id')
+    if moderation_msg_id:
+        try:
+            # Переформатируем анкету с новым UPC
+            from telegram import User
+            user_obj = User(id=int(user_id), is_bot=False, first_name="", username=release.get('username'))
+            updated_form = _format_release_form_for_group(user_obj, user_id, release)
+            
+            # Обновляем исходное сообщение, сохраняя статус-шапку и клавиатуру
+            status = release.get('status', STATUS_ON_UPLOAD)
+            await _append_status_to_moderation_message(
+                context,
+                moderation_msg_id,
+                updated_form,
+                status,
+                reply_markup=query.message.reply_markup if hasattr(replied_msg, 'reply_markup') else None
+            )
+        except Exception as e:
+            print(f"Ошибка обновления сообщения анкеты с UPC: {e}")
     
     # Уведомляем артиста
     try:
@@ -2345,6 +2506,462 @@ async def add_upc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         print(f"Ошибка отправки уведомления артисту об UPC: {e}")
+
+
+async def order_cover_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = str(query.from_user.id)
+    user_data.setdefault(user_id, {})
+    user_data[user_id]['cover'] = {}
+    await safe_edit(query, "📦 <b>Заказ обложки — шаг 1/6</b>\n\nОтправьте референс (ссылку или фото) или кратко опишите, от чего отталкиваться.")
+    return COVER_COLORS
+
+
+async def cover_colors_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Сохраняем референс (текст или фото)
+    user_id = str((update.callback_query.from_user.id if update.callback_query else update.message.from_user.id))
+    cov = user_data.setdefault(user_id, {}).setdefault('cover', {})
+    
+    if update.message and update.message.photo:
+        cov['reference_photo'] = update.message.photo[-1].file_id
+    elif update.message:
+        cov['reference_text'] = update.message.text
+    
+    # Отправляем следующий вопрос (без parse_mode для текста с эмодзи)
+    if update.message:
+        await update.message.reply_text("🎨 Шаг 2/6 — Какие основные цвета должны быть в обложке?")
+    else:
+        await safe_edit(update.callback_query, "🎨 Шаг 2/6 — Какие основные цвета должны быть в обложке?")
+    
+    return COVER_TITLE
+
+
+async def cover_title_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    cov = user_data.setdefault(user_id, {}).setdefault('cover', {})
+    cov['colors'] = clean(update.message.text)
+    await update.message.reply_text("✍️ Шаг 3/6 — Название релиза (как написать на обложке):")
+    return COVER_PREFS
+
+
+async def cover_prefs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    cov = user_data.setdefault(user_id, {}).setdefault('cover', {})
+    cov['title'] = clean(update.message.text)
+    await update.message.reply_text("✏️ Шаг 4/6 — Ваши предпочтения или комментарии по дизайну:")
+    return COVER_TG
+
+
+async def cover_tg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    cov = user_data.setdefault(user_id, {}).setdefault('cover', {})
+    cov['prefs'] = clean(update.message.text)
+    await update.message.reply_text("📱 Шаг 5/6 — Укажите ваш Telegram для связи:")
+    return COVER_PAYMENT
+
+
+async def cover_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    cov = user_data.setdefault(user_id, {}).setdefault('cover', {})
+    cov['tg'] = clean(update.message.text)
+
+    # Отправляем инструкцию по оплате и сохраняем сообщение ожидания скрина
+    text = (
+        "💳 Оплатите 500₽ и отправьте скриншот платежа в ответ на это сообщение.\n\n"
+        "💳 Карта MIR\n2200 7004 9056 2443\n\n"
+        "💳 Карта VISA\n4177 4901 8116 9097\n\n"
+        "📈 Крипта (USDT TRC20)\nTW5awCiuhfpAoLGvu1WXXWzKHbgEEDbv1x\n\n"
+        "После оплаты ответьте на это сообщение скриншотом — заказ будет отправлен в модерацию."
+    )
+    instr = await update.message.reply_text(text)
+    cov['payment_instruction_message_id'] = instr.message_id
+    await update.message.reply_text("Ожидаю скриншот оплаты (ответьте на инструкцию).")
+    return COVER_WAIT_SCREENSHOT
+
+
+async def cover_screenshot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Ожидаем фото-скриншот оплаты
+    if not update.message or not update.message.photo:
+        return COVER_WAIT_SCREENSHOT
+    user_id = str(update.message.from_user.id)
+    cov = user_data.setdefault(user_id, {}).get('cover', {})
+    # Найдём релиз-предзаказ данные
+    caption = (
+        f"📌 <b>ЗАКАЗ ОБЛОЖКИ</b>\n"
+        f"От: @{escape_html(update.message.from_user.username or '')} (ID: {user_id})\n"
+        f"Название: {escape_html(cov.get('title','—'))}\n"
+        f"TG: {escape_html(cov.get('tg','—'))}\n"
+        f"Комментарий: {escape_html(cov.get('prefs','—'))}\n"
+    )
+    # Пересылаем в модерацию как новое сообщение с фото и подписью
+    try:
+        msg = await context.bot.send_photo(
+            chat_id=MODERATION_CHAT_ID,
+            photo=update.message.photo[-1].file_id,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+        )
+        try:
+            await context.bot.pin_chat_message(chat_id=MODERATION_CHAT_ID, message_id=msg.message_id)
+        except Exception:
+            pass
+        # Сохраняем в moderation_db как заказ (без статусов)
+        moderation_db = load_moderation_db()
+        order = {
+            'type': 'cover_order',
+            'message_id': msg.message_id,
+            'user_id': user_id,
+            'data': cov,
+            'time': datetime.now().isoformat(),
+        }
+        moderation_db.setdefault('moderation_messages', []).append(order)
+        save_moderation_db(moderation_db)
+        await update.message.reply_text("✅ Заказ отправлен в модерацию. Спасибо!")
+    except Exception as e:
+        print(f"Ошибка отправки заказа обложки: {e}")
+        await update.message.reply_text("❌ Не удалось отправить заказ. Попробуйте позже.")
+    return ConversationHandler.END
+
+
+async def promo_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = str(query.from_user.id)
+    user_data.setdefault(user_id, {})
+    user_data[user_id]['promo'] = {}
+    await safe_edit(query, "📝 <b>Промо-текст — шаг 1/13</b>\n\nУкажите имя артиста:")
+    return PROMO_PROJECT
+
+
+async def promo_project_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    user_data.setdefault(user_id, {})['promo'] = {'artist': clean(update.message.text)}
+    kb = InlineKeyboardMarkup([
+           [InlineKeyboardButton("🎤 Solo", callback_data='promo_project_solo'),
+            InlineKeyboardButton("🎵 Feat", callback_data='promo_project_feat')],
+    ])
+    await update.message.reply_text("Укажите тип проекта:", reply_markup=kb)
+    return PROMO_PROJECT
+
+
+async def promo_release_name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+    p['release_name'] = clean(update.message.text)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎵 Сингл", callback_data='promo_kind_single'),
+         InlineKeyboardButton("💿 EP", callback_data='promo_kind_ep'),
+         InlineKeyboardButton("📀 Альбом", callback_data='promo_kind_album')],
+    ])
+    await update.message.reply_text("Тип релиза:", reply_markup=kb)
+    return PROMO_RELEASE_KIND
+
+
+async def promo_release_kind_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+    # Фолбек: пользователь ввёл тип релиза текстом
+    p['release_kind'] = clean(update.message.text)
+    await update.message.reply_text("Жанр (основной):")
+    return PROMO_GENRE_MAIN
+
+
+async def promo_genre_main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+    p['genre_main'] = clean(update.message.text)
+    await update.message.reply_text("+1 дополнительный жанр (если есть), либо '-' :")
+    return PROMO_GENRE_EXTRA
+
+
+async def promo_genre_extra_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+    p['genre_extra'] = clean(update.message.text)
+    await update.message.reply_text("Настроение (2-4 слова, например: мрачный, холодный):")
+    return PROMO_MOOD
+
+
+async def promo_mood_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+    p['mood'] = clean(update.message.text)
+    await update.message.reply_text("Вайб / образ (ассоциации, визуал):")
+    return PROMO_VIBE
+
+
+async def promo_vibe_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+    p['vibe'] = clean(update.message.text)
+    await update.message.reply_text("Звучание (плотный/минималистичный/грязный/воздушный):")
+    return PROMO_SOUND
+
+
+async def promo_sound_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+    p['sound'] = clean(update.message.text)
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Без вокала", callback_data='promo_vocal_no')],
+        [InlineKeyboardButton("🎤 Мужской вокал", callback_data='promo_vocal_male'),
+         InlineKeyboardButton("👸 Женский вокал", callback_data='promo_vocal_female')],
+    ])
+    await update.message.reply_text("Вокал:", reply_markup=kb)
+    return PROMO_VOCAL
+
+
+async def promo_vocal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Fallback if user types vocal info instead of pressing inline buttons
+    user_id = str(update.message.from_user.id)
+    p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+    txt = clean(update.message.text).lower()
+    if 'без' in txt or 'instrument' in txt:
+        p['vocal'] = 'instrumental'
+    elif 'муж' in txt or 'male' in txt:
+        p['vocal'] = 'male'
+    elif 'жен' in txt or 'female' in txt:
+        p['vocal'] = 'female'
+    else:
+        # if unclear, save raw text
+        p['vocal'] = clean(update.message.text)
+    await update.message.reply_text("Эмоция (что должен почувствовать слушатель):")
+    return PROMO_EMOTION
+
+
+async def promo_language_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+    p['language'] = clean(update.message.text)
+    await update.message.reply_text("Эмоция (что должен почувствовать слушатель):")
+    return PROMO_EMOTION
+
+
+async def promo_emotion_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+    p['emotion'] = clean(update.message.text)
+    await update.message.reply_text("🌍 <b>Где находится артист?</b>\n\nУкажите страну (например: Россия, США, Япония):", parse_mode=ParseMode.HTML)
+    return PROMO_COUNTRY
+
+
+async def promo_usecase_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+    p['usecase'] = clean(update.message.text)
+
+    # Отправляем начальное сообщение о генерации
+    status_msg = await update.message.reply_text("⏳ <b>Генерирую ваш промо-текст...</b>\n\n⌛ Обработка данных...", parse_mode=ParseMode.HTML)
+    
+    # Показываем анимацию загрузки
+    loading_states = [
+        "⏳ <b>Генерирую ваш промо-текст...</b>\n\n⌛ Обработка данных...",
+        "⏳ <b>Генерирую ваш промо-текст...</b>\n\n▌ Анализ информации об артисте...",
+        "⏳ <b>Генерирую ваш промо-текст...</b>\n\n▌▌ Подготовка описания релиза...",
+        "⏳ <b>Генерирую ваш промо-текст...</b>\n\n▌▌▌ Создание текстов для платформ...",
+        "⏳ <b>Генерирую ваш промо-текст...</b>\n\n▌▌▌▌ Форматирование контента...",
+        "⏳ <b>Генерирую ваш промо-текст...</b>\n\n▌▌▌▌▌ Финальная подготовка...",
+    ]
+    
+    for state in loading_states:
+        try:
+            await status_msg.edit_text(state, parse_mode=ParseMode.HTML)
+            await asyncio.sleep(0.3)
+        except:
+            pass
+
+    # Вызываем функцию генерации с данными
+    ai_text = await _call_openai_for_promo_new(p)
+    if not ai_text:
+        await status_msg.edit_text("❌ <b>Ошибка генерации</b>\n\nНе удалось создать промо-текст. Попробуйте позже.", parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+    
+    # Показываем результат с анимацией
+    sections = ai_text.split('\n\n')
+    current_text = ""
+    
+    for i, section in enumerate(sections):
+        current_text += section + "\n\n"
+        try:
+            if len(current_text) > 4000:  # Ограничение Telegram
+                await status_msg.edit_text(current_text[:4000] + "\n\n...", parse_mode=ParseMode.HTML)
+            else:
+                await status_msg.edit_text(current_text, parse_mode=ParseMode.HTML)
+            await asyncio.sleep(0.2)
+        except:
+            pass
+
+    # Финальное сообщение — убедимся что оно отличается от последнего отправленного (избегаем Message is not modified)
+    last_state = loading_states[-1]
+    try:
+        if ai_text != last_state:
+            await status_msg.edit_text(ai_text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        if not _is_remote_protocol_error(e):
+            pass
+    
+    await update.message.reply_text("✅ <b>Ваш промо-текст готов!</b>\n\nВы можете использовать эти тексты для промо на различных платформах.", parse_mode=ParseMode.HTML)
+    
+    return ConversationHandler.END
+
+
+async def promo_country_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    p = user_data.setdefault(user_id, {}).setdefault('promo', {})
+    p['country'] = clean(update.message.text)
+    await update.message.reply_text("📍 <b>Где трек работает лучше всего?</b>\n\nПример: наушники, машина, клуб, вечер/ночь, дома, в дороге", parse_mode=ParseMode.HTML)
+    return PROMO_USECASE
+
+
+async def _call_openai_for_promo_new(data: dict) -> str:
+    """Генерирует расширенный промо-пакет в правильном формате."""
+    
+    artist = data.get('artist', 'Артист')
+    project = data.get('project_type', 'проект')
+    release = data.get('release_name', 'Релиз')
+    kind = data.get('release_kind', 'трек')
+    genre_main = data.get('genre_main', 'электроника')
+    genre_extra = data.get('genre_extra', '')
+    mood = data.get('mood', 'динамичный')
+    vibe = data.get('vibe', 'энергичный')
+    sound = data.get('sound', 'современный')
+    vocal = data.get('vocal', 'инструментальный')
+    language = data.get('language', 'русский')
+    emotion = data.get('emotion', 'вдохновляющая')
+    usecase = data.get('usecase', 'везде')
+    country = data.get('country', 'неизвестная страна')
+    
+    genre = f"{genre_main} {genre_extra}".strip()
+    
+    result = f"""<b>📝 ОПИСАНИЕ АРТИСТА НА РУССКОМ</b>
+
+{artist} — {project}, работающий в жанре {genre} с акцентом на {vibe} энергию, {sound} звучание и {emotion} атмосферу. Музыка строится на {mood} ритме, современной эстетике и физическом вовлечении слушателя.
+
+<b>📝 ОПИСАНИЕ РЕЛИЗА НА РУССКОМ</b>
+
+{release} — {kind}, построенный вокруг {genre}-ритмики. Релиз звучит прямолинейно и напористо, делая ставку на {mood} атмосферу и ритмическое давление. Трек создаёт ощущение движения и динамики.
+
+<b>🎵 ИНФОРМАЦИЯ ДЛЯ SPOTIFY (макс. 500 символов)</b>
+
+{artist} is a {project} in {genre}, focused on {sound} sound. {release} ({kind}) delivers {mood} rhythm and {vibe} energy, perfect for dynamic content with {emotion} atmosphere and {vocal} elements.
+
+<b>🎧 ИНФОРМАЦИЯ ДЛЯ DEEZER (макс. 1500 символов)</b>
+
+{artist} is a {project} in {genre}, emphasizing raw groove and contemporary design. Their music focuses on repetition, pressure, and physical rhythm for immersive listening. {release} ({kind}) brings {emotion} energy and {mood} rhythm. The track works best {usecase}.
+
+═══════════════════════════════════════
+🌍 <b>Страна:</b> {country}
+═══════════════════════════════════════"""
+    
+    return result
+
+
+async def _call_openai_for_promo(prompt: str) -> str:
+    """Генерирует расширенный промо-текст для разных платформ."""
+    import re
+    
+    print('🔄 Генерирую расширенный промо-пакет...')
+    
+    # Парсим промпт для извлечения данных
+    data = {
+        'artist': 'неизвестный артист',
+        'project_type': 'проект',
+        'release_name': 'новый релиз',
+        'release_kind': 'трек',
+        'genre_main': 'электроника',
+        'genre_extra': '',
+        'mood': 'динамичный',
+        'vibe': 'энергичный',
+        'sound': 'современный',
+        'vocal': 'инструментальный',
+        'language': 'русский',
+        'emotion': 'вдохновляющая',
+        'usecase': 'для клубов',
+    }
+    
+    # Пытаемся извлечь значения из промпта
+    patterns = {
+        'artist': r'Артист:\s*([^\n]+)',
+        'project_type': r'Проект:\s*([^\n]+)',
+        'release_name': r'Релиз:\s*([^\n]+)',
+        'release_kind': r'Тип:\s*([^\n]+)',
+        'genre_main': r'Жанр:\s*([^\n,]+)',
+        'genre_extra': r'Жанр:.*?([^\n]+)$',
+        'mood': r'Настроение:\s*([^\n]+)',
+        'vibe': r'Вайб:\s*([^\n]+)',
+        'sound': r'Звучание:\s*([^\n]+)',
+        'vocal': r'Вокал:\s*([^\n]+)',
+        'language': r'Язык:\s*([^\n]+)',
+        'emotion': r'Эмоция:\s*([^\n]+)',
+        'usecase': r'Где слушать:\s*([^\n]+)',
+    }
+    
+    for key, pattern in patterns.items():
+        match = re.search(pattern, prompt, re.IGNORECASE)
+        if match:
+            data[key] = match.group(1).strip()
+    
+    # Генерируем многоуровневый промо-пакет
+    artist = data['artist']
+    release = data['release_name']
+    genre = data['genre_main']
+    mood = data['mood']
+    vibe = data['vibe']
+    sound = data['sound']
+    project = data['project_type']
+    kind = data['release_kind']
+    language = data['language']
+    emotion = data['emotion']
+    usecase = data['usecase']
+    
+    result = f"""
+📝 **ОПИСАНИЕ АРТИСТА**
+{artist} — {project}, работающий в жанре {genre} с акцентом на {vibe} энергию, {sound} звучание и {emotion} атмосферу. Музыка строится на {mood} ритме, современной эстетике и физическом вовлечении слушателя. Артист ориентируется на актуальный звук и визуальную культуру.
+
+📝 **ОПИСАНИЕ РЕЛИЗА**
+{release} — {kind}, построенный вокруг {genre}-ритмики и инстинктивной энергии. Релиз звучит прямолинейно и напористо, делая ставку на {mood} атмосферу и ритмическое давление. Трек создаёт ощущение движения и динамики, легко адаптируется под короткие видеоформаты и активно работает в социальных сетях.
+
+📝 **ДЛЯ SPOTIFY** (макс. 500 символов)
+{artist} is a {project} focused on {genre}, emphasizing {sound} rhythm, {vibe} energy, and modern digital aesthetics.
+The track {release} delivers {mood} groove and physical rhythm, perfect for dynamic content and short-form videos.
+
+📝 **ДЛЯ DEEZER** (макс. 1500 символов)
+{artist} is a {project} working within {genre}, emphasizing raw groove, contemporary sound design, and street-inspired aesthetics. Their music is built around repetition, pressure, and physical rhythm, aiming for an instinctive and immersive listening experience.
+
+The release {release} is driven by {emotion} energy and {mood} rhythm. The track focuses on groove rather than complexity, creating a hypnotic effect through tempo and repetition. {usecase}.
+
+📝 **ОПИСАНИЕ ДЛЯ СОЦСЕТЕЙ**
+🎵 {artist} представляет {release} — {kind} в жанре {genre}. {mood} атмосфера, {vibe} вайб, {sound} звучание. {emotion} трек, который работает везде! 🔥
+
+#{''.join([x[0] for x in genre.split()])}{artist.replace(' ', '')}{release.replace(' ', '')}
+"""
+    
+    print(f'✅ Промо-пакет готов: {len(result)} символов')
+    return result
+
+
+
+
+def _check_openai_status() -> dict:
+    """Проверяет наличие Hugging Face токена и доступность httpx."""
+    hf_token = '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'
+    return {
+        'has_key': bool(hf_token),
+        'httpx_available': httpx is not None,
+        'key_preview': (hf_token[:10] + '...' if hf_token else None)
+    }
+
+
+async def check_openai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status = _check_openai_status()
+    lines = ["Проверка Hugging Face API:"]
+    lines.append(f"- Hugging Face токен установлен: {'Да' if status['has_key'] else 'Нет'}")
+    lines.append(f"- httpx доступен: {'Да' if status['httpx_available'] else 'Нет'}")
+    if status['has_key']:
+        lines.append(f"- Токен (preview): {status['key_preview']}")
+    lines.append("Если что-то отсутствует — установите httpx: pip install httpx")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2536,76 +3153,24 @@ async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 print(f"Ошибка отправки пользователю: {e}")
             return
         if action == "reject":
-            # FIX: Показываем клавиатуру с предустановленными причинами отклонения
-            reasons = [
-                "Слабый материал",
-                "Не формат лейбла",
-                "Плохое качество",
-                "Нет идеи",
-                "Дубликат релиза",
-            ]
-            # callback_data: m_rejectreason_<user_id>_<idx>_<reason_idx>
-            rows = [[InlineKeyboardButton(r, callback_data=f"m_rejectreason_{user_id}_{idx}_{i}")] for i, r in enumerate(reasons, start=1)]
-            keyboard = InlineKeyboardMarkup(rows)
-            await context.bot.send_message(
-                chat_id=MODERATION_CHAT_ID,
-                text=f"Выберите причину отклонения для анкеты выше:",
-                reply_to_message_id=query.message.message_id,
-                reply_markup=keyboard,
-            )
-            return
-        if action == "rejectreason":
-            # parts: ['m', 'rejectreason', user_id, idx, reason_idx]
-            if len(parts) >= 5:
-                user_id = parts[2]
-                idx = int(parts[3])
-                reason_idx = int(parts[4])
-                reasons = [
-                    "Слабый материал",
-                    "Не формат лейбла",
-                    "Плохое качество",
-                    "Нет идеи",
-                    "Дубликат релиза",
-                ]
-                reason_text = reasons[reason_idx - 1] if 1 <= reason_idx <= len(reasons) else "Причина"
-                old_status = release.get("status")
-                release["status"] = STATUS_REJECTED
-                release["reject_reason"] = reason_text
-                release["moderator"] = moderator_name
-                release["moderation_time"] = datetime.now().isoformat()
-                add_history_entry(user_id, idx, old_status, STATUS_REJECTED, query.from_user.id, moderator_name, reason=reason_text)
+            # Отправляем инструкционное сообщение для модератора
+            try:
+                reject_instruction_msg = await context.bot.send_message(
+                    chat_id=MODERATION_CHAT_ID,
+                    text=f"{WINTER_EMOJIS.get('cross', '❌')} <b>Введите причину отклонения анкеты</b>\n\n"
+                         f"Ответьте на это сообщение с развёрнутой причиной отклонения релиза.\n\n"
+                         f"<i>Релиз:</i> <code>{escape_html(release.get('name', '—')[:30])}</code>",
+                    parse_mode=ParseMode.HTML,
+                    reply_to_message_id=query.message.message_id,
+                )
+                # Сохраняем ID инструкционного сообщения
+                release['reject_instruction_message_id'] = reject_instruction_msg.message_id
                 save_db(db)
-                update_moderation_record(user_id, idx, release)
-
-                # Обновляем сообщение в модерации (сохраняя существующую клавиатуру)
-                original = release.get("moderation_original_text") or (query.message.text or "")
-                await _append_status_to_moderation_message(context, query.message.message_id, original, STATUS_REJECTED, moderator_username=moderator_name, reason=reason_text, reply_markup=query.message.reply_markup)
-                
-                # Заменяем клавиатуру на кнопку "Изменить статус" после обновления текста
-                edit_keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔄 Изменить статус", callback_data=f"m_restore_buttons_{user_id}_{idx}")]
-                ])
-                await safe_edit_reply_markup(query, reply_markup=edit_keyboard)
-                
-                # Уведомление артисту
-                try:
-                    moderation_time = datetime.now().strftime("%d.%m.%Y в %H:%M")
-                    await context.bot.send_message(
-                        int(user_id),
-                        f"{WINTER_EMOJIS['cross']} <b>ВАШ РЕЛИЗ ОТКЛОНЁН</b>\n\n"
-                        f"📝 <b>{escape_html(release.get('name', '—'))}</b>\n"
-                        f"🎵 <i>Тип:</i> {escape_html(release.get('type', '—'))}\n"
-                        f"📅 <i>Дата релиза:</i> {escape_html(release.get('date', '—'))}\n"
-                        f"👤 <i>Артист:</i> {escape_html(release.get('nick', '—'))}\n"
-                        f"🕐 <i>Отклонено:</i> {escape_html(moderation_time)}\n"
-                        f"👨‍💼 <i>Модератор:</i> @{escape_html(moderator_name)}\n\n"
-                        f"❌ <b>Причина отказа:</b>\n{escape_html(reason_text)}\n\n"
-                        f"{WINTER_EMOJIS['sparkles']} Отправьте релиз заново после исправлений через /start",
-                        parse_mode=ParseMode.HTML,
-                    )
-                except Exception as e:
-                    print(f"Ошибка отправки уведомления об отклонении: {e}")
-                return
+            except Exception as e:
+                print(f"Ошибка отправки инструкции отклонения: {e}")
+            
+            await query.answer("✅ Инструкция отправлена. Ответьте на неё с причиной отклонения.", show_alert=False)
+            return
         if action == "needfix":
             # Быстрая пометка: попросить правки — добавим комментарий и уведомим автора
             old_status = release.get("status")
@@ -2642,6 +3207,43 @@ async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
             except Exception as e:
                 print(f"Ошибка отправки уведомления о правках: {e}")
+            return
+
+        if data == 'promo_regen':
+            # Regenerate promo text for user
+            user_id = str(query.from_user.id)
+            p = user_data.get(user_id, {}).get('promo')
+            if not p:
+                await query.answer('Нет данных для генерации', show_alert=True)
+                return
+            prompt = (
+                f"Составь короткий живой промо-текст для лейбла на основе данных:\n"
+                f"Артист: {p.get('artist','')}\n"
+                f"Проект: {p.get('project_type','')}\n"
+                f"Релиз: {p.get('release_name','')}\n"
+                f"Тип: {p.get('release_kind','')}\n"
+                f"Жанр: {p.get('genre_main','')} {p.get('genre_extra','')}\n"
+                f"Настроение: {p.get('mood','')}\n"
+                f"Вайб: {p.get('vibe','')}\n"
+                f"Звучание: {p.get('sound','')}\n"
+                f"Вокал: {p.get('vocal','')}\n"
+                f"Язык: {p.get('language','')}\n"
+                f"Эмоция: {p.get('emotion','')}\n"
+                f"Где слушать: {p.get('usecase','') or '—'}\n\n"
+                f"Требования: живой, человеческий язык, без клише, подходит для VK Music, Яндекс Музыки и Звука."
+            )
+            ai_text = await _call_openai_for_promo(prompt)
+            if not ai_text:
+                await query.answer('Ошибка генерации', show_alert=True)
+                return
+            try:
+                await query.edit_message_text(ai_text, parse_mode=ParseMode.HTML, reply_markup=query.message.reply_markup)
+            except Exception:
+                await query.message.reply_text(ai_text, parse_mode=ParseMode.HTML)
+            return
+
+        if data == 'promo_accept':
+            await query.answer('Отлично — сохранено', show_alert=True)
             return
 
         if action == "link":
@@ -2698,8 +3300,23 @@ async def moderation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         
         if action == "add_upc":
-            # Показываем сообщение что нужно ответить UPC кодом
-            await query.answer("ℹ️ Ответьте на исходное сообщение анкеты только UPC кодом (например: 5099994682101)", show_alert=True)
+            # Отправляем инструкционное сообщение, на которое нужно ответить с UPC кодом
+            try:
+                upc_instruction_msg = await context.bot.send_message(
+                    chat_id=MODERATION_CHAT_ID,
+                    text=f"{WINTER_EMOJIS.get('waiting', '⏳')} <b>Введите UPC код для этого релиза</b>\n\n"
+                         f"Ответьте на это сообщение с UPC кодом (только цифры, например: <code>5099994682101</code>)\n\n"
+                         f"<i>릴리즈:</i> <code>{escape_html(release.get('name', '—')[:30])}</code>",
+                    parse_mode=ParseMode.HTML,
+                    reply_to_message_id=query.message.message_id,
+                )
+                # Сохраняем ID инструкционного сообщения в БД для последующего поиска
+                release['upc_instruction_message_id'] = upc_instruction_msg.message_id
+                save_db(db)
+            except Exception as e:
+                print(f"Ошибка отправки инструкции UPC: {e}")
+            
+            await query.answer("✅ Инструкция отправлена. Ответьте на неё с UPC кодом.", show_alert=False)
             return
         
         if action == "restore_buttons":
@@ -2816,6 +3433,7 @@ def main():
     app.add_handler(CommandHandler('cleanbase', cleanbase_cmd))
     app.add_handler(CommandHandler('undo', undo_cmd))
     app.add_handler(CommandHandler('cleanup', cleanup_database))
+    app.add_handler(CommandHandler('check_openai', check_openai_cmd))
 
     # FIX: Модерация ДОЛЖНА быть ПЕРВЫМ обработчиком до ConversationHandler и глобального button
     # Модерация: отдельный handler по паттерну m_*
@@ -2826,7 +3444,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & filters.REPLY & filters.Chat(MODERATION_CHAT_ID), manual_reject_handler), group=2)
 
     conv = ConversationHandler(
-        entry_points=[CommandHandler('start', start_cmd)],
+        entry_points=[CommandHandler('start', start_cmd), CallbackQueryHandler(button, pattern=r'^promo_text$')],
         states={
             REPORT: [CallbackQueryHandler(button)],
             TYPE: [CallbackQueryHandler(button)],
@@ -2845,6 +3463,26 @@ def main():
             COMMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, comment)],
             TRACKLIST: [MessageHandler(filters.TEXT & ~filters.COMMAND, tracklist)],
             TG: [MessageHandler(filters.TEXT & ~filters.COMMAND, tg)],
+            # Cover order flow
+            COVER_COLORS: [MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, cover_colors_handler)],
+            COVER_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, cover_title_handler)],
+            COVER_PREFS: [MessageHandler(filters.TEXT & ~filters.COMMAND, cover_prefs_handler)],
+            COVER_TG: [MessageHandler(filters.TEXT & ~filters.COMMAND, cover_tg_handler)],
+            COVER_PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, cover_payment_handler)],
+            COVER_WAIT_SCREENSHOT: [MessageHandler(filters.PHOTO & ~filters.COMMAND, cover_screenshot_handler)],
+            # Promo flow
+            PROMO_PROJECT: [CallbackQueryHandler(button), MessageHandler(filters.TEXT & ~filters.COMMAND, promo_project_handler)],
+            PROMO_RELEASE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, promo_release_name_handler)],
+            PROMO_RELEASE_KIND: [CallbackQueryHandler(button), MessageHandler(filters.TEXT & ~filters.COMMAND, promo_release_kind_handler)],
+            PROMO_GENRE_MAIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, promo_genre_main_handler)],
+            PROMO_GENRE_EXTRA: [MessageHandler(filters.TEXT & ~filters.COMMAND, promo_genre_extra_handler)],
+            PROMO_MOOD: [MessageHandler(filters.TEXT & ~filters.COMMAND, promo_mood_handler)],
+            PROMO_VIBE: [MessageHandler(filters.TEXT & ~filters.COMMAND, promo_vibe_handler)],
+            PROMO_SOUND: [MessageHandler(filters.TEXT & ~filters.COMMAND, promo_sound_handler)],
+            PROMO_VOCAL: [CallbackQueryHandler(button), MessageHandler(filters.TEXT & ~filters.COMMAND, promo_vocal_handler)],
+            PROMO_EMOTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, promo_emotion_handler)],
+            PROMO_USECASE: [MessageHandler(filters.TEXT & ~filters.COMMAND, promo_usecase_handler)],
+            PROMO_COUNTRY: [MessageHandler(filters.TEXT & ~filters.COMMAND, promo_country_handler)],
             CONFIRM: [CallbackQueryHandler(button)],
         },
         fallbacks=[CommandHandler('start', start_cmd), CommandHandler('cancel', cancel_cmd)],
@@ -2864,7 +3502,54 @@ def main():
         # Если очередь не доступна — не критично
         pass
     
+    # Startup checks for OpenAI/httpx
+    status = _check_openai_status()
+    if not status['has_key']:
+        print("⚠️ OPENAI_API_KEY is not set — promo generation will be disabled until you set it.")
+    if not status['httpx_available']:
+        print("⚠️ httpx is not available — OpenAI calls will be skipped. Install httpx to enable AI generation.")
     print(f"{WINTER_EMOJIS['snowflake']} БОТ ЗАПУЩЕН! {WINTER_EMOJIS['snowflake']}")
+    # Ensure no webhook is active for this bot (prevents "Conflict: terminated by other getUpdates request").
+    try:
+        def _ensure_no_webhook(token: str):
+            url_info = f"https://api.telegram.org/bot{token}/getWebhookInfo"
+            try:
+                if httpx is not None:
+                    r = httpx.get(url_info, timeout=5.0)
+                    j = r.json()
+                else:
+                    # fallback to stdlib
+                    from urllib.request import urlopen
+                    import json as _json
+
+                    with urlopen(url_info, timeout=5) as fh:
+                        j = _json.load(fh)
+            except Exception:
+                return
+
+            if not j or not j.get('ok'):
+                return
+            result = j.get('result') or {}
+            webhook_url = result.get('url')
+            if webhook_url:
+                print('⚠️ Active webhook detected for this bot. Deleting...')
+                url_del = f"https://api.telegram.org/bot{token}/deleteWebhook"
+                try:
+                    if httpx is not None:
+                        httpx.get(url_del, timeout=5.0)
+                    else:
+                        from urllib.request import urlopen
+
+                        with urlopen(url_del, timeout=5) as _:
+                            pass
+                    print('✅ Webhook deleted.')
+                except Exception:
+                    print('❌ Failed to delete webhook automatically. Please remove webhook manually.')
+
+        _ensure_no_webhook(TOKEN)
+    except Exception:
+        pass
+
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
