@@ -2,11 +2,22 @@ import asyncio
 import json
 import os
 import re
+import sys
 import tempfile
+import threading
 from datetime import datetime, timedelta
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    Update,
+    WebAppInfo,
+)
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, TimedOut
 from telegram.ext import (
@@ -25,21 +36,73 @@ try:
 except Exception:  # pragma: no cover
     httpx = None
 
+try:
+    # Windows consoles may default to cp1251 and crash on emoji output.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw.strip())
+    except Exception:
+        return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _env_int_list(name: str, default: list[int]) -> list[int]:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    result: list[int] = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            result.append(int(item))
+        except Exception:
+            continue
+    return result or default
+
+
 # === КОНФИГ ===
-TOKEN = os.getenv("BOT_TOKEN", "7932680631:AAG3DW6gwg0Ccvuiq45aPVCSSWsOallp_Pk")
-MODERATION_CHAT_ID = -1002117586464
-ADMIN_IDS = [881379104]
+TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
+MODERATION_CHAT_ID = _env_int("MODERATION_CHAT_ID", -1002117586464)
+ADMIN_IDS = _env_int_list("ADMIN_IDS", [881379104])
+WEBAPP_URL = (os.getenv("WEBAPP_URL") or "").strip()
 ARTISTS_CHAT = "https://t.me/+oVmX3_dkyWJhNjJi"
 CHANNEL = "https://t.me/cxrnermusic"
 DB_FILE = "releases.json"
 MODERATION_DB_FILE = "moderation_releases.json"
 HISTORY_FILE = "history.json"
+CABINET_USERS_FILE = "cabinet_users.json"
+WEBAPP_DATA_DIR = os.path.join("webapp", "data")
+WEBAPP_RELEASES_EXPORT_FILE = os.path.join(WEBAPP_DATA_DIR, "releases-public.json")
+WEBAPP_CABINET_EXPORT_FILE = os.path.join(WEBAPP_DATA_DIR, "cabinet-users.json")
+ENABLE_WEB_SERVER = _env_bool("ENABLE_WEB_SERVER", False)
+WEB_SERVER_HOST = (os.getenv("WEB_SERVER_HOST") or "0.0.0.0").strip()
+WEB_SERVER_PORT = _env_int("PORT", _env_int("WEB_SERVER_PORT", 8080))
+WEB_SERVER_DIR = (os.getenv("WEB_SERVER_DIR") or "webapp").strip()
 
-# === ЗИМНИЕ ЭМОДЗИ ===
+# === ЭМОДЗИ ИНТЕРФЕЙСА ===
 WINTER_EMOJIS = {
-    "snowflake": "❄️",
-    "snowman": "⛄️",
-    "tree": "🎄",
+    "snowflake": "🎵",
+    "snowman": "🗂️",
+    "tree": "🚀",
     "gift": "🎁",
     "sparkles": "✨",
     "star": "⭐️",
@@ -161,8 +224,68 @@ def load_db():
     return _load_json_or_default(DB_FILE, {})
 
 
+def _export_webapp_releases(db_obj):
+    payload = {"updated_at": datetime.now().isoformat(), "users": {}}
+    for uid, rels in (db_obj or {}).items():
+        uid_s = str(uid)
+        safe_releases = []
+        for idx, rel in enumerate(rels or []):
+            if not isinstance(rel, dict):
+                continue
+            safe_releases.append({
+                "id": idx,
+                "type": rel.get("type", ""),
+                "name": rel.get("name", ""),
+                "subname": rel.get("subname", ""),
+                "nick": rel.get("nick", ""),
+                "date": rel.get("date", ""),
+                "genre": rel.get("genre", ""),
+                "status": rel.get("status", STATUS_ON_UPLOAD),
+                "submission_time": rel.get("submission_time", ""),
+                "moderation_time": rel.get("moderation_time", ""),
+                "reject_reason": rel.get("reject_reason", ""),
+                "moderator_comment": rel.get("moderator_comment", ""),
+                "upc": rel.get("upc", ""),
+                "link_published": rel.get("link_published", ""),
+                "source": rel.get("source", "bot"),
+                "user_deleted": bool(rel.get("user_deleted", False)),
+            })
+        payload["users"][uid_s] = safe_releases
+    _atomic_write_json(WEBAPP_RELEASES_EXPORT_FILE, payload)
+
+
+def load_cabinet_users():
+    return _load_json_or_default(CABINET_USERS_FILE, {})
+
+
+def _export_webapp_cabinet_users(cabinet_users_obj):
+    payload = {"updated_at": datetime.now().isoformat(), "users": {}}
+    for uid, info in (cabinet_users_obj or {}).items():
+        if not isinstance(info, dict):
+            continue
+        payload["users"][str(uid)] = {
+            "approved": bool(info.get("approved", True)),
+            "activated_at": info.get("activated_at", ""),
+            "username": info.get("username", ""),
+            "first_name": info.get("first_name", ""),
+        }
+    _atomic_write_json(WEBAPP_CABINET_EXPORT_FILE, payload)
+
+
+def save_cabinet_users(cabinet_users_obj):
+    _atomic_write_json(CABINET_USERS_FILE, cabinet_users_obj)
+    try:
+        _export_webapp_cabinet_users(cabinet_users_obj)
+    except Exception as e:
+        print(f"Ошибка экспорта cabinet users для Mini App: {e}")
+
+
 def save_db(db_obj):
     _atomic_write_json(DB_FILE, db_obj)
+    try:
+        _export_webapp_releases(db_obj)
+    except Exception as e:
+        print(f"Ошибка экспорта релизов для Mini App: {e}")
 
 
 def load_moderation_db():
@@ -219,6 +342,13 @@ def add_history_entry(user_id, idx, old_status, new_status, moderator_id, modera
 user_data = {}
 db = load_db()
 moderation_db = load_moderation_db()
+cabinet_users = load_cabinet_users()
+
+try:
+    _export_webapp_releases(db)
+    _export_webapp_cabinet_users(cabinet_users)
+except Exception as e:
+    print(f"Ошибка первичного экспорта данных Mini App: {e}")
 
 # === DRAFTS (автосохранение промежуточных данных) ===
 DRAFTS_FILE = "drafts.json"
@@ -292,6 +422,20 @@ def _looks_like_yandex_music_link(text: str) -> bool:
         return False
     lower = text.lower()
     return "music.yandex" in lower or "yandex.ru" in lower
+
+
+def _normalize_optional_text(value, default: str = ".") -> str:
+    text = clean(str(value or "")).strip()
+    return text if text else default
+
+
+def _normalize_release_type(value: str) -> str | None:
+    v = clean(str(value or "")).strip().lower()
+    if v in {"сингл", "single", "singl"}:
+        return "сингл"
+    if v in {"альбом", "album"}:
+        return "альбом"
+    return None
 
 # === БЕЗОПАСНАЯ ОТПРАВКА / РЕТРАИ (в т.ч. httpx.RemoteProtocolError) ===
 def _strip_html(text: str) -> str:
@@ -380,14 +524,59 @@ async def safe_edit_reply_markup(query, reply_markup=None):
     if "last" in locals():
         print(f"❌ safe_edit_reply_markup: {last}")
 
-# === ЗИМНЕЕ ОФОРМЛЕНИЕ ===
+# === UI ОФОРМЛЕНИЕ ===
 def winter_text(text, emoji_key=None):
     if emoji_key and emoji_key in WINTER_EMOJIS:
         return f"{WINTER_EMOJIS[emoji_key]} {text}"
     return text
 
 def winter_header(text):
-    return f"{WINTER_EMOJIS['snowflake']} {text} {WINTER_EMOJIS['snowflake']}"
+    return f"{WINTER_EMOJIS['music']} {text}"
+
+
+def build_main_menu_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("📀 Дистрибуция", callback_data='menu_distribution')],
+        [InlineKeyboardButton("💼 Сервисы", callback_data='menu_services')],
+        [InlineKeyboardButton("🧑‍💻 Кабинет", callback_data='menu_cabinet')],
+        [InlineKeyboardButton("🌐 Комьюнити", callback_data='menu_community')],
+    ]
+    rows.append([InlineKeyboardButton("Открыть приложение", callback_data='open_app')])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_distribution_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Загрузить релиз", callback_data='report')],
+        [InlineKeyboardButton("Мои релизы", callback_data='my_releases')],
+        [InlineKeyboardButton("⬅️ Главное меню", callback_data='main')],
+    ])
+
+
+def build_services_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Заказать обложку (500р)", callback_data='order_cover')],
+        [InlineKeyboardButton("Промо-текст под релиз", callback_data='promo_text')],
+        [InlineKeyboardButton("⬅️ Главное меню", callback_data='main')],
+    ])
+
+
+def build_cabinet_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("Мои релизы", callback_data='my_releases')],
+        [InlineKeyboardButton("Открыть приложение", callback_data='open_app')],
+    ]
+    rows.append([InlineKeyboardButton("⬅️ Главное меню", callback_data='main')])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_community_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Канал CXRNER MUSIC", url=CHANNEL)],
+        [InlineKeyboardButton("Чат артистов", url=ARTISTS_CHAT)],
+        [InlineKeyboardButton("Официальный сайт", url="https://cxrnermusic.vercel.app/")],
+        [InlineKeyboardButton("⬅️ Главное меню", callback_data='main')],
+    ])
 
 # === ПРОВЕРКА АДМИНА ===
 def is_admin(user_id):
@@ -406,24 +595,63 @@ def is_admin(user_id):
         print(f"❌ Ошибка проверки админа для {user_id}: {e}")
         return False
 
+
+def is_moderation_chat(chat_id) -> bool:
+    """Checks whether the event came from the moderation group chat."""
+    try:
+        return int(chat_id) == int(MODERATION_CHAT_ID)
+    except (TypeError, ValueError):
+        return False
+
+
+def is_webapp_url_ready() -> bool:
+    """Returns True only when WEBAPP_URL is configured and not a placeholder."""
+    if not WEBAPP_URL:
+        return False
+    lower = WEBAPP_URL.lower()
+    if "example.com" in lower:
+        return False
+    return lower.startswith("https://") or lower.startswith("http://localhost") or lower.startswith("http://127.0.0.1")
+
+
+def build_webapp_reply_keyboard() -> ReplyKeyboardMarkup:
+    """KeyboardButton WebApp launcher required for reliable Telegram WebApp.sendData()."""
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("Открыть приложение", web_app=WebAppInfo(url=WEBAPP_URL))]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        input_field_placeholder="Нажмите кнопку, чтобы открыть Mini App",
+    )
+
+
+def start_static_web_server_if_enabled():
+    """Optional static server for webapp/ directory (useful in production hosting)."""
+    if not ENABLE_WEB_SERVER:
+        return None
+
+    web_root = os.path.abspath(WEB_SERVER_DIR)
+    if not os.path.isdir(web_root):
+        print(f"⚠️ ENABLE_WEB_SERVER=1, но директория не найдена: {web_root}")
+        return None
+
+    host = WEB_SERVER_HOST or "0.0.0.0"
+    port = WEB_SERVER_PORT if WEB_SERVER_PORT > 0 else 8080
+    handler = partial(SimpleHTTPRequestHandler, directory=web_root)
+    server = ThreadingHTTPServer((host, port), handler)
+    server.daemon_threads = True
+
+    th = threading.Thread(target=server.serve_forever, name="webapp-static-server", daemon=True)
+    th.start()
+    print(f"🌐 Static Mini App server started on http://{host}:{port} (dir: {web_root})")
+    return server
+
 # === ГЛАВНОЕ МЕНЮ (/start) ===
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(winter_text("Отправить релиз", "music"), callback_data='report')],
-        [InlineKeyboardButton(winter_text("Мои релизы", "notes"), callback_data='my_releases')],
-        [InlineKeyboardButton(winter_text("Заказать обложку (500₽)", "gift"), callback_data='order_cover')],
-        [InlineKeyboardButton(winter_text("Промо-текст под релиз", "comment"), callback_data='promo_text')],
-        [InlineKeyboardButton(winter_text("Канал", "published"), url=CHANNEL)],
-        [InlineKeyboardButton(winter_text("Чат артистов", "headphones"), url=ARTISTS_CHAT)]
-    ])
-    
-    welcome_text = f"""
-{winter_header("CXRNER MUSIC")}
-
-{escape_html("Добро пожаловать в зимнюю студию музыки!")} {WINTER_EMOJIS['tree']}
-
-{escape_html("Выберите действие:")}
-"""
+    keyboard = build_main_menu_keyboard()
+    welcome_text = (
+        "Добро пожаловать в систему дистрибуции CXRNER MUSIC.\n"
+        "Управляй релизами. Загружай треки. Масштабируй звук."
+    )
     
     if update.message:
         await update.message.reply_text(
@@ -435,6 +663,269 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(update.callback_query, welcome_text, reply_markup=keyboard)
     return REPORT
 
+
+async def app_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send a keyboard button to open Telegram Mini App."""
+    if not is_webapp_url_ready():
+        await update.message.reply_text(
+            "❌ Mini App URL не настроен.\n"
+            "Установите переменную окружения:\n"
+            "<code>WEBAPP_URL=https://ваш-домен/index.html</code>\n"
+            "и перезапустите бота.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    keyboard = build_webapp_reply_keyboard()
+    await update.message.reply_text(
+        f"🎵 CXRNER MUSIC Mini App\n\n"
+        f"<b>Важно:</b> запускайте Mini App кнопкой ниже.\n"
+        f"Так Telegram корректно передаст данные анкеты боту.\n\n"
+        f"<b>URL:</b> <code>{escape_html(WEBAPP_URL)}</code>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
+
+
+async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles payload sent from Telegram WebApp via WebApp.sendData()."""
+    if not update.message or not update.message.web_app_data:
+        return
+
+    raw_data = update.message.web_app_data.data or ""
+    user = update.effective_user
+    user_id = str(user.id) if user else ""
+
+    try:
+        payload = json.loads(raw_data)
+    except Exception:
+        await update.message.reply_text(
+            "❌ Не удалось распознать данные Mini App. Обновите приложение и попробуйте снова."
+        )
+        return
+
+    legacy_root_keys = {
+        "artist_name", "track_title", "release_date", "telegram_contact",
+        "type", "name", "nick", "fio", "date", "genre", "link", "tg"
+    }
+    action = clean(str(payload.get("action", ""))).strip()
+    looks_like_submit_payload = isinstance(payload.get("form"), dict) or any(k in payload for k in legacy_root_keys)
+    if action not in {"cabinet_activate", "webapp_release_submit", "submit_release"} and looks_like_submit_payload:
+        action = "submit_release"
+
+    raw_bytes = len(raw_data.encode("utf-8")) if isinstance(raw_data, str) else 0
+    print(f"[WEBAPP] action={action or '-'} user_id={user_id or '-'} bytes={raw_bytes}", flush=True)
+
+    if action == "cabinet_activate":
+        if not user or not user_id:
+            await update.message.reply_text("❌ Не удалось определить аккаунт Telegram для привязки кабинета.")
+            return
+        cabinet_users[user_id] = {
+            "approved": True,
+            "activated_at": datetime.now().isoformat(),
+            "username": user.username or "",
+            "first_name": user.first_name or "",
+        }
+        save_cabinet_users(cabinet_users)
+        await update.message.reply_text(
+            "✅ <b>Личный кабинет активирован</b>\n\n"
+            "Теперь в Mini App будет доступен раздел с вашими релизами и статусами.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if action not in {"webapp_release_submit", "submit_release"}:
+        await update.message.reply_text("✅ Данные Mini App получены.")
+        return
+
+    if not user or not user_id:
+        await update.message.reply_text("❌ Не удалось определить пользователя Telegram. Перезапустите Mini App.")
+        return
+
+    form = payload.get("form")
+    if not isinstance(form, dict):
+        # Fallback for cached legacy Mini App builds that send form fields at root level.
+        if isinstance(payload, dict) and any(k in payload for k in legacy_root_keys):
+            form = payload
+        else:
+            await update.message.reply_text("❌ Ошибка данных формы. Отправьте анкету ещё раз.")
+            return
+
+    # Support legacy payload shape from old Mini App versions.
+    legacy_form_detected = (
+        not form.get("type")
+        and any(
+            form.get(k)
+            for k in ("artist_name", "track_title", "release_date", "telegram_contact", "contact")
+        )
+    )
+    if action == "submit_release" or legacy_form_detected:
+        legacy_date = clean(str(form.get("release_date") or form.get("date") or "")).strip()
+        if legacy_date and "-" in legacy_date:
+            try:
+                legacy_date = datetime.strptime(legacy_date, "%Y-%m-%d").strftime("%d.%m.%Y")
+            except ValueError:
+                pass
+
+        legacy_type_raw = clean(str(form.get("release_type") or form.get("type") or "single")).strip().lower()
+        legacy_type = "альбом" if legacy_type_raw in {"альбом", "album"} else "сингл"
+        legacy_has_lyrics = clean(str(form.get("has_lyrics") or form.get("lyrics") or "")).strip()
+        legacy_mat = clean(str(form.get("mat") or "")).strip()
+
+        form = {
+            "type": legacy_type,
+            "name": form.get("track_title") or form.get("name") or "",
+            "subname": form.get("subname") or ".",
+            "has_lyrics": legacy_has_lyrics or "Нет, это инструментал",
+            "nick": form.get("artist_name") or form.get("nick") or "",
+            "fio": form.get("artist_name") or form.get("fio") or "",
+            "date": legacy_date,
+            "version": form.get("version") or "Оригинал",
+            "genre": form.get("genre") or "",
+            "link": form.get("link") or form.get("files_link") or form.get("audio_link") or ".",
+            "yandex": form.get("yandex") or form.get("yandex_link") or ".",
+            "mat": legacy_mat or "Нет",
+            "promo": form.get("promo") or ".",
+            "comment": form.get("comment") or ".",
+            "tracklist": form.get("tracklist") or ".",
+            "tg": form.get("telegram_contact") or form.get("contact") or form.get("tg") or "",
+        }
+
+    errors: list[str] = []
+
+    release_type = _normalize_release_type(form.get("type", ""))
+    if not release_type:
+        errors.append("Укажите тип релиза: сингл или альбом.")
+
+    name = clean(str(form.get("name", ""))).strip()
+    if not name:
+        errors.append("Поле «Название релиза» обязательно.")
+
+    subname = _normalize_optional_text(form.get("subname"), ".")
+
+    has_lyrics_raw = clean(str(form.get("has_lyrics", ""))).strip().lower()
+    if has_lyrics_raw in {"да", "yes", "y"}:
+        has_lyrics = "Да"
+    elif has_lyrics_raw in {"нет", "no", "n", "нет, это инструментал", "инструментал", "instrumental"}:
+        has_lyrics = "Нет, это инструментал"
+    elif has_lyrics_raw:
+        has_lyrics = clean(str(form.get("has_lyrics", ""))).strip()
+    else:
+        has_lyrics = ""
+        errors.append("Укажите, есть ли слова в релизе.")
+
+    nick = clean(str(form.get("nick", ""))).strip()
+    if not nick:
+        errors.append("Поле «Ник исполнителя» обязательно.")
+
+    fio = clean(str(form.get("fio", ""))).strip()
+    if not fio:
+        errors.append("Поле «ФИО исполнителя» обязательно.")
+
+    date_text = clean(str(form.get("date", ""))).strip()
+    if not date_text:
+        errors.append("Укажите дату релиза в формате ДД.ММ.ГГГГ.")
+    else:
+        try:
+            date_obj = datetime.strptime(date_text, "%d.%m.%Y")
+            min_days = 7 if release_type == "альбом" else 3
+            if date_obj < datetime.now() + timedelta(days=min_days):
+                errors.append(f"Дата релиза должна быть минимум через {min_days} дней.")
+        except ValueError:
+            errors.append("Неверный формат даты. Используйте ДД.ММ.ГГГГ.")
+
+    version = clean(str(form.get("version", ""))).strip()
+    if not version or version == "-":
+        version = "Оригинал"
+
+    genre = clean(str(form.get("genre", ""))).strip()
+    if not genre:
+        errors.append("Поле «Жанр» обязательно.")
+
+    link = clean(str(form.get("link", ""))).strip()
+    if not link:
+        errors.append("Добавьте ссылку на файлы.")
+    elif not _looks_like_url(link):
+        errors.append("Ссылка на файлы должна начинаться с http:// или https://.")
+
+    yandex = clean(str(form.get("yandex", ""))).strip()
+    if not yandex or yandex in {"-", "нет", "none"}:
+        yandex = "."
+    if yandex != "." and not _looks_like_url(yandex):
+        errors.append("Ссылка Яндекс Музыки должна быть валидным URL или точкой «.».")
+
+    mat_raw = clean(str(form.get("mat", ""))).strip().lower()
+    if mat_raw in {"да", "yes", "y"}:
+        mat = "Да"
+    elif mat_raw in {"нет", "no", "n"}:
+        mat = "Нет"
+    else:
+        mat = ""
+        errors.append("Укажите, есть ли ненормативная лексика (Да/Нет).")
+
+    promo = _normalize_optional_text(form.get("promo"), ".")
+    comment = _normalize_optional_text(form.get("comment"), ".")
+    tracklist = _normalize_optional_text(form.get("tracklist"), ".")
+
+    tg_contact = clean(str(form.get("tg", ""))).strip()
+    if not tg_contact:
+        errors.append("Укажите контакт Telegram.")
+
+    if release_type == "альбом" and tracklist == ".":
+        errors.append("Для альбома заполните Tracklist.")
+
+    if errors:
+        print(f"[WEBAPP] validation_failed user_id={user_id} errors={errors}", flush=True)
+        err_lines = "\n".join(f"• {escape_html(item)}" for item in errors[:8])
+        await update.message.reply_text(
+            f"{WINTER_EMOJIS['cross']} <b>Анкета Mini App не отправлена</b>\n\n"
+            f"{err_lines}\n\n"
+            "Исправьте поля и отправьте форму повторно.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    release_data = {
+        "type": release_type,
+        "name": name,
+        "subname": subname,
+        "has_lyrics": has_lyrics,
+        "nick": nick,
+        "fio": fio,
+        "date": date_text,
+        "version": version,
+        "genre": genre,
+        "link": link,
+        "yandex": yandex,
+        "mat": mat,
+        "promo": promo,
+        "comment": comment,
+        "tracklist": tracklist,
+        "tg": tg_contact,
+        "source": "mini_app",
+        "webapp_submitted_at": payload.get("submitted_at"),
+    }
+
+    if release_type != "альбом":
+        release_data.pop("tracklist", None)
+
+    try:
+        await _submit_release_to_moderation(context, user, user_id, release_data)
+        print(f"[WEBAPP] submitted_to_moderation user_id={user_id} release={name}", flush=True)
+    except Exception as e:
+        print(f"Ошибка отправки анкеты из Mini App: {e}")
+        await update.message.reply_text(
+            f"{WINTER_EMOJIS['cross']} Не удалось отправить анкету в модерацию. Попробуйте ещё раз.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    await update.message.reply_text(
+        f"{WINTER_EMOJIS['check']} <b>Анкета отправлена в модерацию</b>\n\n"
+        "Статус будет обновляться так же, как у анкеты из бота.\n"
+        "Проверить можно в разделе «Мои релизы».",
+        parse_mode=ParseMode.HTML,
+    )
+
 # === КОМАНДА /help ===
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = f"""
@@ -444,15 +935,17 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /start - Главное меню
 /my - Мои релизы и статистика
 /search &lt;название&gt; - Поиск релизов
+/app - Открыть Mini App
 /cancel - Отменить текущее действие
 /help - Эта справка
 
 {WINTER_EMOJIS['notes']} <b>КАК ОТПРАВИТЬ РЕЛИЗ:</b>
 1. Нажмите /start
-2. Выберите "Отправить релиз"
-3. Выберите тип (Сингл или Альбом)
-4. Заполните все поля
-5. Подтвердите отправку
+2. Откройте раздел "📀 Дистрибуция"
+3. Нажмите "Загрузить релиз"
+4. Выберите тип (Сингл или Альбом)
+5. Заполните все поля
+6. Подтвердите отправку
 
 {WINTER_EMOJIS['waiting']} <b>СТАТУСЫ РЕЛИЗОВ:</b>
 ⏳ Ожидает - на модерации
@@ -465,9 +958,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
     
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(winter_text("Главное меню", "tree"), callback_data='main')],
-        [InlineKeyboardButton(winter_text("Отправить релиз", "music"), callback_data='report')],
-        [InlineKeyboardButton(winter_text("Мои релизы", "notes"), callback_data='my_releases')]
+        [InlineKeyboardButton("Главное меню", callback_data='main')],
+        [InlineKeyboardButton("📀 Дистрибуция", callback_data='menu_distribution')],
+        [InlineKeyboardButton("🧑‍💻 Кабинет", callback_data='menu_cabinet')]
     ])
     
     await update.message.reply_text(
@@ -1381,6 +1874,95 @@ def _format_release_form_for_group(user, user_id: str, data: dict) -> str:
     return "\n".join(lines)
 
 
+def _build_moderation_keyboard(user_id: str, idx: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🕓 На отгрузке", callback_data=f"m_upload_{user_id}_{idx}"),
+            InlineKeyboardButton("🧠 Модерация", callback_data=f"m_moderate_{user_id}_{idx}"),
+            InlineKeyboardButton("✅ Принято", callback_data=f"m_approve_{user_id}_{idx}")
+        ],
+        [
+            InlineKeyboardButton("❌ Отклонить", callback_data=f"m_reject_{user_id}_{idx}"),
+            InlineKeyboardButton("✏️ На исправлении", callback_data=f"m_needfix_{user_id}_{idx}"),
+            InlineKeyboardButton("🗑 Удален", callback_data=f"m_delete_{user_id}_{idx}")
+        ],
+    ])
+
+
+async def _submit_release_to_moderation(
+    context: ContextTypes.DEFAULT_TYPE,
+    user,
+    user_id: str,
+    release_data: dict,
+) -> int:
+    global moderation_db
+
+    release_data["status"] = STATUS_ON_UPLOAD
+    release_data["submission_time"] = release_data.get("submission_time") or datetime.now().isoformat()
+    release_data.setdefault("reminder_sent", False)
+
+    idx = len(db.get(user_id, []))
+    keyboard = _build_moderation_keyboard(user_id, idx)
+    msg = _format_release_form_for_group(user, user_id, release_data)
+
+    moderation_msg = await context.bot.send_message(
+        MODERATION_CHAT_ID,
+        msg,
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
+        disable_web_page_preview=True,
+    )
+
+    try:
+        await context.bot.pin_chat_message(chat_id=MODERATION_CHAT_ID, message_id=moderation_msg.message_id)
+    except Exception:
+        pass
+
+    release_data["moderation_message_id"] = moderation_msg.message_id
+    release_data["moderation_original_text"] = msg
+
+    moderation_data = release_data.copy()
+    moderation_data["message_id"] = moderation_msg.message_id
+    moderation_data["user_id"] = user_id
+    moderation_data["username"] = getattr(user, "username", None)
+
+    moderation_db.setdefault("moderation_messages", []).append(moderation_data)
+    save_moderation_db(moderation_db)
+
+    db.setdefault(user_id, [])
+    release_data["username"] = getattr(user, "username", "") or release_data.get("username", "")
+    db[user_id].append(release_data.copy())
+    save_db(db)
+
+    try:
+        await _append_status_to_moderation_message(
+            context,
+            moderation_msg.message_id,
+            msg,
+            release_data.get("status", STATUS_ON_UPLOAD),
+            reply_markup=moderation_msg.reply_markup,
+        )
+    except Exception as e:
+        print(f"Ошибка при добавлении шапки статуса: {e}")
+
+    try:
+        upc_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📦 Присвоить UPC", callback_data=f"m_add_upc_{user_id}_{idx}")]
+        ])
+        await context.bot.send_message(
+            chat_id=MODERATION_CHAT_ID,
+            text="💾 <b>Добавьте UPC код для этого релиза</b>\n\n"
+                 "Нажмите кнопку и ответьте UPC кодом на исходное сообщение анкеты.",
+            reply_to_message_id=moderation_msg.message_id,
+            parse_mode=ParseMode.HTML,
+            reply_markup=upc_keyboard,
+        )
+    except Exception as e:
+        print(f"Ошибка отправки кнопки UPC: {e}")
+
+    return idx
+
+
 def _format_status_append(status: str, moderator_username: str | None = None, reason: str | None = None, comment: str | None = None) -> str:
     # FIX: приведено к единому формату служебного блока (immutable карточка + доп.служебный блок)
     status_emoji = {
@@ -1494,12 +2076,45 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
+    if data == 'menu_distribution':
+        await safe_edit(query, "<b>Дистрибуция</b>\n\nВыберите действие:", reply_markup=build_distribution_keyboard())
+        return REPORT
+
+    if data == 'menu_services':
+        await safe_edit(query, "<b>Сервисы</b>\n\nВыберите действие:", reply_markup=build_services_keyboard())
+        return REPORT
+
+    if data == 'menu_cabinet':
+        await safe_edit(query, "<b>Кабинет</b>\n\nВыберите действие:", reply_markup=build_cabinet_keyboard())
+        return REPORT
+
+    if data == 'menu_community':
+        await safe_edit(query, "<b>Комьюнити</b>\n\nОфициальные площадки CXRNER MUSIC:", reply_markup=build_community_keyboard())
+        return REPORT
+
+    if data == 'open_app':
+        if not is_webapp_url_ready():
+            await query.message.reply_text(
+                "❌ Mini App URL не настроен.\n"
+                "Установите переменную окружения:\n"
+                "<code>WEBAPP_URL=https://ваш-домен/index.html</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return REPORT
+        await query.message.reply_text(
+            "🎵 <b>Запуск Mini App</b>\n\n"
+            "Нажмите кнопку ниже. В таком режиме данные анкеты гарантированно уходят в бота.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=build_webapp_reply_keyboard(),
+        )
+        return REPORT
+
     if data == 'report':
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton(winter_text("Сингл", "music"), callback_data='single')],
-            [InlineKeyboardButton(winter_text("Альбом", "notes"), callback_data='album')]
+            [InlineKeyboardButton("Сингл", callback_data='single')],
+            [InlineKeyboardButton("Альбом", callback_data='album')]
         ])
-        await safe_edit(query, f"{WINTER_EMOJIS['snowflake']} <b>Выберите тип релиза:</b>", keyboard)
+        await safe_edit(query, "<b>Выберите тип релиза:</b>", keyboard)
         return TYPE
 
     if data == 'order_cover':
@@ -1558,14 +2173,9 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_stats_cmd(update, context)
         return
     if data.startswith('stats_period_'):
-        # Показать статистику за выбранный период (admin only, from moderation chat)
-        if not is_admin(update.callback_query.from_user.id):
-            await update.callback_query.answer('❌ Доступ запрещён', show_alert=True)
-            return
-        
-        # Проверяем что это чат модерации
+        # Показать статистику за выбранный период (доступно в чате модерации)
         chat_id = update.callback_query.message.chat_id if update.callback_query.message else None
-        if chat_id is None or int(chat_id) != int(MODERATION_CHAT_ID):
+        if not is_moderation_chat(chat_id):
             await update.callback_query.answer('❌ Статистика доступна только в чате модерации', show_alert=True)
             return
         
@@ -2189,92 +2799,12 @@ async def show_confirm(message, context: ContextTypes.DEFAULT_TYPE):
 async def send_moderation(query, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(query.from_user.id)
     data = user_data[user_id]
-    # При отправке ставим статус на отгрузке — карточка immutable до редактирования модератором
-    data["status"] = STATUS_ON_UPLOAD
-    data["submission_time"] = datetime.now().isoformat()
-    user = query.from_user
-
-    idx = len(db.get(user_id, []))
-    
-    # FIX: Клавиатура для модерации — все статусы доступны для админов
-    # ПЕРВЫЙ РЯД: промежуточные статусы (остаются активны)
-    # ВТОРОЙ РЯД: финальные статусы (убираются после выбора)
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🕓 На отгрузке", callback_data=f"m_upload_{user_id}_{idx}"),
-            InlineKeyboardButton("🧠 Модерация", callback_data=f"m_moderate_{user_id}_{idx}"),
-            InlineKeyboardButton("✅ Принято", callback_data=f"m_approve_{user_id}_{idx}")
-        ],
-        [
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"m_reject_{user_id}_{idx}"),
-            InlineKeyboardButton("✏️ На исправлении", callback_data=f"m_needfix_{user_id}_{idx}"),
-            InlineKeyboardButton("🗑 Удален", callback_data=f"m_delete_{user_id}_{idx}")
-        ],
-    ])
-
-    msg = _format_release_form_for_group(user, user_id, data)
-    
     try:
-        moderation_msg = await context.bot.send_message(
-            MODERATION_CHAT_ID, msg, parse_mode=ParseMode.HTML, reply_markup=keyboard, disable_web_page_preview=True
-        )
-        
-        # ЗАКРЕПЛЯЕМ сообщение автоматически
-        try:
-            await context.bot.pin_chat_message(chat_id=MODERATION_CHAT_ID, message_id=moderation_msg.message_id)
-        except Exception:
-            # NOTE: отсутствие прав на закрепление — не критично
-            pass
-        
-        # Сохраняем ID сообщения и исходный текст в сам релиз (immutable карточка)
-        data["moderation_message_id"] = moderation_msg.message_id
-        data["moderation_original_text"] = msg
-        # фикс: флаг напоминания, чтобы не рассылать спам
-        data.setdefault("reminder_sent", False)
-        
-        # Сохраняем в архив модерации
-        moderation_data = data.copy()
-        moderation_data['message_id'] = moderation_msg.message_id
-        moderation_data['user_id'] = user_id
-        moderation_data['username'] = user.username
-        
-        if 'moderation_messages' not in moderation_db:
-            moderation_db['moderation_messages'] = []
-        moderation_db['moderation_messages'].append(moderation_data)
-        save_moderation_db(moderation_db)
-        
+        await _submit_release_to_moderation(context, query.from_user, user_id, data)
     except Exception as e:
         await safe_edit(query, f"{WINTER_EMOJIS['cross']} Ошибка: {e}")
         return REPORT
 
-    if user_id not in db:
-        db[user_id] = []
-    # фикс: сохраняем username в релиз, чтобы правильно отображалось в модерации/истории
-    data["username"] = user.username or ""
-    db[user_id].append(data.copy())
-    save_db(db)
-    # Добавляем шапку статуса в исходную анкету (чтобы вверху была текущая отметка статуса)
-    try:
-        await _append_status_to_moderation_message(context, moderation_msg.message_id, msg, data.get('status', STATUS_ON_UPLOAD), reply_markup=moderation_msg.reply_markup)
-    except Exception as e:
-        print(f"Ошибка при добавлении шапки статуса: {e}")
-    
-    # Отправляем сообщение с кнопкой для добавления UPC на все релизы
-    try:
-        upc_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📦 Присвоить UPC", callback_data=f"m_add_upc_{user_id}_{idx}")]
-        ])
-        await context.bot.send_message(
-            chat_id=MODERATION_CHAT_ID,
-            text="💾 <b>Добавьте UPC код для этого релиза</b>\n\n"
-                 "Нажмите кнопку и ответьте UPC кодом на исходное сообщение анкеты.",
-            reply_to_message_id=moderation_msg.message_id,
-            parse_mode=ParseMode.HTML,
-            reply_markup=upc_keyboard
-        )
-    except Exception as e:
-        print(f"Ошибка отправки кнопки UPC: {e}")
-    
     await safe_edit(query, f"{WINTER_EMOJIS['check']} <b>Анкета отправлена!</b>\nОжидайте 12–72 часа.", parse_mode=ParseMode.HTML)
 
 # === МОДЕРАЦИЯ (КНОПКИ НЕ ДОЛЖНЫ ЗАТИРАТЬ АНКЕТУ) ===
@@ -2297,12 +2827,7 @@ async def manual_reject_handler(update: Update, context: ContextTypes.DEFAULT_TY
     """Обработчик ручного отклонения анкеты через reply на сообщение анкеты."""
     if not update.message or not update.message.reply_to_message:
         return
-    if update.message.chat_id != MODERATION_CHAT_ID:
-        return
-    
-    # Проверяем что это админ
-    if not is_admin(update.message.from_user.id):
-        await update.message.reply_text("❌ Только администраторы могут отклонять анкеты.")
+    if not is_moderation_chat(update.message.chat_id):
         return
     
     text = clean(update.message.text)
@@ -2423,12 +2948,7 @@ async def add_upc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик добавления UPC кода через reply на сообщение анкеты или на инструкционное сообщение."""
     if not update.message or not update.message.reply_to_message:
         return
-    if update.message.chat_id != MODERATION_CHAT_ID:
-        return
-    
-    # Проверяем что это админ
-    if not is_admin(update.message.from_user.id):
-        await update.message.reply_text("❌ Только администраторы могут добавлять UPC.")
+    if not is_moderation_chat(update.message.chat_id):
         return
     
     # Получаем UPC из сообщения
@@ -3418,12 +3938,16 @@ async def undo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # === ЗАПУСК ===
 def main():
+    if not TOKEN:
+        raise RuntimeError("BOT_TOKEN не задан. Установите переменную окружения BOT_TOKEN.")
+
     app = Application.builder().token(TOKEN).read_timeout(120).build()
     
     app.add_handler(CommandHandler('help', help_cmd))
     app.add_handler(CommandHandler('cancel', cancel_cmd))
     app.add_handler(CommandHandler('my', my_cmd))
     app.add_handler(CommandHandler('search', search_cmd))
+    app.add_handler(CommandHandler('app', app_cmd))
     app.add_handler(CommandHandler('admin', admin_panel))
     app.add_handler(CommandHandler('backup', backup_cmd))
     app.add_handler(CommandHandler('moderation_backup', moderation_backup_cmd))
@@ -3438,6 +3962,8 @@ def main():
     # FIX: Модерация ДОЛЖНА быть ПЕРВЫМ обработчиком до ConversationHandler и глобального button
     # Модерация: отдельный handler по паттерну m_*
     app.add_handler(CallbackQueryHandler(moderation_handler, pattern=r"^m_.*"))
+    # Mini App payload from Telegram WebApp.sendData(...)
+    app.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler))
     # FIX: Обработчик добавления UPC кода через reply в чате модерации (проверяем по УПК-подобному коду)
     app.add_handler(MessageHandler(filters.TEXT & filters.REPLY & filters.Chat(MODERATION_CHAT_ID) & ~filters.COMMAND, add_upc_handler), group=1)
     # FIX: Обработчик ручного отклонения анкеты через reply в чате модерации
@@ -3508,6 +4034,8 @@ def main():
         print("⚠️ OPENAI_API_KEY is not set — promo generation will be disabled until you set it.")
     if not status['httpx_available']:
         print("⚠️ httpx is not available — OpenAI calls will be skipped. Install httpx to enable AI generation.")
+    if not is_webapp_url_ready():
+        print("⚠️ WEBAPP_URL is not configured (or points to example.com). Mini App button is hidden.")
     print(f"{WINTER_EMOJIS['snowflake']} БОТ ЗАПУЩЕН! {WINTER_EMOJIS['snowflake']}")
     # Ensure no webhook is active for this bot (prevents "Conflict: terminated by other getUpdates request").
     try:
@@ -3550,7 +4078,17 @@ def main():
     except Exception:
         pass
 
-    app.run_polling(drop_pending_updates=True)
+    static_server = start_static_web_server_if_enabled()
+    try:
+        app.run_polling(drop_pending_updates=True)
+    finally:
+        if static_server:
+            try:
+                static_server.shutdown()
+                static_server.server_close()
+                print("🌐 Static Mini App server stopped.")
+            except Exception as e:
+                print(f"⚠️ Ошибка остановки static server: {e}")
 
 if __name__ == '__main__':
     main()
