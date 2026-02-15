@@ -1,6 +1,9 @@
 {
+  "BOT_TOKEN": "",
   "MODERATION_CHAT_ID": -1002117586464,
-  "ADMIN_IDS": [881379104],
+  "ADMIN_IDS": [
+    881379104
+  ],
   "PUBLIC_BASE_URL": "https://cxrnermusic.vercel.app",
   "WEBAPP_URL": "https://cxrnermusic.vercel.app/index.html",
   "ENABLE_WEB_SERVER": true,

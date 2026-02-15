@@ -99,6 +99,17 @@ def _cfg_str(name: str, default: str = "") -> str:
         return env_val.strip()
     cfg_val = LOCAL_CONFIG.get(name)
     if cfg_val is None:
+        # common aliases for hosting panels / legacy configs
+        aliases = {
+            "BOT_TOKEN": ("TOKEN", "bot_token", "token"),
+            "WEBAPP_URL": ("webapp_url",),
+            "PUBLIC_BASE_URL": ("public_base_url", "base_url"),
+        }.get(name, ())
+        for alias in aliases:
+            if alias in LOCAL_CONFIG and str(LOCAL_CONFIG.get(alias) or "").strip():
+                cfg_val = LOCAL_CONFIG.get(alias)
+                break
+    if cfg_val is None:
         return default
     return str(cfg_val).strip()
 
