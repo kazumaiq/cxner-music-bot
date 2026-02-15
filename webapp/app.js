@@ -972,15 +972,49 @@ if (HAS_DOM) {
       // eslint-disable-next-line global-require
       const path = require("node:path");
       // eslint-disable-next-line global-require
+      const fs = require("node:fs");
+      // eslint-disable-next-line global-require
       const cp = require("node:child_process");
 
       const projectRoot = path.resolve(__dirname, "..");
       const mainPy = path.join(projectRoot, "main.py");
-      const candidates = [process.env.PYTHON_BIN, "python3", "python"].filter(Boolean);
+      const uniq = (arr) => [...new Set(arr.filter(Boolean))];
+      const knownCandidates = [
+        process.env.PYTHON_BIN,
+        process.env.PYTHON,
+        "python3",
+        "python",
+        "python3.12",
+        "python3.11",
+        "python3.10",
+        "/usr/bin/python3",
+        "/usr/local/bin/python3",
+        "/usr/bin/python",
+        "/usr/local/bin/python"
+      ];
+      const scannedCandidates = [];
+      for (const dir of ["/usr/bin", "/usr/local/bin"]) {
+        try {
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
+          for (const entry of entries) {
+            if (!entry.isFile()) {
+              continue;
+            }
+            if (/^python3(\.\d+)?$/.test(entry.name) || entry.name === "python") {
+              scannedCandidates.push(path.join(dir, entry.name));
+            }
+          }
+        } catch {
+          // ignore missing directories or permission issues
+        }
+      }
+      const candidates = uniq([...knownCandidates, ...scannedCandidates]);
 
       let pythonBin = null;
+      const tried = [];
       for (const bin of candidates) {
-        const check = cp.spawnSync(bin, ["--version"], { stdio: "ignore" });
+        const check = cp.spawnSync(bin, ["--version"], { stdio: "ignore", timeout: 3000 });
+        tried.push(bin);
         if (check.status === 0) {
           pythonBin = bin;
           break;
@@ -988,8 +1022,32 @@ if (HAS_DOM) {
       }
 
       if (!pythonBin) {
+        if (typeof process.platform === "string" && process.platform !== "win32") {
+          try {
+            const probe = cp.spawnSync("sh", ["-lc", "command -v python3 || command -v python || true"], {
+              encoding: "utf8",
+              stdio: ["ignore", "pipe", "ignore"],
+              timeout: 3000
+            });
+            const shellPython = String(probe.stdout || "").trim();
+            if (shellPython) {
+              const check = cp.spawnSync(shellPython, ["--version"], { stdio: "ignore", timeout: 3000 });
+              if (check.status === 0) {
+                pythonBin = shellPython;
+              }
+            }
+          } catch {
+            // ignore shell probe issues
+          }
+        }
+      }
+
+      if (!pythonBin) {
         // eslint-disable-next-line no-console
-        console.error("Python runtime not found. Set PYTHON_BIN or configure Python app start.");
+        console.error(
+          `Python runtime not found. Tried: ${tried.join(", ")}. ` +
+          "Set PYTHON_BIN or switch app runtime to Python with start command: python -u main.py"
+        );
         process.exit(1);
       }
 
