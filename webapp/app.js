@@ -964,10 +964,57 @@ function bootstrap() {
 if (HAS_DOM) {
   window.addEventListener("load", bootstrap);
 } else {
-  // If this file is started by Node.js on hosting, fail loudly with clear hint.
+  // If hosting starts this file with Node.js, run Python bot as a fallback launcher.
   if (typeof process !== "undefined" && process?.versions?.node) {
     // eslint-disable-next-line no-console
-    console.error("Mini App client script cannot run in Node.js. Start bot with: python -u main.py");
-    process.exit(1);
+    console.info("Mini App script started in Node.js, switching to Python bot launcher...");
+    try {
+      // eslint-disable-next-line global-require
+      const path = require("node:path");
+      // eslint-disable-next-line global-require
+      const cp = require("node:child_process");
+
+      const projectRoot = path.resolve(__dirname, "..");
+      const mainPy = path.join(projectRoot, "main.py");
+      const candidates = [process.env.PYTHON_BIN, "python3", "python"].filter(Boolean);
+
+      let pythonBin = null;
+      for (const bin of candidates) {
+        const check = cp.spawnSync(bin, ["--version"], { stdio: "ignore" });
+        if (check.status === 0) {
+          pythonBin = bin;
+          break;
+        }
+      }
+
+      if (!pythonBin) {
+        // eslint-disable-next-line no-console
+        console.error("Python runtime not found. Set PYTHON_BIN or configure Python app start.");
+        process.exit(1);
+      }
+
+      // eslint-disable-next-line no-console
+      console.info(`Starting bot: ${pythonBin} -u ${mainPy}`);
+      const child = cp.spawn(pythonBin, ["-u", mainPy], {
+        cwd: projectRoot,
+        stdio: "inherit",
+        env: process.env
+      });
+
+      const forwardSignal = (signal) => {
+        try {
+          child.kill(signal);
+        } catch {
+          // ignore
+        }
+      };
+      process.on("SIGTERM", () => forwardSignal("SIGTERM"));
+      process.on("SIGINT", () => forwardSignal("SIGINT"));
+      child.on("exit", (code) => process.exit(typeof code === "number" ? code : 1));
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("Failed to start Python bot from Node launcher:", err);
+      process.exit(1);
+    }
   }
 }
