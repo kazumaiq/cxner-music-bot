@@ -1,11 +1,11 @@
 {
-  "BOT_TOKEN": "7932680631:AAG3DW6gwg0Ccvuiq45aPVCSSWsOallp_Pk",
+  "BOT_TOKEN": "",
   "MODERATION_CHAT_ID": -1002117586464,
   "ADMIN_IDS": [
     881379104
   ],
   "PUBLIC_BASE_URL": "https://cxrnermusic.vercel.app",
-  "WEBAPP_URL": "https://cxrnermusic.vercel.app/index.html",
+  "WEBAPP_URL": "https://cxrnermusic.vercel.app/",
   "ENABLE_WEB_SERVER": true,
   "WEB_SERVER_HOST": "0.0.0.0",
   "WEB_SERVER_PORT": 8080,

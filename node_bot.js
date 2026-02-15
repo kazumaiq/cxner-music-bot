@@ -55,7 +55,10 @@ if (!TOKEN) {
 }
 const MOD_CHAT = envInt('MODERATION_CHAT_ID', -1002117586464);
 const BASE = envStr('PUBLIC_BASE_URL', '');
-const WEBAPP_URL = envStr('WEBAPP_URL', BASE ? `${BASE.replace(/\/+$/, '')}/index.html` : '');
+let WEBAPP_URL = envStr('WEBAPP_URL', BASE ? `${BASE.replace(/\/+$/, '')}/index.html` : '');
+if (/\.vercel\.app\/index\.html$/i.test(WEBAPP_URL)) {
+  WEBAPP_URL = WEBAPP_URL.replace(/\/index\.html$/i, '/');
+}
 const WEB_HOST = envStr('WEB_SERVER_HOST', '0.0.0.0');
 const WEB_PORT = envInt('PORT', envInt('WEB_SERVER_PORT', 8080));
 const WEB_DIR = envStr('WEB_SERVER_DIR', 'webapp');
@@ -95,6 +98,7 @@ const STATUS_EMOJI = {
 let db = loadJson(DB_FILE, {});
 let modDb = loadJson(MOD_DB_FILE, { moderation_messages: [] });
 let cabUsers = loadJson(CAB_FILE, {});
+const userForms = {};
 
 const API = `https://api.telegram.org/bot${TOKEN}`;
 async function tg(method, payload = {}) {
@@ -165,7 +169,8 @@ function keyboardMain() {
 }
 function keyboardDist() {
   return { inline_keyboard: [
-    [{ text: 'Загрузить релиз', callback_data: 'report' }],
+    [{ text: 'Загрузить релиз (анкета в боте)', callback_data: 'report_text' }],
+    [{ text: 'Открыть Mini App', callback_data: 'report_app' }],
     [{ text: 'Мои релизы', callback_data: 'my_releases' }],
     [{ text: '⬅️ Главное меню', callback_data: 'main' }]
   ]};
@@ -344,6 +349,358 @@ function validateForm(form) {
   return { errors, data: { type, name, subname, has_lyrics: hasLyrics, nick, fio, date, version, genre, link, yandex, mat, promo, comment, tracklist, tg: tgContact } };
 }
 
+async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_app') {
+  db[uid] = Array.isArray(db[uid]) ? db[uid] : [];
+  const idx = db[uid].length;
+  const rel = {
+    ...releaseData,
+    status: STATUS.ON_UPLOAD,
+    source,
+    submission_time: new Date().toISOString(),
+    username: user?.username || ''
+  };
+  const orig = fmtForm(user, uid, rel);
+  const sent = await tg('sendMessage', {
+    chat_id: MOD_CHAT,
+    text: withStatus(rel.status, orig),
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+    reply_markup: moderationKeyboard(uid, idx)
+  });
+
+  rel.moderation_message_id = sent.message_id;
+  rel.moderation_original_text = orig;
+  db[uid].push(rel);
+  saveDb();
+
+  modDb.moderation_messages = Array.isArray(modDb.moderation_messages) ? modDb.moderation_messages : [];
+  modDb.moderation_messages.push({ ...rel, user_id: uid, idx, message_id: sent.message_id });
+  saveModDb();
+  try { await tg('pinChatMessage', { chat_id: MOD_CHAT, message_id: sent.message_id }); } catch {}
+  return { idx, rel };
+}
+
+function getFormSession(uid) {
+  return userForms[String(uid)] || null;
+}
+
+function resetFormSession(uid) {
+  delete userForms[String(uid)];
+}
+
+function createFormSession(uid, user) {
+  userForms[String(uid)] = {
+    uid: String(uid),
+    user,
+    step: 'type',
+    form: {
+      type: '',
+      name: '',
+      subname: '.',
+      has_lyrics: '',
+      nick: '',
+      fio: '',
+      date: '',
+      version: 'Оригинал',
+      genre: '',
+      link: '',
+      yandex: '.',
+      mat: '',
+      promo: '.',
+      comment: '.',
+      tracklist: '.',
+      tg: ''
+    }
+  };
+  return userForms[String(uid)];
+}
+
+async function sendFormStep(chatId, uid) {
+  const s = getFormSession(uid);
+  if (!s) return;
+
+  if (s.step === 'type') {
+    await sendText(chatId, 'Выберите тип релиза:', {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: 'Сингл', callback_data: 'form_type_single' },
+            { text: 'Альбом', callback_data: 'form_type_album' }
+          ],
+          [{ text: 'Отмена', callback_data: 'form_cancel' }]
+        ]
+      }
+    });
+    return;
+  }
+  if (s.step === 'name') { await sendText(chatId, 'Введите название релиза:'); return; }
+  if (s.step === 'subname') { await sendText(chatId, 'Саб-название (если нет, отправьте точку "."):'); return; }
+  if (s.step === 'has_lyrics') {
+    await sendText(chatId, 'Есть слова в релизе?', {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: 'Да', callback_data: 'form_lyrics_yes' },
+            { text: 'Нет, инструментал', callback_data: 'form_lyrics_no' }
+          ],
+          [{ text: 'Отмена', callback_data: 'form_cancel' }]
+        ]
+      }
+    });
+    return;
+  }
+  if (s.step === 'nick') { await sendText(chatId, 'Ник исполнителя:'); return; }
+  if (s.step === 'fio') { await sendText(chatId, 'ФИО исполнителя:'); return; }
+  if (s.step === 'date') { await sendText(chatId, 'Дата релиза в формате ДД.ММ.ГГГГ:'); return; }
+  if (s.step === 'version') { await sendText(chatId, 'Версия релиза (или "Оригинал"):'); return; }
+  if (s.step === 'genre') { await sendText(chatId, 'Жанр:'); return; }
+  if (s.step === 'link') { await sendText(chatId, 'Ссылка на файлы (http/https):'); return; }
+  if (s.step === 'yandex') { await sendText(chatId, 'Ссылка Яндекс Музыки или точка ".":'); return; }
+  if (s.step === 'mat') {
+    await sendText(chatId, 'Есть ненормативная лексика?', {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: 'Да', callback_data: 'form_mat_yes' },
+            { text: 'Нет', callback_data: 'form_mat_no' }
+          ],
+          [{ text: 'Отмена', callback_data: 'form_cancel' }]
+        ]
+      }
+    });
+    return;
+  }
+  if (s.step === 'promo') { await sendText(chatId, 'Промо-текст (или точка "."):'); return; }
+  if (s.step === 'comment') { await sendText(chatId, 'Комментарий (или точка "."):'); return; }
+  if (s.step === 'tracklist') { await sendText(chatId, 'Tracklist для альбома (обязательно):'); return; }
+  if (s.step === 'tg') { await sendText(chatId, 'Контакт Telegram для связи (@username):'); return; }
+  if (s.step === 'confirm') {
+    const preview = fmtForm(s.user, s.uid, s.form);
+    await sendText(chatId, `Проверьте анкету:\n\n${preview}`, {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: 'Отправить в модерацию', callback_data: 'form_send' }],
+          [{ text: 'Отмена', callback_data: 'form_cancel' }]
+        ]
+      }
+    });
+  }
+}
+
+function parseYesNoText(value) {
+  const v = clean(value).toLowerCase();
+  if (['да', 'yes', 'y', '1'].includes(v)) return 'yes';
+  if (['нет', 'no', 'n', '0'].includes(v)) return 'no';
+  return '';
+}
+
+async function startTextForm(chatId, uid, user) {
+  createFormSession(uid, user);
+  await sendText(chatId, 'Запуск анкеты в боте.\n\nЧтобы отменить в любой момент: /cancel');
+  await sendFormStep(chatId, uid);
+}
+
+async function handleFormTextMessage(msg) {
+  const uid = String(msg.from?.id || '');
+  const s = getFormSession(uid);
+  if (!s) return false;
+
+  const text = clean(msg.text);
+  const chatId = msg.chat.id;
+
+  if (!text) return true;
+  if (text.startsWith('/') && text !== '/cancel') return false;
+  if (text === '/cancel') {
+    resetFormSession(uid);
+    await sendText(chatId, 'Анкета отменена.');
+    return true;
+  }
+
+  if (s.step === 'type') {
+    const t = normalizeType(text);
+    if (!t) {
+      await sendText(chatId, 'Выберите тип кнопками или введите: сингл / альбом.');
+      return true;
+    }
+    s.form.type = t;
+    s.step = 'name';
+    await sendFormStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'name') {
+    if (!text) { await sendText(chatId, 'Название не может быть пустым.'); return true; }
+    s.form.name = text;
+    s.step = 'subname';
+    await sendFormStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'subname') {
+    s.form.subname = text || '.';
+    s.step = 'has_lyrics';
+    await sendFormStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'has_lyrics') {
+    const yn = parseYesNoText(text);
+    if (!yn) {
+      await sendText(chatId, 'Ответьте "Да" или "Нет".');
+      return true;
+    }
+    s.form.has_lyrics = yn === 'yes' ? 'Да' : 'Нет, это инструментал';
+    s.step = 'nick';
+    await sendFormStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'nick') {
+    if (!text) { await sendText(chatId, 'Ник обязателен.'); return true; }
+    s.form.nick = text;
+    s.step = 'fio';
+    await sendFormStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'fio') {
+    if (!text) { await sendText(chatId, 'ФИО обязательно.'); return true; }
+    s.form.fio = text;
+    s.step = 'date';
+    await sendFormStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'date') {
+    if (!parseRuDate(text)) { await sendText(chatId, 'Неверный формат. Используйте ДД.ММ.ГГГГ.'); return true; }
+    s.form.date = text;
+    s.step = 'version';
+    await sendFormStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'version') {
+    s.form.version = text || 'Оригинал';
+    s.step = 'genre';
+    await sendFormStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'genre') {
+    if (!text) { await sendText(chatId, 'Жанр обязателен.'); return true; }
+    s.form.genre = text;
+    s.step = 'link';
+    await sendFormStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'link') {
+    if (!isHttpUrl(text)) { await sendText(chatId, 'Нужен валидный URL (http/https).'); return true; }
+    s.form.link = text;
+    s.step = 'yandex';
+    await sendFormStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'yandex') {
+    if (text === '.' || text === '-') {
+      s.form.yandex = '.';
+    } else {
+      if (!isHttpUrl(text)) { await sendText(chatId, 'Введите URL или точку ".".'); return true; }
+      s.form.yandex = text;
+    }
+    s.step = 'mat';
+    await sendFormStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'mat') {
+    const yn = parseYesNoText(text);
+    if (!yn) { await sendText(chatId, 'Ответьте "Да" или "Нет".'); return true; }
+    s.form.mat = yn === 'yes' ? 'Да' : 'Нет';
+    s.step = 'promo';
+    await sendFormStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'promo') {
+    s.form.promo = text || '.';
+    s.step = 'comment';
+    await sendFormStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'comment') {
+    s.form.comment = text || '.';
+    if (s.form.type === 'альбом') {
+      s.step = 'tracklist';
+    } else {
+      s.form.tracklist = '.';
+      s.step = 'tg';
+    }
+    await sendFormStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'tracklist') {
+    if (!text || text === '.') { await sendText(chatId, 'Для альбома tracklist обязателен.'); return true; }
+    s.form.tracklist = text;
+    s.step = 'tg';
+    await sendFormStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'tg') {
+    if (!text) { await sendText(chatId, 'Контакт Telegram обязателен.'); return true; }
+    s.form.tg = text;
+    s.step = 'confirm';
+    await sendFormStep(chatId, uid);
+    return true;
+  }
+  return true;
+}
+
+async function handleFormCallback(query, data) {
+  const uid = String(query.from.id);
+  const s = getFormSession(uid);
+  if (!s && data !== 'form_cancel') {
+    await tg('answerCallbackQuery', { callback_query_id: query.id, text: 'Анкета не активна.', show_alert: true });
+    return true;
+  }
+
+  if (data === 'form_cancel') {
+    resetFormSession(uid);
+    await sendText(query.message.chat.id, 'Анкета отменена.');
+    return true;
+  }
+
+  if (data === 'form_type_single' || data === 'form_type_album') {
+    s.form.type = data === 'form_type_album' ? 'альбом' : 'сингл';
+    s.step = 'name';
+    await sendFormStep(query.message.chat.id, uid);
+    return true;
+  }
+
+  if (data === 'form_lyrics_yes' || data === 'form_lyrics_no') {
+    s.form.has_lyrics = data === 'form_lyrics_yes' ? 'Да' : 'Нет, это инструментал';
+    s.step = 'nick';
+    await sendFormStep(query.message.chat.id, uid);
+    return true;
+  }
+
+  if (data === 'form_mat_yes' || data === 'form_mat_no') {
+    s.form.mat = data === 'form_mat_yes' ? 'Да' : 'Нет';
+    s.step = 'promo';
+    await sendFormStep(query.message.chat.id, uid);
+    return true;
+  }
+
+  if (data === 'form_send') {
+    const vr = validateForm(s.form);
+    if (vr.errors.length) {
+      const list = vr.errors.slice(0, 5).map((e) => `• ${esc(e)}`).join('\n');
+      await sendText(query.message.chat.id, `❌ Анкета не прошла проверку:\n${list}`);
+      return true;
+    }
+    try {
+      await submitReleaseToModeration(query.from, uid, vr.data, 'bot_text');
+      resetFormSession(uid);
+      await sendText(query.message.chat.id, '✅ Анкета отправлена в модерацию.');
+    } catch (e) {
+      await sendText(query.message.chat.id, '❌ Не удалось отправить анкету в модерацию.');
+      console.error('[FORM] submit failed:', e.message || e);
+    }
+    return true;
+  }
+
+  return false;
+}
+
 async function sendWebappButton(chatId) {
   if (!WEBAPP_URL || WEBAPP_URL.includes('example.com')) {
     await sendText(chatId, '❌ WEBAPP_URL не настроен.');
@@ -418,32 +775,8 @@ async function processWebAppData(msg) {
     return;
   }
 
-  db[uid] = Array.isArray(db[uid]) ? db[uid] : [];
-  const idx = db[uid].length;
-  const rel = {
-    ...vr.data,
-    status: STATUS.ON_UPLOAD,
-    source: 'mini_app',
-    submission_time: new Date().toISOString(),
-    username: user?.username || ''
-  };
-  const orig = fmtForm(user, uid, rel);
   try {
-    const sent = await tg('sendMessage', {
-      chat_id: MOD_CHAT,
-      text: withStatus(rel.status, orig),
-      parse_mode: 'HTML',
-      disable_web_page_preview: true,
-      reply_markup: moderationKeyboard(uid, idx)
-    });
-    rel.moderation_message_id = sent.message_id;
-    rel.moderation_original_text = orig;
-    db[uid].push(rel);
-    saveDb();
-    modDb.moderation_messages = Array.isArray(modDb.moderation_messages) ? modDb.moderation_messages : [];
-    modDb.moderation_messages.push({ ...rel, user_id: uid, idx, message_id: sent.message_id });
-    saveModDb();
-    try { await tg('pinChatMessage', { chat_id: MOD_CHAT, message_id: sent.message_id }); } catch {}
+    await submitReleaseToModeration(user, uid, vr.data, 'mini_app');
     await sendText(msg.chat.id, '✅ <b>Анкета отправлена в модерацию</b>');
   } catch (e) {
     console.error('[WEBAPP] submit failed:', e.message || e);
@@ -530,8 +863,20 @@ async function onMessage(msg) {
   const chatId = msg.chat?.id;
   const uid = String(msg.from?.id || '');
   if (!chatId || !text) return;
+
+  if (await handleFormTextMessage(msg)) return;
+
   if (text === '/start' || text.startsWith('/start ')) {
+    resetFormSession(uid);
     await sendText(chatId, welcomeText(), { reply_markup: keyboardMain() });
+    return;
+  }
+  if (text === '/release') {
+    await startTextForm(chatId, uid, msg.from);
+    return;
+  }
+  if (text === '/cancel') {
+    await sendText(chatId, 'Нет активной анкеты.');
     return;
   }
   if (text === '/app' || text === 'Открыть приложение') {
@@ -547,6 +892,9 @@ async function onCallback(query) {
   const chatId = query?.message?.chat?.id;
   if (!data || !chatId) return;
   try { await tg('answerCallbackQuery', { callback_query_id: query.id }); } catch {}
+
+  if (await handleFormCallback(query, data)) return;
+
   const edit = (text, markup) => tg('editMessageText', {
     chat_id: chatId,
     message_id: query.message.message_id,
@@ -560,7 +908,11 @@ async function onCallback(query) {
   if (data === 'menu_services') { await edit('<b>Сервисы</b>\n\nВыберите действие:', keyboardServices()); return; }
   if (data === 'menu_cabinet') { await edit('<b>Кабинет</b>\n\nВыберите действие:', keyboardCabinet()); return; }
   if (data === 'menu_community') { await edit('<b>Комьюнити</b>\n\nОфициальные площадки CXRNER MUSIC:', keyboardCommunity()); return; }
-  if (data === 'open_app' || data === 'report') { await sendWebappButton(chatId); return; }
+  if (data === 'open_app' || data === 'report_app') { await sendWebappButton(chatId); return; }
+  if (data === 'report' || data === 'report_text') {
+    await startTextForm(chatId, String(query.from.id), query.from);
+    return;
+  }
   if (data === 'my_releases') { await sendMy(chatId, String(query.from.id)); return; }
   if (data === 'service_cover') { await sendText(chatId, 'Заказ обложки: напишите менеджеру @cxrnermusic.'); return; }
   if (data === 'service_promo') { await sendText(chatId, 'Промо-текст: напишите менеджеру @cxrnermusic.'); return; }
