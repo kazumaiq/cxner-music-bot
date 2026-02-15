@@ -964,5 +964,10 @@ function bootstrap() {
 if (HAS_DOM) {
   window.addEventListener("load", bootstrap);
 } else {
-  // Prevent crashes if someone accidentally runs this browser script in Node.js.
+  // If this file is started by Node.js on hosting, fail loudly with clear hint.
+  if (typeof process !== "undefined" && process?.versions?.node) {
+    // eslint-disable-next-line no-console
+    console.error("Mini App client script cannot run in Node.js. Start bot with: python -u main.py");
+    process.exit(1);
+  }
 }
