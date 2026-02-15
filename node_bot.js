@@ -99,6 +99,8 @@ let db = loadJson(DB_FILE, {});
 let modDb = loadJson(MOD_DB_FILE, { moderation_messages: [] });
 let cabUsers = loadJson(CAB_FILE, {});
 const userForms = {};
+const coverSessions = {};
+const promoSessions = {};
 
 const API = `https://api.telegram.org/bot${TOKEN}`;
 async function tg(method, payload = {}) {
@@ -388,7 +390,31 @@ function resetFormSession(uid) {
   delete userForms[String(uid)];
 }
 
+function getCoverSession(uid) {
+  return coverSessions[String(uid)] || null;
+}
+
+function resetCoverSession(uid) {
+  delete coverSessions[String(uid)];
+}
+
+function getPromoSession(uid) {
+  return promoSessions[String(uid)] || null;
+}
+
+function resetPromoSession(uid) {
+  delete promoSessions[String(uid)];
+}
+
+function resetAllSessions(uid, except = '') {
+  const key = String(uid);
+  if (except !== 'release') delete userForms[key];
+  if (except !== 'cover') delete coverSessions[key];
+  if (except !== 'promo') delete promoSessions[key];
+}
+
 function createFormSession(uid, user) {
+  resetAllSessions(uid, 'release');
   userForms[String(uid)] = {
     uid: String(uid),
     user,
@@ -646,10 +672,11 @@ async function handleFormTextMessage(msg) {
 }
 
 async function handleFormCallback(query, data) {
+  if (!data.startsWith('form_')) return false;
   const uid = String(query.from.id);
   const s = getFormSession(uid);
   if (!s && data !== 'form_cancel') {
-    await tg('answerCallbackQuery', { callback_query_id: query.id, text: 'Анкета не активна.', show_alert: true });
+    await sendText(query.message.chat.id, 'Анкета не активна. Запустите её заново через «Загрузить релиз».');
     return true;
   }
 
@@ -698,6 +725,368 @@ async function handleFormCallback(query, data) {
     return true;
   }
 
+  return false;
+}
+
+function generatePromoPacket(data) {
+  const artist = data.artist || 'Артист';
+  const projectType = data.project_type || 'проект';
+  const releaseName = data.release_name || 'Релиз';
+  const releaseKind = data.release_kind || 'трек';
+  const genreMain = data.genre_main || 'электроника';
+  const genreExtra = (data.genre_extra && data.genre_extra !== '-') ? `, ${data.genre_extra}` : '';
+  const mood = data.mood || 'динамичный';
+  const vibe = data.vibe || 'энергичный';
+  const sound = data.sound || 'современный';
+  const vocal = data.vocal || 'instrumental';
+  const emotion = data.emotion || 'эмоциональный';
+  const country = data.country || '—';
+  const usecase = data.usecase || 'в плейлистах и коротких видео';
+
+  return [
+    '<b>📝 ОПИСАНИЕ АРТИСТА (RU)</b>',
+    '',
+    `${esc(artist)} — ${esc(projectType)}, работающий в жанре ${esc(genreMain)}${esc(genreExtra)}.`,
+    `Фокус на ${esc(vibe)} энергии, ${esc(sound)} звучании и ${esc(emotion)} атмосфере.`,
+    '',
+    '<b>📝 ОПИСАНИЕ РЕЛИЗА (RU)</b>',
+    '',
+    `${esc(releaseName)} — ${esc(releaseKind)} с ${esc(mood)} настроением.`,
+    `Трек работает лучше всего: ${esc(usecase)}.`,
+    '',
+    '<b>🎵 SPOTIFY (EN, short)</b>',
+    '',
+    `${esc(artist)} is a ${esc(projectType)} in ${esc(genreMain)}${esc(genreExtra)},`,
+    `focused on ${esc(sound)} sound and ${esc(vibe)} energy.`,
+    `${esc(releaseName)} delivers ${esc(mood)} mood with ${esc(vocal)} style vocals.`,
+    '',
+    '<b>🎧 DEEZER (EN, extended)</b>',
+    '',
+    `${esc(artist)} explores ${esc(genreMain)}${esc(genreExtra)} through`,
+    `${esc(sound)} production, ${esc(vibe)} drive and ${esc(emotion)} atmosphere.`,
+    `${esc(releaseName)} fits perfectly ${esc(usecase)}.`,
+    '',
+    `🌍 Страна артиста: <b>${esc(country)}</b>`
+  ].join('\n');
+}
+
+async function startCoverFlow(chatId, uid, user) {
+  resetAllSessions(uid, 'cover');
+  coverSessions[String(uid)] = {
+    uid: String(uid),
+    user,
+    step: 'reference',
+    data: {
+      reference_text: '',
+      reference_photo: '',
+      colors: '',
+      title: '',
+      prefs: '',
+      tg: ''
+    }
+  };
+  await sendText(chatId, '📦 <b>Заказ обложки — шаг 1/6</b>\n\nОтправьте референс: текстом/ссылкой или фото.', {
+    parse_mode: 'HTML'
+  });
+}
+
+async function handleCoverMessage(msg) {
+  const uid = String(msg.from?.id || '');
+  const s = getCoverSession(uid);
+  if (!s) return false;
+
+  const chatId = msg.chat.id;
+  const text = clean(msg.text);
+  const hasPhoto = Array.isArray(msg.photo) && msg.photo.length > 0;
+
+  if (text === '/cancel') {
+    resetCoverSession(uid);
+    await sendText(chatId, 'Заказ обложки отменён.');
+    return true;
+  }
+  if (text.startsWith('/') && text !== '/cancel') return false;
+
+  if (s.step === 'reference') {
+    if (hasPhoto) {
+      s.data.reference_photo = msg.photo[msg.photo.length - 1].file_id;
+    } else if (text) {
+      s.data.reference_text = text;
+    } else {
+      await sendText(chatId, 'Пришлите текст/ссылку или фото-референс.');
+      return true;
+    }
+    s.step = 'colors';
+    await sendText(chatId, '🎨 <b>Шаг 2/6</b>\n\nКакие основные цвета должны быть в обложке?', { parse_mode: 'HTML' });
+    return true;
+  }
+
+  if (s.step === 'colors') {
+    if (!text) { await sendText(chatId, 'Опишите цвета текстом.'); return true; }
+    s.data.colors = text;
+    s.step = 'title';
+    await sendText(chatId, '✍️ <b>Шаг 3/6</b>\n\nНазвание релиза (как написать на обложке):', { parse_mode: 'HTML' });
+    return true;
+  }
+
+  if (s.step === 'title') {
+    if (!text) { await sendText(chatId, 'Введите название релиза.'); return true; }
+    s.data.title = text;
+    s.step = 'prefs';
+    await sendText(chatId, '📝 <b>Шаг 4/6</b>\n\nВаши пожелания/комментарии по дизайну:', { parse_mode: 'HTML' });
+    return true;
+  }
+
+  if (s.step === 'prefs') {
+    s.data.prefs = text || '.';
+    s.step = 'tg';
+    await sendText(chatId, '📱 <b>Шаг 5/6</b>\n\nУкажите ваш Telegram для связи:', { parse_mode: 'HTML' });
+    return true;
+  }
+
+  if (s.step === 'tg') {
+    if (!text) { await sendText(chatId, 'Укажите Telegram для связи.'); return true; }
+    s.data.tg = text;
+    s.step = 'wait_screenshot';
+    await sendText(chatId,
+      '💳 <b>Шаг 6/6 — Оплата 500₽</b>\n\n' +
+      'Карта MIR\n<code>2200 7004 9056 2443</code>\n\n' +
+      'Карта VISA\n<code>4177 4901 8116 9097</code>\n\n' +
+      'USDT TRC20\n<code>TW5awCiuhfpAoLGvu1WXXWzKHbgEEDbv1x</code>\n\n' +
+      'После оплаты отправьте скриншот сюда.',
+      { parse_mode: 'HTML' }
+    );
+    return true;
+  }
+
+  if (s.step === 'wait_screenshot') {
+    if (!hasPhoto) {
+      await sendText(chatId, 'Ожидаю фото-скриншот оплаты.');
+      return true;
+    }
+
+    const caption =
+      '📌 <b>ЗАКАЗ ОБЛОЖКИ</b>\n' +
+      `От: @${esc(msg.from?.username || '')} (ID: <code>${esc(uid)}</code>)\n` +
+      `Название: ${esc(s.data.title || '—')}\n` +
+      `Цвета: ${esc(s.data.colors || '—')}\n` +
+      `Пожелания: ${esc(s.data.prefs || '.')}\n` +
+      `TG: ${esc(s.data.tg || '—')}\n` +
+      `Референс: ${esc(s.data.reference_text || 'фото')}`;
+
+    try {
+      const sent = await tg('sendPhoto', {
+        chat_id: MOD_CHAT,
+        photo: msg.photo[msg.photo.length - 1].file_id,
+        caption,
+        parse_mode: 'HTML'
+      });
+      try { await tg('pinChatMessage', { chat_id: MOD_CHAT, message_id: sent.message_id }); } catch {}
+      await sendText(chatId, '✅ Заказ обложки отправлен в модерацию.');
+      resetCoverSession(uid);
+    } catch (e) {
+      console.error('[COVER] submit failed:', e.message || e);
+      await sendText(chatId, '❌ Не удалось отправить заказ. Попробуйте ещё раз.');
+    }
+    return true;
+  }
+
+  return true;
+}
+
+async function startPromoFlow(chatId, uid, user) {
+  resetAllSessions(uid, 'promo');
+  promoSessions[String(uid)] = {
+    uid: String(uid),
+    user,
+    step: 'artist',
+    data: {}
+  };
+  await sendText(chatId, '📝 <b>Промо-текст — шаг 1/13</b>\n\nУкажите имя артиста:', { parse_mode: 'HTML' });
+}
+
+async function sendPromoStep(chatId, uid) {
+  const s = getPromoSession(uid);
+  if (!s) return;
+  if (s.step === 'project_type') {
+    await sendText(chatId, 'Укажите тип проекта:', {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '🎤 Solo', callback_data: 'promo_project_solo' },
+          { text: '🎵 Feat', callback_data: 'promo_project_feat' }
+        ]]
+      }
+    });
+    return;
+  }
+  if (s.step === 'release_name') { await sendText(chatId, 'Шаг 3/13: Название релиза:'); return; }
+  if (s.step === 'release_kind') {
+    await sendText(chatId, 'Шаг 4/13: Тип релиза:', {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '🎵 Сингл', callback_data: 'promo_kind_single' },
+          { text: '💿 EP', callback_data: 'promo_kind_ep' },
+          { text: '📀 Альбом', callback_data: 'promo_kind_album' }
+        ]]
+      }
+    });
+    return;
+  }
+  if (s.step === 'genre_main') { await sendText(chatId, 'Шаг 5/13: Жанр (основной):'); return; }
+  if (s.step === 'genre_extra') { await sendText(chatId, 'Шаг 6/13: +1 доп.жанр (или "-"):'); return; }
+  if (s.step === 'mood') { await sendText(chatId, 'Шаг 7/13: Настроение (2-4 слова):'); return; }
+  if (s.step === 'vibe') { await sendText(chatId, 'Шаг 8/13: Вайб / образ:'); return; }
+  if (s.step === 'sound') { await sendText(chatId, 'Шаг 9/13: Звучание:'); return; }
+  if (s.step === 'vocal') {
+    await sendText(chatId, 'Шаг 10/13: Вокал:', {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '❌ Без вокала', callback_data: 'promo_vocal_no' }],
+          [
+            { text: '🎤 Мужской', callback_data: 'promo_vocal_male' },
+            { text: '👩 Женский', callback_data: 'promo_vocal_female' }
+          ]
+        ]
+      }
+    });
+    return;
+  }
+  if (s.step === 'emotion') { await sendText(chatId, 'Шаг 11/13: Эмоция трека:'); return; }
+  if (s.step === 'country') { await sendText(chatId, 'Шаг 12/13: Страна артиста:'); return; }
+  if (s.step === 'usecase') { await sendText(chatId, 'Шаг 13/13: Где трек работает лучше всего?'); return; }
+  if (s.step === 'done') {
+    const packet = generatePromoPacket(s.data);
+    await sendText(chatId, packet);
+    await sendText(chatId, '✅ Промо-пакет готов.');
+    resetPromoSession(uid);
+  }
+}
+
+async function handlePromoMessage(msg) {
+  const uid = String(msg.from?.id || '');
+  const s = getPromoSession(uid);
+  if (!s) return false;
+
+  const text = clean(msg.text);
+  const chatId = msg.chat.id;
+
+  if (!text) return true;
+  if (text === '/cancel') {
+    resetPromoSession(uid);
+    await sendText(chatId, 'Промо-анкета отменена.');
+    return true;
+  }
+  if (text.startsWith('/')) return false;
+
+  if (s.step === 'artist') {
+    s.data.artist = text;
+    s.step = 'project_type';
+    await sendPromoStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'project_type') {
+    s.data.project_type = text;
+    s.step = 'release_name';
+    await sendPromoStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'release_name') {
+    s.data.release_name = text;
+    s.step = 'release_kind';
+    await sendPromoStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'release_kind') {
+    s.data.release_kind = text;
+    s.step = 'genre_main';
+    await sendPromoStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'genre_main') {
+    s.data.genre_main = text;
+    s.step = 'genre_extra';
+    await sendPromoStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'genre_extra') {
+    s.data.genre_extra = text;
+    s.step = 'mood';
+    await sendPromoStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'mood') {
+    s.data.mood = text;
+    s.step = 'vibe';
+    await sendPromoStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'vibe') {
+    s.data.vibe = text;
+    s.step = 'sound';
+    await sendPromoStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'sound') {
+    s.data.sound = text;
+    s.step = 'vocal';
+    await sendPromoStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'vocal') {
+    s.data.vocal = text;
+    s.step = 'emotion';
+    await sendPromoStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'emotion') {
+    s.data.emotion = text;
+    s.step = 'country';
+    await sendPromoStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'country') {
+    s.data.country = text;
+    s.step = 'usecase';
+    await sendPromoStep(chatId, uid);
+    return true;
+  }
+  if (s.step === 'usecase') {
+    s.data.usecase = text;
+    s.step = 'done';
+    await sendPromoStep(chatId, uid);
+    return true;
+  }
+  return true;
+}
+
+async function handlePromoCallback(query, data) {
+  if (!data.startsWith('promo_')) return false;
+  const uid = String(query.from.id);
+  const s = getPromoSession(uid);
+  if (!s) {
+    await sendText(query.message.chat.id, 'Промо-анкета не активна. Запустите «Промо-текст под релиз» заново.');
+    return true;
+  }
+
+  if (data === 'promo_project_solo' || data === 'promo_project_feat') {
+    s.data.project_type = data === 'promo_project_solo' ? 'Solo' : 'Feat';
+    s.step = 'release_name';
+    await sendPromoStep(query.message.chat.id, uid);
+    return true;
+  }
+  if (data === 'promo_kind_single' || data === 'promo_kind_ep' || data === 'promo_kind_album') {
+    const map = { promo_kind_single: 'Сингл', promo_kind_ep: 'EP', promo_kind_album: 'Альбом' };
+    s.data.release_kind = map[data];
+    s.step = 'genre_main';
+    await sendPromoStep(query.message.chat.id, uid);
+    return true;
+  }
+  if (data === 'promo_vocal_no' || data === 'promo_vocal_male' || data === 'promo_vocal_female') {
+    const map = { promo_vocal_no: 'instrumental', promo_vocal_male: 'male', promo_vocal_female: 'female' };
+    s.data.vocal = map[data];
+    s.step = 'emotion';
+    await sendPromoStep(query.message.chat.id, uid);
+    return true;
+  }
   return false;
 }
 
@@ -793,16 +1182,16 @@ async function canModerate(userId) {
 }
 async function applyModeration(query, action, uid, idx) {
   if (Number(query?.message?.chat?.id || 0) !== Number(MOD_CHAT)) {
-    await tg('answerCallbackQuery', { callback_query_id: query.id, text: 'Только в группе модерации.', show_alert: true });
+    await sendText(query.message.chat.id, 'Эти кнопки работают только в группе модерации.');
     return;
   }
   if (!(await canModerate(query.from.id))) {
-    await tg('answerCallbackQuery', { callback_query_id: query.id, text: 'Доступ только участникам группы модерации.', show_alert: true });
+    await sendText(query.message.chat.id, 'Доступ только участникам группы модерации.');
     return;
   }
   const list = Array.isArray(db?.[uid]) ? db[uid] : null;
   if (!list || !list[idx]) {
-    await tg('answerCallbackQuery', { callback_query_id: query.id, text: 'Релиз не найден.', show_alert: true });
+    await sendText(query.message.chat.id, 'Релиз не найден.');
     return;
   }
   const map = {
@@ -854,20 +1243,24 @@ async function applyModeration(query, action, uid, idx) {
   } catch (e) {
     console.error('[MODERATION] notify failed:', e.message || e);
   }
-  await tg('answerCallbackQuery', { callback_query_id: query.id, text: `Статус: ${STATUS_TEXT[st] || st}` });
+  await sendText(query.message.chat.id, `Статус обновлен: ${STATUS_TEXT[st] || st}`);
 }
 
 async function onMessage(msg) {
   if (msg.web_app_data?.data) { await processWebAppData(msg); return; }
-  const text = clean(msg.text);
   const chatId = msg.chat?.id;
   const uid = String(msg.from?.id || '');
-  if (!chatId || !text) return;
+  const text = clean(msg.text);
+  if (!chatId) return;
 
+  if (await handleCoverMessage(msg)) return;
+  if (await handlePromoMessage(msg)) return;
   if (await handleFormTextMessage(msg)) return;
 
+  if (!text) return;
+
   if (text === '/start' || text.startsWith('/start ')) {
-    resetFormSession(uid);
+    resetAllSessions(uid);
     await sendText(chatId, welcomeText(), { reply_markup: keyboardMain() });
     return;
   }
@@ -875,8 +1268,18 @@ async function onMessage(msg) {
     await startTextForm(chatId, uid, msg.from);
     return;
   }
+  if (text === '/cover') {
+    await startCoverFlow(chatId, uid, msg.from);
+    return;
+  }
+  if (text === '/promo') {
+    await startPromoFlow(chatId, uid, msg.from);
+    return;
+  }
   if (text === '/cancel') {
-    await sendText(chatId, 'Нет активной анкеты.');
+    const hadAny = !!(getFormSession(uid) || getCoverSession(uid) || getPromoSession(uid));
+    resetAllSessions(uid);
+    await sendText(chatId, hadAny ? 'Текущая анкета отменена.' : 'Нет активной анкеты.');
     return;
   }
   if (text === '/app' || text === 'Открыть приложение') {
@@ -894,6 +1297,7 @@ async function onCallback(query) {
   try { await tg('answerCallbackQuery', { callback_query_id: query.id }); } catch {}
 
   if (await handleFormCallback(query, data)) return;
+  if (await handlePromoCallback(query, data)) return;
 
   const edit = (text, markup) => tg('editMessageText', {
     chat_id: chatId,
@@ -914,8 +1318,8 @@ async function onCallback(query) {
     return;
   }
   if (data === 'my_releases') { await sendMy(chatId, String(query.from.id)); return; }
-  if (data === 'service_cover') { await sendText(chatId, 'Заказ обложки: напишите менеджеру @cxrnermusic.'); return; }
-  if (data === 'service_promo') { await sendText(chatId, 'Промо-текст: напишите менеджеру @cxrnermusic.'); return; }
+  if (data === 'service_cover') { await startCoverFlow(chatId, String(query.from.id), query.from); return; }
+  if (data === 'service_promo') { await startPromoFlow(chatId, String(query.from.id), query.from); return; }
   const m = /^m_(upload|moderate|approve|reject|needfix|delete)_(\d+)_(\d+)$/.exec(data);
   if (m) {
     await applyModeration(query, m[1], m[2], Number.parseInt(m[3], 10));
