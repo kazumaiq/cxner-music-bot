@@ -134,7 +134,8 @@ const LABEL_ARTISTS = [
   }
 ];
 
-const tg = window.Telegram?.WebApp ?? null;
+const HAS_DOM = typeof window !== "undefined" && typeof document !== "undefined";
+const tg = HAS_DOM ? (window.Telegram?.WebApp ?? null) : null;
 const DATE_PATTERN = /^(\d{2})\.(\d{2})\.(\d{4})$/;
 const CABINET_USERS_URL = "data/cabinet-users.json";
 const CABINET_RELEASES_URL = "data/releases-public.json";
@@ -960,4 +961,9 @@ function bootstrap() {
   window.setTimeout(hideLoader, 550);
 }
 
-window.addEventListener("load", bootstrap);
+if (HAS_DOM) {
+  window.addEventListener("load", bootstrap);
+} else {
+  // Prevent crashes if someone accidentally runs this browser script in Node.js.
+  console.info("CXRNER Mini App: browser runtime not detected, script init skipped.");
+}
