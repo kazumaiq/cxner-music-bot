@@ -1105,10 +1105,39 @@ if (HAS_DOM) {
       }
 
       if (!pythonBin) {
+        const nodeFallbackBot = path.join(projectRoot, "node_bot.js");
+        if (fs.existsSync(nodeFallbackBot)) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `Python runtime not found. Tried: ${tried.join(", ")}. ` +
+            "Falling back to Node bot runtime: node node_bot.js"
+          );
+          const child = cp.spawn(process.execPath, [nodeFallbackBot], {
+            cwd: projectRoot,
+            stdio: "inherit",
+            env: process.env
+          });
+          const forwardSignal = (signal) => {
+            try {
+              child.kill(signal);
+            } catch {
+              // ignore
+            }
+          };
+          process.on("SIGTERM", () => forwardSignal("SIGTERM"));
+          process.on("SIGINT", () => forwardSignal("SIGINT"));
+          child.on("error", (error) => {
+            // eslint-disable-next-line no-console
+            console.error("Failed to start Node fallback bot:", error);
+            process.exit(1);
+          });
+          child.on("exit", (code) => process.exit(typeof code === "number" ? code : 1));
+          return;
+        }
         // eslint-disable-next-line no-console
         console.error(
           `Python runtime not found. Tried: ${tried.join(", ")}. ` +
-          "Set PYTHON_BIN or switch app runtime to Python with start command: python -u main.py"
+          "Set PYTHON_BIN or add node_bot.js fallback."
         );
         process.exit(1);
       }
@@ -1130,6 +1159,11 @@ if (HAS_DOM) {
       };
       process.on("SIGTERM", () => forwardSignal("SIGTERM"));
       process.on("SIGINT", () => forwardSignal("SIGINT"));
+      child.on("error", (error) => {
+        // eslint-disable-next-line no-console
+        console.error("Failed to start Python bot process:", error);
+        process.exit(1);
+      });
       child.on("exit", (code) => process.exit(typeof code === "number" ? code : 1));
     } catch (err) {
       // eslint-disable-next-line no-console
