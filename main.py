@@ -56,6 +56,20 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _load_local_config(path: str = "deploy_config.json") -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+LOCAL_CONFIG = _load_local_config()
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = (os.getenv(name) or "").strip().lower()
     if not raw:
@@ -79,11 +93,75 @@ def _env_int_list(name: str, default: list[int]) -> list[int]:
     return result or default
 
 
+def _cfg_str(name: str, default: str = "") -> str:
+    env_val = os.getenv(name)
+    if env_val is not None and env_val.strip() != "":
+        return env_val.strip()
+    cfg_val = LOCAL_CONFIG.get(name)
+    if cfg_val is None:
+        return default
+    return str(cfg_val).strip()
+
+
+def _cfg_int(name: str, default: int) -> int:
+    env_val = os.getenv(name)
+    if env_val is not None and env_val.strip() != "":
+        try:
+            return int(env_val.strip())
+        except Exception:
+            return default
+    cfg_val = LOCAL_CONFIG.get(name)
+    if cfg_val is None:
+        return default
+    try:
+        return int(cfg_val)
+    except Exception:
+        return default
+
+
+def _cfg_bool(name: str, default: bool = False) -> bool:
+    env_val = os.getenv(name)
+    if env_val is not None and env_val.strip() != "":
+        return env_val.strip().lower() in {"1", "true", "yes", "on"}
+    cfg_val = LOCAL_CONFIG.get(name, default)
+    if isinstance(cfg_val, bool):
+        return cfg_val
+    if isinstance(cfg_val, (int, float)):
+        return bool(cfg_val)
+    if isinstance(cfg_val, str):
+        return cfg_val.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
+def _cfg_int_list(name: str, default: list[int]) -> list[int]:
+    env_val = os.getenv(name)
+    if env_val is not None and env_val.strip() != "":
+        return _env_int_list(name, default)
+
+    cfg_val = LOCAL_CONFIG.get(name)
+    if cfg_val is None:
+        return default
+    result: list[int] = []
+    if isinstance(cfg_val, list):
+        items = cfg_val
+    else:
+        items = str(cfg_val).split(",")
+    for item in items:
+        try:
+            result.append(int(str(item).strip()))
+        except Exception:
+            continue
+    return result or default
+
+
 # === КОНФИГ ===
-TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
-MODERATION_CHAT_ID = _env_int("MODERATION_CHAT_ID", -1002117586464)
-ADMIN_IDS = _env_int_list("ADMIN_IDS", [881379104])
-WEBAPP_URL = (os.getenv("WEBAPP_URL") or "").strip()
+TOKEN = _cfg_str("BOT_TOKEN", "")
+MODERATION_CHAT_ID = _cfg_int("MODERATION_CHAT_ID", -1002117586464)
+ADMIN_IDS = _cfg_int_list("ADMIN_IDS", [881379104])
+WEBAPP_URL = _cfg_str("WEBAPP_URL", "")
+PUBLIC_BASE_URL = _cfg_str("PUBLIC_BASE_URL", "")
+if not WEBAPP_URL and PUBLIC_BASE_URL:
+    WEBAPP_URL = f"{PUBLIC_BASE_URL.rstrip('/')}/index.html"
 ARTISTS_CHAT = "https://t.me/+oVmX3_dkyWJhNjJi"
 CHANNEL = "https://t.me/cxrnermusic"
 DB_FILE = "releases.json"
@@ -93,10 +171,10 @@ CABINET_USERS_FILE = "cabinet_users.json"
 WEBAPP_DATA_DIR = os.path.join("webapp", "data")
 WEBAPP_RELEASES_EXPORT_FILE = os.path.join(WEBAPP_DATA_DIR, "releases-public.json")
 WEBAPP_CABINET_EXPORT_FILE = os.path.join(WEBAPP_DATA_DIR, "cabinet-users.json")
-ENABLE_WEB_SERVER = _env_bool("ENABLE_WEB_SERVER", False)
-WEB_SERVER_HOST = (os.getenv("WEB_SERVER_HOST") or "0.0.0.0").strip()
-WEB_SERVER_PORT = _env_int("PORT", _env_int("WEB_SERVER_PORT", 8080))
-WEB_SERVER_DIR = (os.getenv("WEB_SERVER_DIR") or "webapp").strip()
+ENABLE_WEB_SERVER = _cfg_bool("ENABLE_WEB_SERVER", True)
+WEB_SERVER_HOST = _cfg_str("WEB_SERVER_HOST", "0.0.0.0")
+WEB_SERVER_PORT = _cfg_int("PORT", _cfg_int("WEB_SERVER_PORT", 8080))
+WEB_SERVER_DIR = _cfg_str("WEB_SERVER_DIR", "webapp")
 
 # === ЭМОДЗИ ИНТЕРФЕЙСА ===
 WINTER_EMOJIS = {
@@ -637,7 +715,11 @@ def start_static_web_server_if_enabled():
     host = WEB_SERVER_HOST or "0.0.0.0"
     port = WEB_SERVER_PORT if WEB_SERVER_PORT > 0 else 8080
     handler = partial(SimpleHTTPRequestHandler, directory=web_root)
-    server = ThreadingHTTPServer((host, port), handler)
+    try:
+        server = ThreadingHTTPServer((host, port), handler)
+    except Exception as e:
+        print(f"⚠️ Не удалось запустить static Mini App server на {host}:{port}: {e}")
+        return None
     server.daemon_threads = True
 
     th = threading.Thread(target=server.serve_forever, name="webapp-static-server", daemon=True)

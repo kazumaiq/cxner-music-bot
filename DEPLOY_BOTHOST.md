@@ -24,6 +24,21 @@ Set these in bothost panel:
 Optional:
 - `OPENAI_API_KEY`
 
+## 2.1 If only BOT_TOKEN env is available (free plan)
+Use local file `deploy_config.json` in project root.  
+The bot already reads it automatically.
+
+Required in this case:
+- set only `BOT_TOKEN` in panel
+- fill `deploy_config.json` fields:
+  - `MODERATION_CHAT_ID`
+  - `ADMIN_IDS`
+  - `PUBLIC_BASE_URL` (your bothost public URL, e.g. `https://your-app.bothost.ru`)
+  - or explicit `WEBAPP_URL`
+
+If `PUBLIC_BASE_URL` is set, bot builds Mini App URL automatically as:
+- `PUBLIC_BASE_URL + /index.html`
+
 ## 3. Mini App domain in BotFather
 Configure bot domain:
 - `/setdomain` -> select your bot -> set `https://your-domain.tld`
@@ -46,4 +61,3 @@ Use:
   - ensure app launched from bot button (`/app` or `Открыть приложение`)
   - ensure `WEBAPP_URL` is HTTPS and domain is set in BotFather `/setdomain`
   - check logs for `[WEBAPP] action=...` lines
-
