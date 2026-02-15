@@ -984,15 +984,42 @@ if (HAS_DOM) {
         process.env.PYTHON,
         "python3",
         "python",
+        "python3.13",
         "python3.12",
         "python3.11",
         "python3.10",
+        "python3.9",
+        "python3.8",
+        "python3.7",
+        "pypy3",
+        "pypy",
         "/usr/bin/python3",
         "/usr/local/bin/python3",
+        "/opt/python/bin/python3",
+        "/opt/venv/bin/python",
         "/usr/bin/python",
         "/usr/local/bin/python"
       ];
       const scannedCandidates = [];
+      const pathDirs = String(process.env.PATH || "")
+        .split(path.delimiter)
+        .map((item) => item.trim())
+        .filter(Boolean);
+      for (const dir of pathDirs) {
+        try {
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
+          for (const entry of entries) {
+            if (!entry.isFile()) {
+              continue;
+            }
+            if (/^python(\d+(\.\d+)*)?$/.test(entry.name) || /^pypy(\d+)?$/.test(entry.name)) {
+              scannedCandidates.push(path.join(dir, entry.name));
+            }
+          }
+        } catch {
+          // ignore PATH entries without read access
+        }
+      }
       for (const dir of ["/usr/bin", "/usr/local/bin"]) {
         try {
           const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -1024,16 +1051,51 @@ if (HAS_DOM) {
       if (!pythonBin) {
         if (typeof process.platform === "string" && process.platform !== "win32") {
           try {
-            const probe = cp.spawnSync("sh", ["-lc", "command -v python3 || command -v python || true"], {
+            const probe = cp.spawnSync(
+              "sh",
+              [
+                "-lc",
+                "command -v python3.13 || command -v python3.12 || command -v python3.11 || " +
+                "command -v python3.10 || command -v python3.9 || command -v python3.8 || " +
+                "command -v python3.7 || command -v python3 || command -v python || command -v pypy3 || true"
+              ],
+              {
               encoding: "utf8",
               stdio: ["ignore", "pipe", "ignore"],
               timeout: 3000
-            });
+              }
+            );
             const shellPython = String(probe.stdout || "").trim();
             if (shellPython) {
               const check = cp.spawnSync(shellPython, ["--version"], { stdio: "ignore", timeout: 3000 });
               if (check.status === 0) {
                 pythonBin = shellPython;
+              }
+            }
+          } catch {
+            // ignore shell probe issues
+          }
+        }
+      }
+
+      if (!pythonBin) {
+        if (typeof process.platform === "string" && process.platform !== "win32") {
+          try {
+            const probeAll = cp.spawnSync("sh", ["-lc", "which -a python3 python pypy3 2>/dev/null || true"], {
+              encoding: "utf8",
+              stdio: ["ignore", "pipe", "ignore"],
+              timeout: 3000
+            });
+            const candidatesFromWhich = String(probeAll.stdout || "")
+              .split(/\r?\n/)
+              .map((item) => item.trim())
+              .filter(Boolean);
+            for (const bin of uniq(candidatesFromWhich)) {
+              const check = cp.spawnSync(bin, ["--version"], { stdio: "ignore", timeout: 3000 });
+              tried.push(bin);
+              if (check.status === 0) {
+                pythonBin = bin;
+                break;
               }
             }
           } catch {
