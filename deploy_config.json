@@ -5,7 +5,7 @@
     881379104
   ],
   "PUBLIC_BASE_URL": "https://cxrnermusic.vercel.app",
-  "WEBAPP_URL": "https://cxrnermusic.vercel.app/",
+  "WEBAPP_URL": "https://cxrnermusic.vercel.app/miniapp/index.html",
   "ENABLE_WEB_SERVER": true,
   "WEB_SERVER_HOST": "0.0.0.0",
   "WEB_SERVER_PORT": 8080,
