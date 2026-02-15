@@ -1,63 +1,48 @@
-# Deploy on bothost.ru
+# Deploy на bothost.ru
 
-## 1. Runtime
-- Python: `3.11+`
-- Start command:
-```bash
-python -u main.py
-```
-- Install command:
-```bash
-pip install -r requirements.txt
-```
+## Важное
+На бесплатном Node-тарифе запускать нужно **только** `app.js` в корне проекта.
+Не запускайте `webapp/app.js` как главный файл.
 
-## 2. Environment variables
-Set these in bothost panel:
+## Вариант 1: Free plan (только Node.js)
 
-- `BOT_TOKEN` — token from BotFather (required)
-- `MODERATION_CHAT_ID` — moderation group chat id, e.g. `-100...`
-- `ADMIN_IDS` — comma-separated Telegram user IDs, e.g. `881379104,123456789`
-- `WEBAPP_URL` — public HTTPS URL for Mini App, e.g. `https://your-domain.tld/index.html`
-- `ENABLE_WEB_SERVER=1`
-- `PORT` — if bothost provides it automatically, keep host default; otherwise set manually (e.g. `8080`)
+1. Runtime: `Node.js`
+2. Start file / command: `node app.js`
+3. Переменные окружения:
+   - `BOT_TOKEN` (обязательно)
+4. Конфиг берется из `deploy_config.json` автоматически:
+   - `MODERATION_CHAT_ID`
+   - `ADMIN_IDS`
+   - `WEBAPP_URL`
+   - `PUBLIC_BASE_URL`
+5. Ожидаемые логи при старте:
+   - `[entry] starting app.js -> node_bot.js`
+   - `[bot] CXRNER Node fallback bot started`
 
-Optional:
-- `OPENAI_API_KEY`
+## Вариант 2: Python runtime (если доступен)
 
-## 2.1 If only BOT_TOKEN env is available (free plan)
-Use local file `deploy_config.json` in project root.  
-The bot already reads it automatically.
+1. Runtime: `Python 3.11+`
+2. Install command:
+   - `pip install -r requirements.txt`
+3. Start command:
+   - `python -u main.py`
+4. Переменные окружения:
+   - `BOT_TOKEN` (обязательно)
+   - остальные можно оставить в `deploy_config.json`
 
-Required in this case:
-- set only `BOT_TOKEN` in panel
-- fill `deploy_config.json` fields:
-  - `MODERATION_CHAT_ID`
-  - `ADMIN_IDS`
-  - `PUBLIC_BASE_URL` (your bothost public URL, e.g. `https://your-app.bothost.ru`)
-  - or explicit `WEBAPP_URL`
+## Mini App URL
 
-If `PUBLIC_BASE_URL` is set, bot builds Mini App URL automatically as:
-- `PUBLIC_BASE_URL + /index.html`
+- Для Vercel укажи:
+  - `WEBAPP_URL=https://cxrnermusic.vercel.app/miniapp/index.html`
+- В BotFather обязательно:
+  - `/setdomain` -> домен `https://cxrnermusic.vercel.app`
 
-## 3. Mini App domain in BotFather
-Configure bot domain:
-- `/setdomain` -> select your bot -> set `https://your-domain.tld`
+## Если снова видишь "Python runtime not found..."
 
-## 4. Mini App open flow (important)
-This project opens Mini App through a **keyboard button** for reliable `WebApp.sendData()` delivery.
-Use:
-- `/start` -> `Открыть приложение`
-- or `/app`
+Это означает, что на сервере запущен старый файл или старый билд.
 
-## 5. First launch checklist
-- Bot starts without `BOT_TOKEN` error
-- `/start` shows main menu
-- `Открыть приложение` sends keyboard launcher button
-- Submit in Mini App creates a new form in moderation group
-- `webapp/data/releases-public.json` updates after status changes
-
-## 6. Troubleshooting
-- If Mini App opens but submit does not reach bot:
-  - ensure app launched from bot button (`/app` or `Открыть приложение`)
-  - ensure `WEBAPP_URL` is HTTPS and domain is set in BotFather `/setdomain`
-  - check logs for `[WEBAPP] action=...` lines
+Сделай:
+1. Проверь, что старт именно `node app.js`.
+2. Перезалей/переклонируй репозиторий (не инкрементальное обновление).
+3. Перезапусти приложение.
+4. Убедись по логам, что появилась строка `[entry] starting app.js -> node_bot.js`.

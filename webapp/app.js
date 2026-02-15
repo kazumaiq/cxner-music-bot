@@ -964,10 +964,8 @@ function bootstrap() {
 if (HAS_DOM) {
   window.addEventListener("load", bootstrap);
 } else {
-  // If hosting starts this file with Node.js, run Python bot as a fallback launcher.
+  // If hosting starts this file with Node.js, jump directly to the Node bot runtime.
   if (typeof process !== "undefined" && process?.versions?.node) {
-    // eslint-disable-next-line no-console
-    console.info("Mini App script started in Node.js, switching to Python bot launcher...");
     try {
       // eslint-disable-next-line global-require
       const path = require("node:path");
@@ -977,179 +975,19 @@ if (HAS_DOM) {
       const cp = require("node:child_process");
 
       const projectRoot = path.resolve(__dirname, "..");
-      const mainPy = path.join(projectRoot, "main.py");
-      const uniq = (arr) => [...new Set(arr.filter(Boolean))];
-      const knownCandidates = [
-        process.env.PYTHON_BIN,
-        process.env.PYTHON,
-        "python3",
-        "python",
-        "python3.13",
-        "python3.12",
-        "python3.11",
-        "python3.10",
-        "python3.9",
-        "python3.8",
-        "python3.7",
-        "pypy3",
-        "pypy",
-        "/usr/bin/python3",
-        "/usr/local/bin/python3",
-        "/opt/python/bin/python3",
-        "/opt/venv/bin/python",
-        "/usr/bin/python",
-        "/usr/local/bin/python"
-      ];
-      const scannedCandidates = [];
-      const pathDirs = String(process.env.PATH || "")
-        .split(path.delimiter)
-        .map((item) => item.trim())
-        .filter(Boolean);
-      for (const dir of pathDirs) {
-        try {
-          const entries = fs.readdirSync(dir, { withFileTypes: true });
-          for (const entry of entries) {
-            if (!entry.isFile()) {
-              continue;
-            }
-            if (/^python(\d+(\.\d+)*)?$/.test(entry.name) || /^pypy(\d+)?$/.test(entry.name)) {
-              scannedCandidates.push(path.join(dir, entry.name));
-            }
-          }
-        } catch {
-          // ignore PATH entries without read access
-        }
-      }
-      for (const dir of ["/usr/bin", "/usr/local/bin"]) {
-        try {
-          const entries = fs.readdirSync(dir, { withFileTypes: true });
-          for (const entry of entries) {
-            if (!entry.isFile()) {
-              continue;
-            }
-            if (/^python3(\.\d+)?$/.test(entry.name) || entry.name === "python") {
-              scannedCandidates.push(path.join(dir, entry.name));
-            }
-          }
-        } catch {
-          // ignore missing directories or permission issues
-        }
-      }
-      const candidates = uniq([...knownCandidates, ...scannedCandidates]);
-
-      let pythonBin = null;
-      const tried = [];
-      for (const bin of candidates) {
-        const check = cp.spawnSync(bin, ["--version"], { stdio: "ignore", timeout: 3000 });
-        tried.push(bin);
-        if (check.status === 0) {
-          pythonBin = bin;
-          break;
-        }
-      }
-
-      if (!pythonBin) {
-        if (typeof process.platform === "string" && process.platform !== "win32") {
-          try {
-            const probe = cp.spawnSync(
-              "sh",
-              [
-                "-lc",
-                "command -v python3.13 || command -v python3.12 || command -v python3.11 || " +
-                "command -v python3.10 || command -v python3.9 || command -v python3.8 || " +
-                "command -v python3.7 || command -v python3 || command -v python || command -v pypy3 || true"
-              ],
-              {
-              encoding: "utf8",
-              stdio: ["ignore", "pipe", "ignore"],
-              timeout: 3000
-              }
-            );
-            const shellPython = String(probe.stdout || "").trim();
-            if (shellPython) {
-              const check = cp.spawnSync(shellPython, ["--version"], { stdio: "ignore", timeout: 3000 });
-              if (check.status === 0) {
-                pythonBin = shellPython;
-              }
-            }
-          } catch {
-            // ignore shell probe issues
-          }
-        }
-      }
-
-      if (!pythonBin) {
-        if (typeof process.platform === "string" && process.platform !== "win32") {
-          try {
-            const probeAll = cp.spawnSync("sh", ["-lc", "which -a python3 python pypy3 2>/dev/null || true"], {
-              encoding: "utf8",
-              stdio: ["ignore", "pipe", "ignore"],
-              timeout: 3000
-            });
-            const candidatesFromWhich = String(probeAll.stdout || "")
-              .split(/\r?\n/)
-              .map((item) => item.trim())
-              .filter(Boolean);
-            for (const bin of uniq(candidatesFromWhich)) {
-              const check = cp.spawnSync(bin, ["--version"], { stdio: "ignore", timeout: 3000 });
-              tried.push(bin);
-              if (check.status === 0) {
-                pythonBin = bin;
-                break;
-              }
-            }
-          } catch {
-            // ignore shell probe issues
-          }
-        }
-      }
-
-      if (!pythonBin) {
-        const nodeFallbackBot = path.join(projectRoot, "node_bot.js");
-        if (fs.existsSync(nodeFallbackBot)) {
-          // eslint-disable-next-line no-console
-          console.warn(
-            `Python runtime not found. Tried: ${tried.join(", ")}. ` +
-            "Falling back to Node bot runtime: node node_bot.js"
-          );
-          const child = cp.spawn(process.execPath, [nodeFallbackBot], {
-            cwd: projectRoot,
-            stdio: "inherit",
-            env: process.env
-          });
-          const forwardSignal = (signal) => {
-            try {
-              child.kill(signal);
-            } catch {
-              // ignore
-            }
-          };
-          process.on("SIGTERM", () => forwardSignal("SIGTERM"));
-          process.on("SIGINT", () => forwardSignal("SIGINT"));
-          child.on("error", (error) => {
-            // eslint-disable-next-line no-console
-            console.error("Failed to start Node fallback bot:", error);
-            process.exit(1);
-          });
-          child.on("exit", (code) => process.exit(typeof code === "number" ? code : 1));
-          return;
-        }
+      const nodeFallbackBot = path.join(projectRoot, "node_bot.js");
+      if (!fs.existsSync(nodeFallbackBot)) {
         // eslint-disable-next-line no-console
-        console.error(
-          `Python runtime not found. Tried: ${tried.join(", ")}. ` +
-          "Set PYTHON_BIN or add node_bot.js fallback."
-        );
+        console.error(`Node fallback bot not found: ${nodeFallbackBot}`);
         process.exit(1);
       }
-
       // eslint-disable-next-line no-console
-      console.info(`Starting bot: ${pythonBin} -u ${mainPy}`);
-      const child = cp.spawn(pythonBin, ["-u", mainPy], {
+      console.info("Mini App script started in Node.js, launching node_bot.js...");
+      const child = cp.spawn(process.execPath, [nodeFallbackBot], {
         cwd: projectRoot,
         stdio: "inherit",
         env: process.env
       });
-
       const forwardSignal = (signal) => {
         try {
           child.kill(signal);
@@ -1161,13 +999,13 @@ if (HAS_DOM) {
       process.on("SIGINT", () => forwardSignal("SIGINT"));
       child.on("error", (error) => {
         // eslint-disable-next-line no-console
-        console.error("Failed to start Python bot process:", error);
+        console.error("Failed to start Node fallback bot:", error);
         process.exit(1);
       });
       child.on("exit", (code) => process.exit(typeof code === "number" ? code : 1));
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.error("Failed to start Python bot from Node launcher:", err);
+      console.error("Failed to start Node bot from webapp launcher:", err);
       process.exit(1);
     }
   }

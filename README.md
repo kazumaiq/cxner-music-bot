@@ -16,4 +16,10 @@ set WEBAPP_URL=https://your-domain.tld/index.html
 python -u main.py
 ```
 
+## Quick start (Node only, bothost free plan)
+```bash
+set BOT_TOKEN=123456:token
+node app.js
+```
+
 For production deployment on bothost, see `DEPLOY_BOTHOST.md`.
