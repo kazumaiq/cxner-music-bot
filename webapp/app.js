@@ -965,5 +965,4 @@ if (HAS_DOM) {
   window.addEventListener("load", bootstrap);
 } else {
   // Prevent crashes if someone accidentally runs this browser script in Node.js.
-  console.info("CXRNER Mini App: browser runtime not detected, script init skipped.");
 }
