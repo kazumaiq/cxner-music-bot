@@ -196,19 +196,30 @@ function exportCabinet() {
   saveJson(EXP_CAB, out);
 }
 
+function hasValidWebAppUrl() {
+  return !!WEBAPP_URL && !WEBAPP_URL.includes('example.com');
+}
+
+function openAppInlineButton(text = 'Открыть приложение', fallback = 'open_app') {
+  if (hasValidWebAppUrl()) {
+    return { text, web_app: { url: WEBAPP_URL } };
+  }
+  return { text, callback_data: fallback };
+}
+
 function keyboardMain() {
   return { inline_keyboard: [
     [{ text: '📀 Дистрибуция', callback_data: 'menu_distribution' }],
     [{ text: '💼 Сервисы', callback_data: 'menu_services' }],
     [{ text: '🧑‍💻 Кабинет', callback_data: 'menu_cabinet' }],
     [{ text: '🌐 Комьюнити', callback_data: 'menu_community' }],
-    [{ text: 'Открыть приложение', callback_data: 'open_app' }]
+    [openAppInlineButton('Открыть приложение', 'open_app')]
   ]};
 }
 function keyboardDist() {
   return { inline_keyboard: [
     [{ text: 'Загрузить релиз (анкета в боте)', callback_data: 'report_text' }],
-    [{ text: 'Открыть Mini App', callback_data: 'report_app' }],
+    [openAppInlineButton('Открыть Mini App', 'report_app')],
     [{ text: 'Мои релизы', callback_data: 'my_releases' }],
     [{ text: '⬅️ Главное меню', callback_data: 'main' }]
   ]};
@@ -1484,11 +1495,13 @@ async function handlePromoCallback(query, data) {
 }
 
 async function sendWebappButton(chatId) {
-  if (!WEBAPP_URL || WEBAPP_URL.includes('example.com')) {
+  if (!hasValidWebAppUrl()) {
     await sendText(chatId, '❌ WEBAPP_URL не настроен.');
     return;
   }
-  await sendText(chatId, '🎵 Открытие Mini App\n\nНажмите кнопку ниже.', { reply_markup: webappReplyKeyboard() });
+  await sendText(chatId, '🎵 Открытие Mini App\n\nНажмите кнопку ниже.', {
+    reply_markup: { inline_keyboard: [[openAppInlineButton('Открыть приложение', 'open_app')]] }
+  });
 }
 function getUserReleaseEntries(uid, includeDeleted = false) {
   const list = Array.isArray(db?.[uid]) ? db[uid] : [];

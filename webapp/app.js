@@ -135,7 +135,7 @@ const LABEL_ARTISTS = [
 ];
 
 const HAS_DOM = typeof window !== "undefined" && typeof document !== "undefined";
-const tg = HAS_DOM ? (window.Telegram?.WebApp ?? null) : null;
+let tg = HAS_DOM ? (window.Telegram?.WebApp ?? null) : null;
 const DATE_PATTERN = /^(\d{2})\.(\d{2})\.(\d{4})$/;
 const CABINET_USERS_URL = "data/cabinet-users.json";
 const CABINET_RELEASES_URL = "data/releases-public.json";
@@ -173,23 +173,77 @@ const lazyObserver = typeof IntersectionObserver === "function"
   )
   : null;
 
+function getTelegramWebApp() {
+  if (!HAS_DOM) {
+    return null;
+  }
+  if (window.Telegram?.WebApp) {
+    tg = window.Telegram.WebApp;
+  }
+  return tg;
+}
+
+function getLaunchUserFromUrl() {
+  if (!HAS_DOM) {
+    return null;
+  }
+  const sources = [];
+  if (window.location.hash) {
+    sources.push(window.location.hash.replace(/^#/, ""));
+  }
+  if (window.location.search) {
+    sources.push(window.location.search.replace(/^\?/, ""));
+  }
+
+  for (const rawSource of sources) {
+    try {
+      const params = new URLSearchParams(rawSource);
+      const tgData = params.get("tgWebAppData");
+      if (!tgData) {
+        continue;
+      }
+      const tgParams = new URLSearchParams(tgData);
+      const rawUser = tgParams.get("user");
+      if (!rawUser) {
+        continue;
+      }
+      const parsed = JSON.parse(rawUser);
+      if (parsed && parsed.id) {
+        return parsed;
+      }
+    } catch {
+      // ignore malformed launch params
+    }
+  }
+  return null;
+}
+
+function getTelegramUser() {
+  const sdkUser = getTelegramWebApp()?.initDataUnsafe?.user;
+  if (sdkUser && sdkUser.id) {
+    return sdkUser;
+  }
+  return getLaunchUserFromUrl();
+}
+
 function initTelegramWebApp() {
-  if (!tg) {
+  const tgApp = getTelegramWebApp();
+  if (!tgApp) {
     return;
   }
 
-  tg.ready();
-  tg.expand();
-  tg.enableClosingConfirmation?.();
+  tgApp.ready();
+  tgApp.expand();
+  tgApp.enableClosingConfirmation?.();
 
-  const user = tg.initDataUnsafe?.user;
+  const user = getTelegramUser();
   if (user) {
     const badge = document.getElementById("userBadge");
     const username = user.username ? `@${user.username}` : user.first_name || "Профиль";
     badge.textContent = username;
   }
 
-  const params = tg.themeParams || {};
+  const params = tgApp.themeParams || {};
   const root = document.documentElement;
   if (params.bg_color) {
     root.style.setProperty("--bg", params.bg_color);
@@ -206,8 +260,9 @@ function safeOpenLink(url) {
   if (!url) {
     return;
   }
-  if (tg?.openLink) {
-    tg.openLink(url);
+  const tgApp = getTelegramWebApp();
+  if (tgApp?.openLink) {
+    tgApp.openLink(url);
     return;
   }
   window.open(url, "_blank", "noopener,noreferrer");
@@ -287,7 +342,7 @@ function getByteLength(text) {
 }
 
 function getCurrentUserId() {
-  const user = tg?.initDataUnsafe?.user;
+  const user = getTelegramUser();
   if (!user || !user.id) {
     return "";
   }
@@ -440,7 +495,7 @@ async function refreshCabinet() {
   if (!userId) {
     bindCard.classList.add("hidden");
     statusCard.classList.remove("hidden");
-    statusText.textContent = "Откройте Mini App внутри Telegram, чтобы использовать кабинет.";
+    statusText.textContent = "Mini App открыт без авторизации Telegram. Запускайте его только через кнопку «Открыть приложение» в чате с ботом.";
     document.getElementById("cabinetSummary").classList.add("hidden");
     document.getElementById("cabinetList").innerHTML = "";
     return;
@@ -488,11 +543,12 @@ function activateCabinet() {
     action: "cabinet_activate",
     source: "mini_app",
     submitted_at: new Date().toISOString(),
-    user: tg?.initDataUnsafe?.user || null
+    user: getTelegramUser() || null
   };
 
-  if (tg?.sendData) {
-    tg.sendData(JSON.stringify(payload));
+  const tgApp = getTelegramWebApp();
+  if (tgApp?.sendData) {
+    tgApp.sendData(JSON.stringify(payload));
     setCabinetActiveLocal(userId, true);
     showToast("Запрос на активацию отправлен. Обновляем кабинет...");
     refreshCabinet();
@@ -751,7 +807,7 @@ function buildSubmitPayload(form) {
     source: "mini_app",
     version: 2,
     submitted_at: new Date().toISOString(),
-    user: tg?.initDataUnsafe?.user || null,
+    user: getTelegramUser() || null,
     form: values
   };
 
@@ -772,16 +828,17 @@ function submitReleaseForm(event) {
   event.preventDefault();
   const form = event.currentTarget;
   const result = buildSubmitPayload(form);
+  const tgApp = getTelegramWebApp();
 
   if (result.errors.length) {
-    tg?.HapticFeedback?.notificationOccurred?.("error");
+    tgApp?.HapticFeedback?.notificationOccurred?.("error");
     showToast(result.errors[0]);
     return;
   }
 
-  if (tg?.sendData) {
-    tg.sendData(result.payloadJson || JSON.stringify(result.payload));
-    tg.HapticFeedback?.notificationOccurred?.("success");
+  if (tgApp?.sendData) {
+    tgApp.sendData(result.payloadJson || JSON.stringify(result.payload));
+    tgApp.HapticFeedback?.notificationOccurred?.("success");
     showToast("Анкета отправлена. Проверьте «Кабинет» и чат с ботом.");
     form.reset();
     updateTracklistVisibility();
@@ -795,21 +852,22 @@ function submitReleaseForm(event) {
 }
 
 function syncMainButton() {
-  if (!tg?.MainButton) {
+  const tgApp = getTelegramWebApp();
+  if (!tgApp?.MainButton) {
     return;
   }
   const canShow = appState.activeTab === "submit";
-  tg.MainButton.setParams({ color: "#8154ff", text_color: "#ffffff", is_visible: canShow });
-  tg.MainButton.setText("Отправить анкету");
-  tg.MainButton.offClick(handleMainButtonClick);
-  tg.MainButton.onClick(handleMainButtonClick);
+  tgApp.MainButton.setParams({ color: "#8154ff", text_color: "#ffffff", is_visible: canShow });
+  tgApp.MainButton.setText("Отправить анкету");
+  tgApp.MainButton.offClick(handleMainButtonClick);
+  tgApp.MainButton.onClick(handleMainButtonClick);
   if (canShow && !document.getElementById("submitForm").checkValidity()) {
-    tg.MainButton.setText("Заполните анкету");
+    tgApp.MainButton.setText("Заполните анкету");
   }
   if (canShow) {
-    tg.MainButton.show();
+    tgApp.MainButton.show();
   } else {
-    tg.MainButton.hide();
+    tgApp.MainButton.hide();
   }
 }
 
