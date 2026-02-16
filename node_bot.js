@@ -103,6 +103,9 @@ const SUPABASE_SCHEMA = envStr('SUPABASE_SCHEMA', 'public') || 'public';
 const SUPABASE_RELEASES_TABLE_RAW = envStr('SUPABASE_RELEASES_TABLE', 'cxrner_releases') || 'cxrner_releases';
 const SUPABASE_CABINET_TABLE_RAW = envStr('SUPABASE_CABINET_TABLE', 'cxrner_cabinet_users') || 'cxrner_cabinet_users';
 const SUPABASE_SYNC_ENABLED = !!SUPABASE_URL && !!SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_FETCH_TIMEOUT_MS = envInt('SUPABASE_FETCH_TIMEOUT_MS', 25000);
+const SUPABASE_FETCH_RETRIES = envInt('SUPABASE_FETCH_RETRIES', 2);
+const SUPABASE_FETCH_RETRY_DELAY_MS = envInt('SUPABASE_FETCH_RETRY_DELAY_MS', 900);
 const SUPABASE_SYNC_DEBOUNCE_MS = envInt('SUPABASE_SYNC_DEBOUNCE_MS', 1200);
 const IMPORT_RELEASES_BACKUP_FILE = envStr('IMPORT_RELEASES_BACKUP_FILE', '');
 
@@ -539,6 +542,28 @@ function supabaseUrl(pathAndQuery) {
   return `${base}/rest/v1/${pathAndQuery}`;
 }
 
+function supabaseHostFromUrl() {
+  try {
+    return new URL(SUPABASE_URL).hostname;
+  } catch {
+    return '';
+  }
+}
+
+async function logSupabaseDns(label = '') {
+  const host = supabaseHostFromUrl();
+  if (!host) return;
+  try {
+    const rows = await dns.promises.lookup(host, { all: true });
+    const list = Array.isArray(rows)
+      ? rows.map((it) => `${it.address}/${it.family}`).join(', ')
+      : '';
+    if (list) console.error(`[supabase] dns ${host}${label ? ` (${label})` : ''}: ${list}`);
+  } catch (e) {
+    console.error(`[supabase] dns lookup failed (${host}): ${clean(e?.message || e)}`);
+  }
+}
+
 async function supabaseRequest(pathAndQuery, opts = {}) {
   const method = opts.method || 'GET';
   const headers = {
@@ -553,15 +578,45 @@ async function supabaseRequest(pathAndQuery, opts = {}) {
     headers['content-type'] = 'application/json';
     request.body = JSON.stringify(opts.body);
   }
-  const res = await fetch(supabaseUrl(pathAndQuery), request);
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`supabase ${method} ${pathAndQuery} -> ${res.status}: ${clean(text).slice(0, 300)}`);
+  const retries = Math.max(0, Number(SUPABASE_FETCH_RETRIES) || 0);
+  let lastErr = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    let timeoutRef = null;
+    if (controller) {
+      timeoutRef = setTimeout(() => controller.abort(), Math.max(5000, SUPABASE_FETCH_TIMEOUT_MS));
+    }
+    try {
+      const res = await fetch(supabaseUrl(pathAndQuery), {
+        ...request,
+        signal: controller ? controller.signal : undefined
+      });
+      if (timeoutRef) clearTimeout(timeoutRef);
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`supabase ${method} ${pathAndQuery} -> ${res.status}: ${clean(text).slice(0, 300)}`);
+      }
+      if (res.status === 204) return null;
+      const ct = clean(res.headers.get('content-type') || '').toLowerCase();
+      if (ct.includes('application/json')) return res.json();
+      return res.text();
+    } catch (err) {
+      if (timeoutRef) clearTimeout(timeoutRef);
+      lastErr = err;
+      const meta = classifyFetchError(err);
+      const canRetry = attempt < retries && (meta.isNetwork || meta.isAbort || meta.isFetchFailed);
+      if (canRetry) {
+        await delay(Math.max(200, SUPABASE_FETCH_RETRY_DELAY_MS) * (attempt + 1));
+        continue;
+      }
+      if (meta.isNetwork || meta.isAbort || meta.isFetchFailed) {
+        await logSupabaseDns(`attempt=${attempt + 1}`);
+        throw new Error(`supabase ${method} ${pathAndQuery} network error: ${meta.details}`);
+      }
+      throw err;
+    }
   }
-  if (res.status === 204) return null;
-  const ct = clean(res.headers.get('content-type') || '').toLowerCase();
-  if (ct.includes('application/json')) return res.json();
-  return res.text();
+  throw lastErr || new Error(`supabase ${method} ${pathAndQuery} unknown error`);
 }
 
 async function supabaseSelectAll(tableName, selectCols, orderExpr = '') {
@@ -3655,6 +3710,10 @@ async function loop() {
   if (SUPABASE_SYNC_ENABLED) {
     console.info(`[bot] supabase sync: enabled (${SUPABASE_URL})`);
     console.info(`[bot] supabase tables: ${SUPABASE_RELEASES_TABLE}, ${SUPABASE_CABINET_TABLE}`);
+    console.info(
+      `[bot] supabase fetch: timeout=${SUPABASE_FETCH_TIMEOUT_MS}ms` +
+      ` retries=${SUPABASE_FETCH_RETRIES} delay=${SUPABASE_FETCH_RETRY_DELAY_MS}ms`
+    );
   } else {
     console.info('[bot] supabase sync: disabled');
   }
