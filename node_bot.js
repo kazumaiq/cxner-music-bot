@@ -3,9 +3,20 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
+const dns = require('node:dns');
 
 const ROOT = __dirname;
 const CFG = loadJson('deploy_config.json', {});
+
+try {
+  // In some hosting environments IPv6 routing is unstable for api.telegram.org.
+  // Prefer IPv4 to reduce intermittent "fetch failed" during long polling.
+  if (typeof dns.setDefaultResultOrder === 'function') {
+    dns.setDefaultResultOrder('ipv4first');
+  }
+} catch {
+  // ignore dns tuning errors
+}
 
 function clean(v) { return String(v ?? '').trim(); }
 function esc(v) {
@@ -71,6 +82,10 @@ if (!TOKEN) {
 }
 const MOD_CHAT = envInt('MODERATION_CHAT_ID', -1002117586464);
 const MODERATION_THREAD_ID = envInt('MODERATION_THREAD_ID', 0);
+const TELEGRAM_API_BASE = envStr('TELEGRAM_API_BASE', 'https://api.telegram.org').replace(/\/+$/, '');
+const TG_FETCH_TIMEOUT_MS = envInt('TG_FETCH_TIMEOUT_MS', 70000);
+const TG_FETCH_RETRIES = envInt('TG_FETCH_RETRIES', 2);
+const TG_FETCH_RETRY_DELAY_MS = envInt('TG_FETCH_RETRY_DELAY_MS', 800);
 const BASE = envStr('PUBLIC_BASE_URL', '');
 let WEBAPP_URL = envStr('WEBAPP_URL', BASE ? `${BASE.replace(/\/+$/, '')}/index.html` : '');
 if (/\.vercel\.app\/index\.html$/i.test(WEBAPP_URL)) {
@@ -168,16 +183,90 @@ let supabaseSyncQueued = false;
 let supabaseSyncTimer = null;
 ensureModDbShape();
 
-const API = `https://api.telegram.org/bot${TOKEN}`;
+const API = `${TELEGRAM_API_BASE}/bot${TOKEN}`;
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function classifyFetchError(err) {
+  const raw = clean(err?.message || err);
+  const lower = raw.toLowerCase();
+  const cause = err?.cause && typeof err.cause === 'object' ? err.cause : null;
+  const code = clean(cause?.code || err?.code || '').toUpperCase();
+  const errno = clean(cause?.errno || err?.errno || '');
+  const syscall = clean(cause?.syscall || err?.syscall || '');
+  const hostname = clean(cause?.hostname || cause?.host || err?.hostname || '');
+  const address = clean(cause?.address || err?.address || '');
+  const port = clean(cause?.port || err?.port || '');
+
+  const isAbort = clean(err?.name || '') === 'AbortError' || lower.includes('aborted');
+  const isFetchFailed = lower.includes('fetch failed');
+  const codeLower = code.toLowerCase();
+  const networkCodes = new Set([
+    'eai_again', 'enotfound', 'ecannothost', 'econnreset', 'etimedout',
+    'ehostunreach', 'enetunreach', 'econnrefused', 'epipe', 'ecanceled',
+    'ecancelled', 'ecouldntconnect'
+  ]);
+  const isNetwork = isFetchFailed || networkCodes.has(codeLower);
+
+  const parts = [];
+  if (raw) parts.push(raw);
+  if (code) parts.push(`code=${code}`);
+  if (errno) parts.push(`errno=${errno}`);
+  if (syscall) parts.push(`syscall=${syscall}`);
+  if (hostname) parts.push(`host=${hostname}`);
+  if (address) parts.push(`addr=${address}`);
+  if (port) parts.push(`port=${port}`);
+
+  return {
+    raw,
+    isAbort,
+    isFetchFailed,
+    isNetwork,
+    details: parts.join('; ') || 'unknown network error'
+  };
+}
+
 async function tg(method, payload = {}) {
-  const r = await fetch(`${API}/${method}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || !j.ok) throw new Error(`[${method}] ${j.description || r.statusText}`);
-  return j.result;
+  const url = `${API}/${method}`;
+  const retries = Math.max(0, Number(TG_FETCH_RETRIES) || 0);
+  let lastErr = null;
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    let timeoutRef = null;
+    if (controller) {
+      timeoutRef = setTimeout(() => controller.abort(), Math.max(5000, TG_FETCH_TIMEOUT_MS));
+    }
+
+    try {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller ? controller.signal : undefined
+      });
+      if (timeoutRef) clearTimeout(timeoutRef);
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) throw new Error(`[${method}] ${j.description || r.statusText}`);
+      return j.result;
+    } catch (err) {
+      if (timeoutRef) clearTimeout(timeoutRef);
+      lastErr = err;
+      const meta = classifyFetchError(err);
+      const canRetry = attempt < retries && (meta.isNetwork || meta.isAbort || meta.isFetchFailed);
+      if (canRetry) {
+        await delay(Math.max(200, TG_FETCH_RETRY_DELAY_MS) * (attempt + 1));
+        continue;
+      }
+      if (meta.isNetwork || meta.isAbort || meta.isFetchFailed) {
+        throw new Error(`[${method}] network error: ${meta.details}`);
+      }
+      throw err;
+    }
+  }
+  throw lastErr || new Error(`[${method}] unknown error`);
 }
 function saveDb() {
   saveJson(DB_FILE, db);
@@ -3507,10 +3596,15 @@ function startStaticServer() {
 
 let offset = 0;
 let stopping = false;
+let pollingFailStreak = 0;
 async function loop() {
   while (!stopping) {
     try {
       const updates = await tg('getUpdates', { timeout: 50, offset, allowed_updates: ['message', 'callback_query'] });
+      if (pollingFailStreak > 0) {
+        console.info(`[bot] polling recovered after ${pollingFailStreak} errors`);
+        pollingFailStreak = 0;
+      }
       for (const u of updates) {
         offset = Number(u.update_id) + 1;
         try {
@@ -3521,7 +3615,20 @@ async function loop() {
         }
       }
     } catch (e) {
-      console.error('[bot] polling error:', e.message || e);
+      pollingFailStreak += 1;
+      const errText = clean(e?.message || e) || 'unknown error';
+      console.error(`[bot] polling error #${pollingFailStreak}: ${errText}`);
+      if (pollingFailStreak === 1 || pollingFailStreak % 10 === 0) {
+        try {
+          const dnsRows = await dns.promises.lookup('api.telegram.org', { all: true });
+          const list = Array.isArray(dnsRows)
+            ? dnsRows.map((it) => `${it.address}/${it.family}`).join(', ')
+            : '';
+          if (list) console.error(`[bot] dns api.telegram.org: ${list}`);
+        } catch (dnsErr) {
+          console.error(`[bot] dns lookup failed: ${clean(dnsErr?.message || dnsErr)}`);
+        }
+      }
       await new Promise((r) => setTimeout(r, 3000));
     }
   }
@@ -3551,6 +3658,8 @@ async function loop() {
   } else {
     console.info('[bot] supabase sync: disabled');
   }
+  console.info(`[bot] telegram api base: ${TELEGRAM_API_BASE}`);
+  console.info(`[bot] tg fetch: timeout=${TG_FETCH_TIMEOUT_MS}ms retries=${TG_FETCH_RETRIES}`);
   console.info(`[bot] moderation thread: ${MODERATION_THREAD_ID > 0 ? MODERATION_THREAD_ID : 'default'}`);
   if (WEBAPP_URL) console.info(`[bot] webapp url: ${WEBAPP_URL}`);
   await verifyModerationChatAccess();
