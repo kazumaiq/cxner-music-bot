@@ -11,7 +11,7 @@
   "WEB_SERVER_PORT": 8080,
   "WEB_SERVER_DIR": "webapp",
   "SUPABASE_URL": "https://zjwlprncjmtbcdlypdwx.supabase.co"
-  "SUPABASE_SERVICE_ROLE_KEY": "sb_publishable_HiLS40O7Q5V_Avcmcqg-YQ_tuHkBDhH",
+  "SUPABASE_SERVICE_ROLE_KEY": "sb_secret_5cj7at2-4tNs_0oWRvVXvA_gYhZSst7",
   "SUPABASE_SCHEMA": "public",
   "SUPABASE_RELEASES_TABLE": "cxrner_releases",
   "SUPABASE_CABINET_TABLE": "cxrner_cabinet_users",
