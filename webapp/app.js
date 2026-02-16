@@ -568,22 +568,6 @@ function renderStats() {
   document.getElementById("statArtists").textContent = String(appState.artists.length);
 }
 
-function renderFreshReleases() {
-  const container = document.getElementById("freshList");
-  const list = appState.releases.slice(0, 6);
-  container.innerHTML = list.map((rel) => `
-    <article class="release-card glass">
-      <img class="lazy" data-src="${rel.cover}" alt="${escapeHtml(rel.title)}" loading="lazy" decoding="async">
-      <div>
-        <p class="release-title">${escapeHtml(rel.title)}</p>
-        <p class="release-artist">${escapeHtml(rel.artist)}</p>
-      </div>
-      <button class="btn btn-neon" data-listen="${rel.id}" type="button">Слушать</button>
-    </article>
-  `).join("");
-  observeLazyImages(container);
-}
-
 function renderArtistFilter() {
   const select = document.getElementById("artistFilter");
   const releaseArtists = [...new Set(appState.releases.map((rel) => rel.artist))]
@@ -710,11 +694,25 @@ function isHttpUrl(text) {
   }
 }
 
+function normalizeReleaseTypeValue(value) {
+  const raw = normalizeText(value).toLowerCase();
+  if (!raw) {
+    return "";
+  }
+  if (raw === "album" || raw === "альбом" || raw === "р°р»сњр±рѕрј") {
+    return "album";
+  }
+  if (raw === "single" || raw === "singl" || raw === "сингл" || raw === "сингал" || raw === "сингел" || raw === "сњсѓрЅрір»") {
+    return "single";
+  }
+  return "";
+}
+
 function updateTracklistVisibility() {
   const typeSelect = document.getElementById("releaseType");
   const wrap = document.getElementById("tracklistFieldWrap");
   const field = document.getElementById("tracklistField");
-  const isAlbum = typeSelect.value === "альбом";
+  const isAlbum = normalizeReleaseTypeValue(typeSelect.value) === "album";
   wrap.classList.toggle("visible", isAlbum);
   field.required = isAlbum;
   if (!isAlbum) {
@@ -724,8 +722,9 @@ function updateTracklistVisibility() {
 
 function buildSubmitPayload(form) {
   const formData = new FormData(form);
+  const normalizedType = normalizeReleaseTypeValue(formData.get("type"));
   const values = {
-    type: limitText(formData.get("type"), 20),
+    type: normalizedType,
     name: limitText(formData.get("name"), 160),
     subname: limitText(formData.get("subname"), 90) || ".",
     has_lyrics: limitText(formData.get("has_lyrics"), 60),
@@ -779,7 +778,7 @@ function buildSubmitPayload(form) {
   if (!parsedDate) {
     errors.push("Дата должна быть в формате ДД.ММ.ГГГГ.");
   } else {
-    const minDays = values.type === "альбом" ? 7 : 3;
+    const minDays = values.type === "album" ? 7 : 3;
     const minDate = new Date();
     minDate.setHours(0, 0, 0, 0);
     minDate.setDate(minDate.getDate() + minDays);
@@ -794,11 +793,11 @@ function buildSubmitPayload(form) {
   if (values.yandex !== "." && !isHttpUrl(values.yandex)) {
     errors.push("Поле Яндекс Музыка: укажите URL или точку.");
   }
-  if (values.type === "альбом" && values.tracklist === ".") {
+  if (values.type === "album" && values.tracklist === ".") {
     errors.push("Для альбома обязательно заполните Tracklist.");
   }
 
-  if (values.type !== "альбом") {
+  if (values.type !== "album") {
     values.tracklist = ".";
   }
 
@@ -1000,7 +999,6 @@ function bootstrap() {
   initTelegramWebApp();
   buildArtistsCatalog();
   renderStats();
-  renderFreshReleases();
   renderArtistFilter();
   renderReleasesGrid();
   renderArtists();

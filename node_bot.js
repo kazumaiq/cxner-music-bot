@@ -948,8 +948,8 @@ function welcomeText() {
 
 function normalizeType(v) {
   const t = clean(v).toLowerCase();
-  if (['сингл', 'single', 'singl'].includes(t)) return 'сингл';
-  if (['альбом', 'album'].includes(t)) return 'альбом';
+  if (['сингл', 'single', 'singl', 'сњсѓрЅрір»', 'сингал', 'сингел'].includes(t)) return 'сингл';
+  if (['альбом', 'album', 'р°р»сњр±рѕрј'].includes(t)) return 'альбом';
   return null;
 }
 function parseRuDate(v) {
