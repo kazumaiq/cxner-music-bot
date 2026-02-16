@@ -9,5 +9,12 @@
   "ENABLE_WEB_SERVER": true,
   "WEB_SERVER_HOST": "0.0.0.0",
   "WEB_SERVER_PORT": 8080,
-  "WEB_SERVER_DIR": "webapp"
+  "WEB_SERVER_DIR": "webapp",
+  "SUPABASE_URL": "",
+  "SUPABASE_SERVICE_ROLE_KEY": "",
+  "SUPABASE_SCHEMA": "public",
+  "SUPABASE_RELEASES_TABLE": "cxrner_releases",
+  "SUPABASE_CABINET_TABLE": "cxrner_cabinet_users",
+  "SUPABASE_SYNC_DEBOUNCE_MS": 1200,
+  "IMPORT_RELEASES_BACKUP_FILE": "releases_backup_20260214_180025.json"
 }

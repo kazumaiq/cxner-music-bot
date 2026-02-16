@@ -80,12 +80,21 @@ const WEB_PORT = envInt('PORT', envInt('WEB_SERVER_PORT', 8080));
 const WEB_DIR = envStr('WEB_SERVER_DIR', 'webapp');
 const WEB_ENABLED = envBool('ENABLE_WEB_SERVER', true);
 const ADMIN_IDS = envIntList('ADMIN_IDS', [881379104]);
+const SUPABASE_URL = envStr('SUPABASE_URL', '');
+const SUPABASE_SERVICE_ROLE_KEY = envStr('SUPABASE_SERVICE_ROLE_KEY', envStr('SUPABASE_KEY', ''));
+const SUPABASE_SCHEMA = envStr('SUPABASE_SCHEMA', 'public') || 'public';
+const SUPABASE_RELEASES_TABLE_RAW = envStr('SUPABASE_RELEASES_TABLE', 'cxrner_releases') || 'cxrner_releases';
+const SUPABASE_CABINET_TABLE_RAW = envStr('SUPABASE_CABINET_TABLE', 'cxrner_cabinet_users') || 'cxrner_cabinet_users';
+const SUPABASE_SYNC_ENABLED = !!SUPABASE_URL && !!SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_SYNC_DEBOUNCE_MS = envInt('SUPABASE_SYNC_DEBOUNCE_MS', 1200);
+const IMPORT_RELEASES_BACKUP_FILE = envStr('IMPORT_RELEASES_BACKUP_FILE', '');
 
 const DB_FILE = 'releases.json';
 const MOD_DB_FILE = 'moderation_releases.json';
 const CAB_FILE = 'cabinet_users.json';
 const EXP_REL = 'webapp/data/releases-public.json';
 const EXP_CAB = 'webapp/data/cabinet-users.json';
+const CLEANUP_KEEP_DAYS = envInt('CLEANUP_KEEP_DAYS', 180);
 
 const STATUS = {
   ON_UPLOAD: 'on_upload',
@@ -131,7 +140,17 @@ let cabUsers = loadJson(CAB_FILE, {});
 const userForms = {};
 const coverSessions = {};
 const promoSessions = {};
+const broadcastSessions = {};
 const PENDING_ACTION_TTL_MS = 1000 * 60 * 60 * 6; // 6 hours
+const SUPABASE_RELEASES_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_RELEASES_TABLE_RAW)
+  ? SUPABASE_RELEASES_TABLE_RAW
+  : 'cxrner_releases';
+const SUPABASE_CABINET_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_CABINET_TABLE_RAW)
+  ? SUPABASE_CABINET_TABLE_RAW
+  : 'cxrner_cabinet_users';
+let supabaseSyncInProgress = false;
+let supabaseSyncQueued = false;
+let supabaseSyncTimer = null;
 ensureModDbShape();
 
 const API = `https://api.telegram.org/bot${TOKEN}`;
@@ -148,6 +167,7 @@ async function tg(method, payload = {}) {
 function saveDb() {
   saveJson(DB_FILE, db);
   exportReleases();
+  scheduleSupabaseSync('db');
 }
 function saveModDb() {
   ensureModDbShape();
@@ -156,6 +176,7 @@ function saveModDb() {
 function saveCab() {
   saveJson(CAB_FILE, cabUsers);
   exportCabinet();
+  scheduleSupabaseSync('cabinet');
 }
 function exportReleases() {
   const out = { updated_at: new Date().toISOString(), users: {} };
@@ -194,6 +215,401 @@ function exportCabinet() {
     };
   }
   saveJson(EXP_CAB, out);
+}
+
+function releaseKey(rel) {
+  const time = clean(rel?.submission_time || rel?.moderation_time || '');
+  return [
+    clean(rel?.name).toLowerCase(),
+    clean(rel?.nick).toLowerCase(),
+    clean(rel?.date),
+    clean(rel?.link),
+    time
+  ].join('|');
+}
+
+function releaseFreshnessScore(rel) {
+  const a = Date.parse(clean(rel?.moderation_time || ''));
+  const b = Date.parse(clean(rel?.submission_time || ''));
+  if (Number.isFinite(a)) return a;
+  if (Number.isFinite(b)) return b;
+  return 0;
+}
+
+function normalizeRelease(relRaw) {
+  const rel = relRaw && typeof relRaw === 'object' ? { ...relRaw } : {};
+  rel.type = clean(rel.type) || 'сингл';
+  rel.status = canonicalStatus(rel.status || STATUS.ON_UPLOAD);
+  rel.name = clean(rel.name);
+  rel.subname = clean(rel.subname || '.');
+  rel.nick = clean(rel.nick);
+  rel.fio = clean(rel.fio);
+  rel.date = clean(rel.date);
+  rel.version = clean(rel.version || 'Оригинал');
+  rel.genre = clean(rel.genre);
+  rel.link = clean(rel.link);
+  rel.yandex = clean(rel.yandex || '.');
+  rel.mat = clean(rel.mat || 'Нет');
+  rel.promo = clean(rel.promo || '.');
+  rel.comment = clean(rel.comment || '.');
+  rel.tracklist = clean(rel.tracklist || '.');
+  rel.tg = clean(rel.tg || rel.telegram_contact || '');
+  rel.source = clean(rel.source || 'node_bot');
+  rel.submission_time = clean(rel.submission_time || new Date().toISOString());
+  if (rel.moderation_time) rel.moderation_time = clean(rel.moderation_time);
+  if (rel.reject_reason) rel.reject_reason = clean(rel.reject_reason);
+  if (rel.upc) rel.upc = clean(rel.upc).toUpperCase();
+  if (rel.moderation_message_id) rel.moderation_message_id = Number(rel.moderation_message_id) || 0;
+  rel.user_deleted = !!rel.user_deleted;
+  return rel;
+}
+
+function mergeReleasesIntoDb(sourceDb, sourceLabel = 'source') {
+  if (!sourceDb || typeof sourceDb !== 'object') return { added: 0, merged: 0 };
+  let added = 0;
+  let merged = 0;
+
+  for (const [uidRaw, listRaw] of Object.entries(sourceDb)) {
+    const uid = String(uidRaw);
+    const incoming = Array.isArray(listRaw) ? listRaw : [];
+    if (!incoming.length) continue;
+
+    const current = Array.isArray(db[uid]) ? db[uid] : [];
+    if (!Array.isArray(db[uid])) db[uid] = current;
+
+    const byMsg = new Map();
+    const bySubmission = new Map();
+    const byKey = new Map();
+    for (let idx = 0; idx < current.length; idx += 1) {
+      const rel = current[idx];
+      if (!rel || typeof rel !== 'object') continue;
+      const msgId = Number(rel.moderation_message_id || 0);
+      if (msgId) byMsg.set(msgId, idx);
+      const submission = clean(rel.submission_time);
+      if (submission) bySubmission.set(submission, idx);
+      byKey.set(releaseKey(rel), idx);
+    }
+
+    for (let srcIdx = 0; srcIdx < incoming.length; srcIdx += 1) {
+      const rawIncoming = incoming[srcIdx];
+      if (!rawIncoming || typeof rawIncoming !== 'object') continue;
+      const srcRel = normalizeRelease(rawIncoming);
+      let idx = -1;
+      const msgId = Number(srcRel.moderation_message_id || 0);
+      if (msgId && byMsg.has(msgId)) idx = byMsg.get(msgId);
+      if (idx < 0) {
+        const submission = clean(srcRel.submission_time);
+        if (submission && bySubmission.has(submission)) idx = bySubmission.get(submission);
+      }
+      if (idx < 0 && byKey.has(releaseKey(srcRel))) idx = byKey.get(releaseKey(srcRel));
+
+      if (idx >= 0 && current[idx]) {
+        const localRel = normalizeRelease(current[idx]);
+        const localScore = releaseFreshnessScore(localRel);
+        const remoteScore = releaseFreshnessScore(srcRel);
+        current[idx] = (remoteScore > localScore)
+          ? { ...localRel, ...srcRel }
+          : { ...srcRel, ...localRel };
+        merged += 1;
+        continue;
+      }
+
+      current.push(srcRel);
+      const newIdx = current.length - 1;
+      if (msgId) byMsg.set(msgId, newIdx);
+      if (srcRel.submission_time) bySubmission.set(srcRel.submission_time, newIdx);
+      byKey.set(releaseKey(srcRel), newIdx);
+      added += 1;
+    }
+  }
+
+  if (added || merged) {
+    console.info(`[db] merge from ${sourceLabel}: added=${added}, merged=${merged}`);
+  }
+  return { added, merged };
+}
+
+function mergeCabinetIntoState(sourceCabinet, sourceLabel = 'source') {
+  if (!sourceCabinet || typeof sourceCabinet !== 'object') return { added: 0, merged: 0 };
+  let added = 0;
+  let merged = 0;
+  for (const [uidRaw, valueRaw] of Object.entries(sourceCabinet)) {
+    const uid = String(uidRaw);
+    const value = valueRaw && typeof valueRaw === 'object' ? { ...valueRaw } : {};
+    const next = {
+      approved: !!value.approved,
+      activated_at: clean(value.activated_at || ''),
+      username: clean(value.username || ''),
+      first_name: clean(value.first_name || '')
+    };
+    if (!cabUsers[uid]) {
+      cabUsers[uid] = next;
+      added += 1;
+      continue;
+    }
+    cabUsers[uid] = {
+      ...cabUsers[uid],
+      ...next,
+      approved: !!(cabUsers[uid].approved || next.approved)
+    };
+    merged += 1;
+  }
+  if (added || merged) {
+    console.info(`[cabinet] merge from ${sourceLabel}: added=${added}, merged=${merged}`);
+  }
+  return { added, merged };
+}
+
+function importBackupsIntoDb() {
+  const backups = [];
+  if (IMPORT_RELEASES_BACKUP_FILE) {
+    backups.push(IMPORT_RELEASES_BACKUP_FILE);
+  }
+  try {
+    const auto = fs.readdirSync(ROOT)
+      .filter((name) => /^releases_backup_\d{8}_\d{6}\.json$/i.test(name))
+      .sort();
+    for (const file of auto) backups.push(file);
+  } catch {
+    // ignore backup scan errors
+  }
+
+  let totalAdded = 0;
+  let totalMerged = 0;
+  const seen = new Set();
+  for (const backupFileRaw of backups) {
+    const backupFile = path.isAbsolute(backupFileRaw)
+      ? backupFileRaw
+      : path.resolve(ROOT, backupFileRaw);
+    if (seen.has(backupFile)) continue;
+    seen.add(backupFile);
+    if (!fs.existsSync(backupFile)) continue;
+    try {
+      const payload = JSON.parse(fs.readFileSync(backupFile, 'utf8'));
+      const merged = mergeReleasesIntoDb(payload, path.basename(backupFile));
+      totalAdded += merged.added;
+      totalMerged += merged.merged;
+    } catch (e) {
+      console.error(`[db] backup import failed (${backupFile}):`, clean(e?.message || e));
+    }
+  }
+  if (totalAdded || totalMerged) {
+    saveJson(DB_FILE, db);
+    exportReleases();
+  }
+  return { added: totalAdded, merged: totalMerged };
+}
+
+function supabaseHeaders(contentProfile = false) {
+  const headers = {
+    apikey: SUPABASE_SERVICE_ROLE_KEY,
+    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
+  };
+  if (SUPABASE_SCHEMA && SUPABASE_SCHEMA !== 'public') {
+    headers['Accept-Profile'] = SUPABASE_SCHEMA;
+    if (contentProfile) headers['Content-Profile'] = SUPABASE_SCHEMA;
+  }
+  return headers;
+}
+
+function supabaseUrl(pathAndQuery) {
+  const base = SUPABASE_URL.replace(/\/+$/, '');
+  return `${base}/rest/v1/${pathAndQuery}`;
+}
+
+async function supabaseRequest(pathAndQuery, opts = {}) {
+  const method = opts.method || 'GET';
+  const headers = {
+    ...supabaseHeaders(method !== 'GET'),
+    ...(opts.headers || {})
+  };
+  const request = {
+    method,
+    headers
+  };
+  if (opts.body !== undefined) {
+    headers['content-type'] = 'application/json';
+    request.body = JSON.stringify(opts.body);
+  }
+  const res = await fetch(supabaseUrl(pathAndQuery), request);
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`supabase ${method} ${pathAndQuery} -> ${res.status}: ${clean(text).slice(0, 300)}`);
+  }
+  if (res.status === 204) return null;
+  const ct = clean(res.headers.get('content-type') || '').toLowerCase();
+  if (ct.includes('application/json')) return res.json();
+  return res.text();
+}
+
+async function supabaseSelectAll(tableName, selectCols, orderExpr = '') {
+  const out = [];
+  const pageSize = 1000;
+  let from = 0;
+  while (true) {
+    const to = from + pageSize - 1;
+    const query = [];
+    query.push(`select=${encodeURIComponent(selectCols)}`);
+    if (orderExpr) query.push(`order=${encodeURIComponent(orderExpr)}`);
+    const rows = await supabaseRequest(`${tableName}?${query.join('&')}`, {
+      headers: { Range: `${from}-${to}` }
+    });
+    const list = Array.isArray(rows) ? rows : [];
+    out.push(...list);
+    if (list.length < pageSize) break;
+    from += pageSize;
+  }
+  return out;
+}
+
+async function hydrateFromSupabase() {
+  if (!SUPABASE_SYNC_ENABLED) return;
+  try {
+    const [releaseRows, cabinetRows] = await Promise.all([
+      supabaseSelectAll(
+        SUPABASE_RELEASES_TABLE,
+        'user_id,release_idx,release_data,updated_at',
+        'user_id.asc,release_idx.asc'
+      ),
+      supabaseSelectAll(
+        SUPABASE_CABINET_TABLE,
+        'user_id,profile,updated_at',
+        'user_id.asc'
+      )
+    ]);
+
+    const remoteDb = {};
+    for (const row of releaseRows) {
+      const uid = String(row?.user_id || '');
+      const idx = Number(row?.release_idx);
+      if (!uid || !Number.isFinite(idx) || idx < 0) continue;
+      if (!Array.isArray(remoteDb[uid])) remoteDb[uid] = [];
+      const rel = normalizeRelease(row?.release_data || {});
+      remoteDb[uid][idx] = rel;
+    }
+    const remoteCab = {};
+    for (const row of cabinetRows) {
+      const uid = String(row?.user_id || '');
+      if (!uid) continue;
+      remoteCab[uid] = row?.profile && typeof row.profile === 'object' ? row.profile : {};
+    }
+
+    mergeReleasesIntoDb(remoteDb, 'supabase');
+    mergeCabinetIntoState(remoteCab, 'supabase');
+    saveJson(DB_FILE, db);
+    saveJson(CAB_FILE, cabUsers);
+    exportReleases();
+    exportCabinet();
+    console.info(`[supabase] hydrated: releases=${releaseRows.length}, cabinet=${cabinetRows.length}`);
+  } catch (e) {
+    console.error('[supabase] hydrate failed:', clean(e?.message || e));
+  }
+}
+
+function buildSupabaseReleaseRows() {
+  const rows = [];
+  const now = new Date().toISOString();
+  for (const [uid, listRaw] of Object.entries(db || {})) {
+    const list = Array.isArray(listRaw) ? listRaw : [];
+    for (let idx = 0; idx < list.length; idx += 1) {
+      const rawRel = list[idx];
+      if (!rawRel || typeof rawRel !== 'object') continue;
+      const rel = normalizeRelease(rawRel);
+      rows.push({
+        user_id: String(uid),
+        release_idx: idx,
+        release_data: rel,
+        updated_at: now
+      });
+    }
+  }
+  return rows;
+}
+
+function buildSupabaseCabinetRows() {
+  const rows = [];
+  const now = new Date().toISOString();
+  for (const [uid, profileRaw] of Object.entries(cabUsers || {})) {
+    const profile = profileRaw && typeof profileRaw === 'object' ? profileRaw : {};
+    rows.push({
+      user_id: String(uid),
+      profile: {
+        approved: !!profile.approved,
+        activated_at: clean(profile.activated_at || ''),
+        username: clean(profile.username || ''),
+        first_name: clean(profile.first_name || '')
+      },
+      updated_at: now
+    });
+  }
+  return rows;
+}
+
+async function supabaseUpsertRows(tableName, rows, chunkSize = 250) {
+  if (!rows.length) return;
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    await supabaseRequest(`${tableName}?on_conflict=user_id,release_idx`, {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: chunk
+    });
+  }
+}
+
+async function supabaseUpsertCabinetRows(tableName, rows, chunkSize = 250) {
+  if (!rows.length) return;
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    await supabaseRequest(`${tableName}?on_conflict=user_id`, {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: chunk
+    });
+  }
+}
+
+async function syncSupabaseNow(reason = '') {
+  if (!SUPABASE_SYNC_ENABLED) return;
+  if (supabaseSyncInProgress) {
+    supabaseSyncQueued = true;
+    return;
+  }
+  supabaseSyncInProgress = true;
+  try {
+    const relRows = buildSupabaseReleaseRows();
+    const cabRows = buildSupabaseCabinetRows();
+    await Promise.all([
+      supabaseUpsertRows(SUPABASE_RELEASES_TABLE, relRows),
+      supabaseUpsertCabinetRows(SUPABASE_CABINET_TABLE, cabRows)
+    ]);
+    console.info(`[supabase] synced (${reason || 'manual'}): releases=${relRows.length}, cabinet=${cabRows.length}`);
+  } catch (e) {
+    console.error('[supabase] sync failed:', clean(e?.message || e));
+  } finally {
+    supabaseSyncInProgress = false;
+    if (supabaseSyncQueued) {
+      supabaseSyncQueued = false;
+      setTimeout(() => { syncSupabaseNow('queued').catch(() => {}); }, 25);
+    }
+  }
+}
+
+function scheduleSupabaseSync(reason = '') {
+  if (!SUPABASE_SYNC_ENABLED) return;
+  if (supabaseSyncTimer) clearTimeout(supabaseSyncTimer);
+  supabaseSyncTimer = setTimeout(() => {
+    supabaseSyncTimer = null;
+    syncSupabaseNow(reason).catch(() => {});
+  }, Math.max(300, SUPABASE_SYNC_DEBOUNCE_MS));
+}
+
+async function supabaseDeleteAllReleases() {
+  if (!SUPABASE_SYNC_ENABLED) return;
+  await supabaseRequest(`${SUPABASE_RELEASES_TABLE}?user_id=neq.__none__`, {
+    method: 'DELETE',
+    headers: { Prefer: 'return=minimal' }
+  });
 }
 
 function hasValidWebAppUrl() {
@@ -272,6 +688,31 @@ function moderationKeyboard(uid, idx) {
 
 function sendText(chatId, text, extra = {}) {
   return tg('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true, ...extra });
+}
+function sendTextPlain(chatId, text, extra = {}) {
+  return tg('sendMessage', { chat_id: chatId, text, disable_web_page_preview: true, ...extra });
+}
+
+async function sendDocument(chatId, filePath, caption = '') {
+  const abs = path.isAbsolute(filePath) ? filePath : path.resolve(ROOT, filePath);
+  const payload = fs.readFileSync(abs);
+  const form = new FormData();
+  form.append('chat_id', String(chatId));
+  if (caption) form.append('caption', caption);
+  form.append('document', new Blob([payload]), path.basename(abs));
+
+  const response = await fetch(`${API}/sendDocument`, {
+    method: 'POST',
+    body: form
+  }).catch((e) => {
+    throw new Error(`[sendDocument] ${clean(e?.message || e)}`);
+  });
+
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || !result.ok) {
+    throw new Error(`[sendDocument] ${result.description || response.statusText}`);
+  }
+  return result.result;
 }
 function welcomeText() {
   return 'Добро пожаловать в систему дистрибуции CXRNER MUSIC.\nУправляй релизами. Загружай треки. Масштабируй звук.';
@@ -1508,6 +1949,7 @@ function getUserReleaseEntries(uid, includeDeleted = false) {
   const out = [];
   for (let idx = 0; idx < list.length; idx += 1) {
     const rel = list[idx];
+    if (!rel || typeof rel !== 'object') continue;
     if (!includeDeleted && rel?.user_deleted) continue;
     out.push({ idx, rel });
   }
@@ -1657,6 +2099,7 @@ function collectStats(cutoff = 0) {
     const list = Array.isArray(rels) ? rels : [];
     if (list.length > 0) stats.users_active += 1;
     for (const rel of list) {
+      if (!rel || typeof rel !== 'object') continue;
       const submissionTs = parseIsoTime(rel?.submission_time);
       if (cutoff && submissionTs && submissionTs < cutoff) continue;
 
@@ -1693,8 +2136,23 @@ function sortedTopFromMap(map, limit = 3) {
 function adminPanelKeyboard() {
   return {
     inline_keyboard: [
-      [{ text: '📊 Статистика', callback_data: 'admin_stats' }],
-      [{ text: '🔄 Обновить', callback_data: 'admin_back' }]
+      [
+        { text: '🎁 Бэкап БД', callback_data: 'admin_backup' },
+        { text: '🗂 Архив мод.', callback_data: 'admin_moderation_backup' }
+      ],
+      [
+        { text: '📊 Статистика', callback_data: 'admin_stats' },
+        { text: '⏳ Ожидают', callback_data: 'admin_pending' }
+      ],
+      [
+        { text: '🔄 Очистка', callback_data: 'admin_cleanup' },
+        { text: '📢 Рассылка', callback_data: 'admin_broadcast' }
+      ],
+      [
+        { text: '📋 Все релизы', callback_data: 'admin_all_releases' },
+        { text: '⚠️ УДАЛИТЬ ВСЁ', callback_data: 'admin_cleanbase_confirm' }
+      ],
+      [{ text: '🔁 Обновить', callback_data: 'admin_back' }]
     ]
   };
 }
@@ -1712,21 +2170,29 @@ function statsPeriodKeyboard(showBackToAdmin = true) {
 function buildAdminPanelText() {
   const all = collectStats(0);
   const week = collectStats(buildPeriodMeta('week').cutoff);
+  const awaiting = all.on_upload + all.moderation + all.needs_fix;
+  const supabaseInfo = SUPABASE_SYNC_ENABLED
+    ? `🟢 Supabase: подключен (${esc(SUPABASE_RELEASES_TABLE)})`
+    : '🟡 Supabase: не настроен';
   return (
-    '🛠 <b>АДМИН-ПАНЕЛЬ</b>\n\n' +
-    '📊 <b>Общая статистика:</b>\n' +
+    '❄️ <b>АДМИН-ПАНЕЛЬ</b> ❄️\n\n' +
+    '📊 <b>ОБЩАЯ СТАТИСТИКА:</b>\n' +
     `👥 Пользователей: <b>${all.users_total}</b>\n` +
     `🎧 Активных: <b>${all.users_active}</b>\n` +
     `📦 Всего релизов: <b>${all.total}</b>\n` +
-    `🕓 На отгрузке: <b>${all.on_upload}</b>\n` +
-    `🧠 На модерации: <b>${all.moderation}</b>\n` +
+    `⏳ Ожидает: <b>${awaiting}</b>\n` +
     `✅ Одобрено: <b>${all.approved}</b>\n` +
     `❌ Отклонено: <b>${all.rejected}</b>\n` +
-    `✏️ На исправлении: <b>${all.needs_fix}</b>\n` +
-    `🗑 Удалено: <b>${all.deleted}</b>\n` +
+    `📢 Опубликовано: <b>${all.published}</b>\n` +
     `📅 За 7 дней: <b>${week.total}</b>\n\n` +
-    'Команды:\n' +
-    '/statss — статистика по периодам'
+    '⚙️ <b>УПРАВЛЕНИЕ:</b>\n' +
+    '/backup — 📦 База релизов\n' +
+    '/moderation_backup — 🗂 Архив модерации\n' +
+    '/stats /statss — 📊 Подробная статистика\n' +
+    '/broadcast — 📢 Рассылка пользователям\n' +
+    '/cleanup — 🧹 Очистка служебных данных\n' +
+    '/cleanbase — ⚠️ УДАЛИТЬ ВСЕ РЕЛИЗЫ\n\n' +
+    `${supabaseInfo}`
   );
 }
 
@@ -1764,6 +2230,165 @@ function buildPeriodStatsText(period) {
     text += 'Нет данных\n';
   }
   return text;
+}
+
+function buildReleaseRow(uid, idx, rel) {
+  const st = canonicalStatus(rel?.status);
+  return `${statusEmoji(st)} ${esc(shortTitle(rel?.name || 'Без названия', 42))} — ${esc(rel?.nick || '—')} (<code>${esc(uid)}</code>#${idx})`;
+}
+
+function collectReleasesFlat() {
+  const out = [];
+  for (const [uid, listRaw] of Object.entries(db || {})) {
+    const list = Array.isArray(listRaw) ? listRaw : [];
+    for (let idx = 0; idx < list.length; idx += 1) {
+      const rel = list[idx];
+      if (!rel || typeof rel !== 'object') continue;
+      out.push({ uid, idx, rel });
+    }
+  }
+  out.sort((a, b) => parseIsoTime(b.rel?.submission_time) - parseIsoTime(a.rel?.submission_time));
+  return out;
+}
+
+function buildPendingText(limit = 20) {
+  const waitingStatuses = new Set([STATUS.ON_UPLOAD, STATUS.MODERATION, STATUS.NEEDS_FIX]);
+  const items = collectReleasesFlat().filter(({ rel }) => waitingStatuses.has(canonicalStatus(rel?.status)));
+  let text = `⏳ <b>ОЖИДАЮЩИЕ РЕЛИЗЫ</b>\n\nВсего: <b>${items.length}</b>\n\n`;
+  if (!items.length) return `${text}Сейчас ожидающих релизов нет.`;
+  const view = items.slice(0, limit);
+  for (let i = 0; i < view.length; i += 1) {
+    const { uid, idx, rel } = view[i];
+    text += `${i + 1}. ${buildReleaseRow(uid, idx, rel)}\n`;
+  }
+  if (items.length > view.length) {
+    text += `\n… и ещё ${items.length - view.length}`;
+  }
+  return text;
+}
+
+function buildAllReleasesText(limit = 30) {
+  const items = collectReleasesFlat();
+  let text = `📋 <b>ВСЕ РЕЛИЗЫ</b>\n\nВсего: <b>${items.length}</b>\n\n`;
+  if (!items.length) return `${text}Список пуст.`;
+  const view = items.slice(0, limit);
+  for (let i = 0; i < view.length; i += 1) {
+    const { uid, idx, rel } = view[i];
+    text += `${i + 1}. ${buildReleaseRow(uid, idx, rel)}\n`;
+  }
+  if (items.length > view.length) {
+    text += `\n… и ещё ${items.length - view.length}`;
+  }
+  return text;
+}
+
+function getNowStamp() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${y}${mm}${dd}_${hh}${mi}${ss}`;
+}
+
+async function makeBackupAndSend(chatId, kind) {
+  const stamp = getNowStamp();
+  if (kind === 'releases') {
+    const file = path.resolve(ROOT, `releases_backup_${stamp}.json`);
+    saveJson(file, db);
+    await sendDocument(chatId, file, '📦 Бэкап базы релизов');
+    return file;
+  }
+  const file = path.resolve(ROOT, `moderation_backup_${stamp}.json`);
+  saveJson(file, modDb);
+  await sendDocument(chatId, file, '🗂 Бэкап архива модерации');
+  return file;
+}
+
+function runServiceCleanup() {
+  const summary = {
+    pendingActionsBefore: Array.isArray(modDb?.pending_actions) ? modDb.pending_actions.length : 0,
+    pendingActionsAfter: 0,
+    moderationMirrorBefore: Array.isArray(modDb?.moderation_messages) ? modDb.moderation_messages.length : 0,
+    moderationMirrorAfter: 0
+  };
+  cleanupPendingActions();
+  ensureModDbShape();
+  summary.pendingActionsAfter = modDb.pending_actions.length;
+
+  const keepAfter = Date.now() - (Math.max(30, CLEANUP_KEEP_DAYS) * 24 * 60 * 60 * 1000);
+  const out = [];
+  const seen = new Set();
+  for (const row of modDb.moderation_messages) {
+    if (!row || typeof row !== 'object') continue;
+    const key = `${clean(row.user_id)}:${Number(row.idx || 0)}:${Number(row.message_id || row.moderation_message_id || 0)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const ts = parseIsoTime(row.submission_time || row.moderation_time || '');
+    if (ts && ts < keepAfter && row.user_deleted) {
+      continue;
+    }
+    out.push(row);
+  }
+  modDb.moderation_messages = out;
+  summary.moderationMirrorAfter = out.length;
+  saveModDb();
+  return summary;
+}
+
+function setBroadcastSession(uid, active) {
+  const key = String(uid);
+  if (active) {
+    broadcastSessions[key] = { created_at: new Date().toISOString() };
+  } else {
+    delete broadcastSessions[key];
+  }
+}
+
+function hasBroadcastSession(uid) {
+  return !!broadcastSessions[String(uid)];
+}
+
+function collectBroadcastUsers() {
+  const ids = new Set();
+  for (const uid of Object.keys(db || {})) ids.add(String(uid));
+  for (const uid of Object.keys(cabUsers || {})) ids.add(String(uid));
+  return Array.from(ids)
+    .map((v) => Number(v))
+    .filter((v) => Number.isFinite(v) && v > 0);
+}
+
+async function runBroadcast(text) {
+  const users = collectBroadcastUsers();
+  let sent = 0;
+  let failed = 0;
+  for (const uid of users) {
+    try {
+      await sendTextPlain(uid, text);
+      sent += 1;
+    } catch {
+      failed += 1;
+    }
+    await new Promise((r) => setTimeout(r, 22));
+  }
+  return { total: users.length, sent, failed };
+}
+
+async function runCleanbase() {
+  db = {};
+  modDb = { moderation_messages: [], pending_actions: [] };
+  saveDb();
+  saveModDb();
+  if (SUPABASE_SYNC_ENABLED) {
+    try {
+      await supabaseDeleteAllReleases();
+      await syncSupabaseNow('cleanbase');
+    } catch (e) {
+      console.error('[cleanbase] supabase cleanup failed:', clean(e?.message || e));
+    }
+  }
 }
 
 async function sendAdminPanel(chatId) {
@@ -1886,6 +2511,25 @@ async function onMessage(msg) {
 
   if (!text) return;
 
+  if (isAdmin(uid) && hasBroadcastSession(uid)) {
+    if (text === '/cancel') {
+      setBroadcastSession(uid, false);
+      await sendText(chatId, '📢 Рассылка отменена.');
+      return;
+    }
+    setBroadcastSession(uid, false);
+    await sendText(chatId, '📢 Запускаю рассылку...');
+    const result = await runBroadcast(text);
+    await sendText(
+      chatId,
+      `📢 <b>Рассылка завершена</b>\n\n` +
+      `Всего получателей: <b>${result.total}</b>\n` +
+      `✅ Доставлено: <b>${result.sent}</b>\n` +
+      `❌ Ошибок: <b>${result.failed}</b>`
+    );
+    return;
+  }
+
   if (text === '/start' || text.startsWith('/start ')) {
     resetAllSessions(uid);
     await sendText(chatId, welcomeText(), { reply_markup: keyboardMain() });
@@ -1907,6 +2551,77 @@ async function onMessage(msg) {
     await sendStatsPicker(chatId);
     return;
   }
+  if (/^\/backup(?:@\w+)?$/i.test(text)) {
+    if (!isAdmin(uid)) {
+      await sendText(chatId, '❌ Команда доступна только администраторам.');
+      return;
+    }
+    const file = await makeBackupAndSend(chatId, 'releases');
+    await sendText(chatId, `✅ Бэкап создан: <code>${esc(path.basename(file))}</code>`);
+    return;
+  }
+  if (/^\/moderation_backup(?:@\w+)?$/i.test(text)) {
+    if (!isAdmin(uid)) {
+      await sendText(chatId, '❌ Команда доступна только администраторам.');
+      return;
+    }
+    const file = await makeBackupAndSend(chatId, 'moderation');
+    await sendText(chatId, `✅ Бэкап модерации создан: <code>${esc(path.basename(file))}</code>`);
+    return;
+  }
+  if (/^\/cleanup(?:@\w+)?$/i.test(text)) {
+    if (!isAdmin(uid)) {
+      await sendText(chatId, '❌ Команда доступна только администраторам.');
+      return;
+    }
+    const summary = runServiceCleanup();
+    await sendText(
+      chatId,
+      '🧹 <b>Очистка завершена</b>\n\n' +
+      `Pending actions: <b>${summary.pendingActionsBefore}</b> → <b>${summary.pendingActionsAfter}</b>\n` +
+      `Зеркало модерации: <b>${summary.moderationMirrorBefore}</b> → <b>${summary.moderationMirrorAfter}</b>`
+    );
+    return;
+  }
+  if (/^\/cleanbase(?:@\w+)?(?:\s+confirm)?$/i.test(text)) {
+    if (!isAdmin(uid)) {
+      await sendText(chatId, '❌ Команда доступна только администраторам.');
+      return;
+    }
+    if (!/\s+confirm$/i.test(text)) {
+      await sendText(
+        chatId,
+        '⚠️ Это удалит ВСЕ релизы из базы.\n\nДля подтверждения отправьте:\n<code>/cleanbase confirm</code>'
+      );
+      return;
+    }
+    await runCleanbase();
+    await sendText(chatId, '✅ База релизов очищена.');
+    return;
+  }
+  const broadcastMatch = /^\/broadcast(?:@\w+)?(?:\s+([\s\S]+))?$/i.exec(text);
+  if (broadcastMatch) {
+    if (!isAdmin(uid)) {
+      await sendText(chatId, '❌ Команда доступна только администраторам.');
+      return;
+    }
+    const payloadText = clean(broadcastMatch[1] || '');
+    if (payloadText) {
+      await sendText(chatId, '📢 Запускаю рассылку...');
+      const result = await runBroadcast(payloadText);
+      await sendText(
+        chatId,
+        `📢 <b>Рассылка завершена</b>\n\n` +
+        `Всего получателей: <b>${result.total}</b>\n` +
+        `✅ Доставлено: <b>${result.sent}</b>\n` +
+        `❌ Ошибок: <b>${result.failed}</b>`
+      );
+      return;
+    }
+    setBroadcastSession(uid, true);
+    await sendText(chatId, '📢 Отправьте текст рассылки следующим сообщением.\n\nДля отмены: /cancel');
+    return;
+  }
   if (text === '/release') {
     await startTextForm(chatId, uid, msg.from);
     return;
@@ -1920,8 +2635,9 @@ async function onMessage(msg) {
     return;
   }
   if (text === '/cancel') {
-    const hadAny = !!(getFormSession(uid) || getCoverSession(uid) || getPromoSession(uid));
+    const hadAny = !!(getFormSession(uid) || getCoverSession(uid) || getPromoSession(uid) || hasBroadcastSession(uid));
     resetAllSessions(uid);
+    setBroadcastSession(uid, false);
     await sendText(chatId, hadAny ? 'Текущая анкета отменена.' : 'Нет активной анкеты.');
     return;
   }
@@ -1931,6 +2647,7 @@ async function onMessage(msg) {
   }
   if (text === '/my' || text === '/my_releases') {
     await sendMy(chatId, uid);
+    return;
   }
 }
 async function onCallback(query) {
@@ -1972,6 +2689,90 @@ async function onCallback(query) {
       return;
     }
     await edit('📊 Выберите период для статистики:', statsPeriodKeyboard(true));
+    return;
+  }
+  if (data === 'admin_backup') {
+    if (!isAdmin(query.from.id)) {
+      await sendText(chatId, '❌ Доступ запрещён.');
+      return;
+    }
+    const file = await makeBackupAndSend(chatId, 'releases');
+    await sendText(chatId, `✅ Бэкап создан: <code>${esc(path.basename(file))}</code>`);
+    return;
+  }
+  if (data === 'admin_moderation_backup') {
+    if (!isAdmin(query.from.id)) {
+      await sendText(chatId, '❌ Доступ запрещён.');
+      return;
+    }
+    const file = await makeBackupAndSend(chatId, 'moderation');
+    await sendText(chatId, `✅ Бэкап модерации создан: <code>${esc(path.basename(file))}</code>`);
+    return;
+  }
+  if (data === 'admin_pending') {
+    if (!isAdmin(query.from.id)) {
+      await sendText(chatId, '❌ Доступ запрещён.');
+      return;
+    }
+    await edit(buildPendingText(20), adminPanelKeyboard());
+    return;
+  }
+  if (data === 'admin_all_releases') {
+    if (!isAdmin(query.from.id)) {
+      await sendText(chatId, '❌ Доступ запрещён.');
+      return;
+    }
+    await edit(buildAllReleasesText(30), adminPanelKeyboard());
+    return;
+  }
+  if (data === 'admin_cleanup') {
+    if (!isAdmin(query.from.id)) {
+      await sendText(chatId, '❌ Доступ запрещён.');
+      return;
+    }
+    const summary = runServiceCleanup();
+    await edit(
+      '🧹 <b>Очистка завершена</b>\n\n' +
+      `Pending actions: <b>${summary.pendingActionsBefore}</b> → <b>${summary.pendingActionsAfter}</b>\n` +
+      `Зеркало модерации: <b>${summary.moderationMirrorBefore}</b> → <b>${summary.moderationMirrorAfter}</b>`,
+      adminPanelKeyboard()
+    );
+    return;
+  }
+  if (data === 'admin_broadcast') {
+    if (!isAdmin(query.from.id)) {
+      await sendText(chatId, '❌ Доступ запрещён.');
+      return;
+    }
+    setBroadcastSession(String(query.from.id), true);
+    await sendText(chatId, '📢 Отправьте текст рассылки следующим сообщением.\n\nДля отмены: /cancel');
+    return;
+  }
+  if (data === 'admin_cleanbase_confirm') {
+    if (!isAdmin(query.from.id)) {
+      await sendText(chatId, '❌ Доступ запрещён.');
+      return;
+    }
+    await edit(
+      '⚠️ <b>Подтверждение очистки</b>\n\nЭто действие удалит ВСЕ релизы из базы.\nПродолжить?',
+      {
+        inline_keyboard: [
+          [
+            { text: '✅ Да, удалить всё', callback_data: 'admin_cleanbase_yes' },
+            { text: '❌ Отмена', callback_data: 'admin_back' }
+          ]
+        ]
+      }
+    );
+    return;
+  }
+  if (data === 'admin_cleanbase_yes') {
+    if (!isAdmin(query.from.id)) {
+      await sendText(chatId, '❌ Доступ запрещён.');
+      return;
+    }
+    await runCleanbase();
+    await edit('✅ База релизов полностью очищена.', adminPanelKeyboard());
     return;
   }
   if (data.startsWith('stats_period_')) {
@@ -2144,12 +2945,28 @@ async function loop() {
 
 (async () => {
   fs.mkdirSync(path.resolve(ROOT, 'webapp/data'), { recursive: true });
+  const imported = importBackupsIntoDb();
+  if (SUPABASE_SYNC_ENABLED) {
+    await hydrateFromSupabase();
+  }
   exportReleases();
   exportCabinet();
+  if (SUPABASE_SYNC_ENABLED) {
+    await syncSupabaseNow('startup');
+  }
   startStaticServer();
   console.info('[bot] CXRNER Node fallback bot started');
   console.info(`[bot] moderation chat: ${MOD_CHAT}`);
   console.info(`[bot] admin ids: ${ADMIN_IDS.join(', ')}`);
+  if (imported.added || imported.merged) {
+    console.info(`[bot] backup import: added=${imported.added}, merged=${imported.merged}`);
+  }
+  if (SUPABASE_SYNC_ENABLED) {
+    console.info(`[bot] supabase sync: enabled (${SUPABASE_URL})`);
+    console.info(`[bot] supabase tables: ${SUPABASE_RELEASES_TABLE}, ${SUPABASE_CABINET_TABLE}`);
+  } else {
+    console.info('[bot] supabase sync: disabled');
+  }
   if (WEBAPP_URL) console.info(`[bot] webapp url: ${WEBAPP_URL}`);
   try { await tg('deleteWebhook', { drop_pending_updates: false }); } catch {}
   process.on('SIGINT', () => { stopping = true; process.exit(0); });
