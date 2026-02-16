@@ -1,6 +1,7 @@
 {
-  "BOT_TOKEN": "7932680631:AAG3DW6gwg0Ccvuiq45aPVCSSWsOallp_Pk",
+  "BOT_TOKEN": "",
   "MODERATION_CHAT_ID": -1002117586464,
+  "MODERATION_THREAD_ID": 0,
   "ADMIN_IDS": [
     881379104
   ],
@@ -10,11 +11,12 @@
   "WEB_SERVER_HOST": "0.0.0.0",
   "WEB_SERVER_PORT": 8080,
   "WEB_SERVER_DIR": "webapp",
-  "SUPABASE_URL": "https://zjwlprncjmtbcdlypdwx.supabase.co"
-  "SUPABASE_SERVICE_ROLE_KEY": "sb_secret_5cj7at2-4tNs_0oWRvVXvA_gYhZSst7",
+  "SUPABASE_URL": "",
+  "SUPABASE_SERVICE_ROLE_KEY": "",
   "SUPABASE_SCHEMA": "public",
   "SUPABASE_RELEASES_TABLE": "cxrner_releases",
   "SUPABASE_CABINET_TABLE": "cxrner_cabinet_users",
+  "MODERATION_HEALTH_TTL_MS": 180000,
   "SUPABASE_SYNC_DEBOUNCE_MS": 1200,
   "IMPORT_RELEASES_BACKUP_FILE": "releases_backup_20260214_180025.json"
 }

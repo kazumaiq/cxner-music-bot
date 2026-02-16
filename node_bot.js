@@ -70,6 +70,7 @@ if (!TOKEN) {
   process.exit(1);
 }
 const MOD_CHAT = envInt('MODERATION_CHAT_ID', -1002117586464);
+const MODERATION_THREAD_ID = envInt('MODERATION_THREAD_ID', 0);
 const BASE = envStr('PUBLIC_BASE_URL', '');
 let WEBAPP_URL = envStr('WEBAPP_URL', BASE ? `${BASE.replace(/\/+$/, '')}/index.html` : '');
 if (/\.vercel\.app\/index\.html$/i.test(WEBAPP_URL)) {
@@ -80,6 +81,7 @@ const WEB_PORT = envInt('PORT', envInt('WEB_SERVER_PORT', 8080));
 const WEB_DIR = envStr('WEB_SERVER_DIR', 'webapp');
 const WEB_ENABLED = envBool('ENABLE_WEB_SERVER', true);
 const ADMIN_IDS = envIntList('ADMIN_IDS', [881379104]);
+const MODERATION_HEALTH_TTL_MS = envInt('MODERATION_HEALTH_TTL_MS', 180000);
 const SUPABASE_URL = envStr('SUPABASE_URL', '');
 const SUPABASE_SERVICE_ROLE_KEY = envStr('SUPABASE_SERVICE_ROLE_KEY', envStr('SUPABASE_KEY', ''));
 const SUPABASE_SCHEMA = envStr('SUPABASE_SCHEMA', 'public') || 'public';
@@ -123,6 +125,9 @@ const STATUS_EMOJI = {
   [STATUS.DELETED]: '🗑',
   [STATUS.PUBLISHED]: '📢'
 };
+const MODERATION_TEXT_MAX = 3900;
+const MODERATION_HISTORY_LIMIT = 5;
+const MODERATION_ACTION_LOG_LIMIT = 24;
 const LEGACY_STATUS_MAP = {
   pending: STATUS.ON_UPLOAD,
   on_upload: STATUS.ON_UPLOAD,
@@ -148,6 +153,16 @@ const SUPABASE_RELEASES_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_RELEASE
 const SUPABASE_CABINET_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_CABINET_TABLE_RAW)
   ? SUPABASE_CABINET_TABLE_RAW
   : 'cxrner_cabinet_users';
+const moderationHealth = {
+  ok: null,
+  checked_at: 0,
+  reason: '',
+  chat_title: '',
+  bot_id: '',
+  bot_username: '',
+  bot_status: '',
+  can_send_messages: null
+};
 let supabaseSyncInProgress = false;
 let supabaseSyncQueued = false;
 let supabaseSyncTimer = null;
@@ -260,6 +275,24 @@ function normalizeRelease(relRaw) {
   if (rel.reject_reason) rel.reject_reason = clean(rel.reject_reason);
   if (rel.upc) rel.upc = clean(rel.upc).toUpperCase();
   if (rel.moderation_message_id) rel.moderation_message_id = Number(rel.moderation_message_id) || 0;
+  rel.available_for_upload = !!rel.available_for_upload;
+  if (rel.available_marked_at) rel.available_marked_at = clean(rel.available_marked_at);
+  if (rel.available_marked_by) rel.available_marked_by = clean(rel.available_marked_by);
+  if (rel.available_marked_by_username) rel.available_marked_by_username = clean(rel.available_marked_by_username);
+  if (rel.available_marked_by_name) rel.available_marked_by_name = clean(rel.available_marked_by_name);
+  rel.interactions = normalizeInteractionLog(rel.interactions);
+  if (rel.interactions.length > MODERATION_ACTION_LOG_LIMIT) {
+    rel.interactions = rel.interactions.slice(-MODERATION_ACTION_LOG_LIMIT);
+  }
+  if (!clean(rel.last_action_at) && rel.interactions.length) {
+    const last = rel.interactions[rel.interactions.length - 1];
+    rel.last_action_at = clean(last?.at || '');
+    rel.last_actor_id = clean(last?.actor_id || '');
+    rel.last_actor_username = clean(last?.actor_username || '');
+    rel.last_actor_name = clean(last?.actor_name || '');
+    rel.last_action_type = clean(last?.type || '');
+    rel.last_action_note = clean(last?.note || last?.reason || last?.upc || '');
+  }
   rel.user_deleted = !!rel.user_deleted;
   return rel;
 }
@@ -616,11 +649,71 @@ function hasValidWebAppUrl() {
   return !!WEBAPP_URL && !WEBAPP_URL.includes('example.com');
 }
 
-function openAppInlineButton(text = 'Открыть приложение', fallback = 'open_app') {
-  if (hasValidWebAppUrl()) {
-    return { text, web_app: { url: WEBAPP_URL } };
+function shortTgError(err) {
+  const raw = clean(err?.message || err);
+  const m = /\[[^\]]+\]\s*(.+)$/.exec(raw);
+  const text = m ? m[1] : raw;
+  return text || 'неизвестная ошибка';
+}
+
+function moderationPayload(payload = {}) {
+  const out = { ...payload };
+  if (out.chat_id === undefined || out.chat_id === null) out.chat_id = MOD_CHAT;
+  if (Number(MODERATION_THREAD_ID) > 0 && (out.message_thread_id === undefined || out.message_thread_id === null)) {
+    out.message_thread_id = Number(MODERATION_THREAD_ID);
   }
-  return { text, callback_data: fallback };
+  return out;
+}
+
+function moderationErrorHint(errText) {
+  const src = clean(errText).toLowerCase();
+  if (!src) return '';
+  if (src.includes('chat not found')) return 'Проверьте MODERATION_CHAT_ID: бот не видит этот чат.';
+  if (src.includes('bot is not a member')) return 'Добавьте бота в группу модерации.';
+  if (src.includes('not enough rights') || src.includes('have no rights') || src.includes('forbidden')) {
+    return 'Выдайте боту права на отправку сообщений в группе модерации.';
+  }
+  if (src.includes('message thread not found') || src.includes('topic')) {
+    return 'Для группы с топиками укажите MODERATION_THREAD_ID (ID нужного топика).';
+  }
+  return '';
+}
+
+function describeBotMemberStatus(member) {
+  const status = clean(member?.status).toLowerCase();
+  if (!status) return { ok: false, reason: 'не удалось определить статус бота в чате', can_send_messages: null, status: '' };
+  if (status === 'left' || status === 'kicked') {
+    return { ok: false, reason: `бот имеет статус "${status}" в группе модерации`, can_send_messages: false, status };
+  }
+  if (status === 'restricted') {
+    const canSend = member?.can_send_messages !== false;
+    if (!canSend) {
+      return { ok: false, reason: 'бот ограничен и не может отправлять сообщения (can_send_messages=false)', can_send_messages: false, status };
+    }
+    return { ok: true, reason: '', can_send_messages: true, status };
+  }
+  if (status === 'member' || status === 'administrator' || status === 'creator') {
+    return { ok: true, reason: '', can_send_messages: true, status };
+  }
+  return { ok: true, reason: '', can_send_messages: null, status };
+}
+
+async function ensureModerationHealth(force = false) {
+  const now = Date.now();
+  if (!force && moderationHealth.checked_at && (now - moderationHealth.checked_at) < MODERATION_HEALTH_TTL_MS) {
+    return moderationHealth;
+  }
+  await verifyModerationChatAccess(force);
+  return moderationHealth;
+}
+
+function sendModerationText(text, extra = {}) {
+  return tg('sendMessage', moderationPayload({
+    text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+    ...extra
+  }));
 }
 
 function keyboardMain() {
@@ -628,14 +721,12 @@ function keyboardMain() {
     [{ text: '📀 Дистрибуция', callback_data: 'menu_distribution' }],
     [{ text: '💼 Сервисы', callback_data: 'menu_services' }],
     [{ text: '🧑‍💻 Кабинет', callback_data: 'menu_cabinet' }],
-    [{ text: '🌐 Комьюнити', callback_data: 'menu_community' }],
-    [openAppInlineButton('Открыть приложение', 'open_app')]
+    [{ text: '🌐 Комьюнити', callback_data: 'menu_community' }]
   ]};
 }
 function keyboardDist() {
   return { inline_keyboard: [
     [{ text: 'Загрузить релиз (анкета в боте)', callback_data: 'report_text' }],
-    [openAppInlineButton('Открыть Mini App', 'report_app')],
     [{ text: 'Мои релизы', callback_data: 'my_releases' }],
     [{ text: '⬅️ Главное меню', callback_data: 'main' }]
   ]};
@@ -660,13 +751,6 @@ function keyboardCommunity() {
     [{ text: 'Официальный сайт', url: 'https://cxrnermusic.vercel.app/' }],
     [{ text: '⬅️ Главное меню', callback_data: 'main' }]
   ]};
-}
-function webappReplyKeyboard() {
-  return {
-    keyboard: [[{ text: 'Открыть приложение', web_app: { url: WEBAPP_URL } }]],
-    resize_keyboard: true,
-    one_time_keyboard: true
-  };
 }
 function moderationKeyboard(uid, idx) {
   return { inline_keyboard: [
@@ -745,21 +829,21 @@ function fmtForm(user, uid, r) {
     `ID: <code>${esc(uid)}</code>`,
     `Тип: ${esc(r.type || '—')}`,
     '',
-    `• <b>Название:</b> ${esc(r.name || '—')}`,
-    `• <b>Саб-название:</b> ${esc(r.subname || '.')}`,
-    `• <b>Ник:</b> ${esc(r.nick || '—')}`,
-    `• <b>ФИО:</b> ${esc(r.fio || '—')}`,
-    `• <b>Дата:</b> ${esc(r.date || '—')}`,
-    `• <b>Версия:</b> ${esc(r.version || 'Оригинал')}`,
-    `• <b>Жанр:</b> ${esc(r.genre || '—')}`,
-    `• <b>Ссылка:</b> ${esc(r.link || '—')}`,
-    `• <b>Яндекс Музыка:</b> ${esc(yandexText)}`,
-    `• <b>Мат:</b> ${esc(r.mat || '—')}`,
-    `• <b>Промо:</b> ${esc(r.promo || '.')}`,
-    `• <b>Комментарий:</b> ${esc(r.comment || '.')}`
+    `🎵 <b>Название:</b> ${esc(r.name || '—')}`,
+    `✨ <b>Саб-название:</b> ${esc(r.subname || '.')}`,
+    `🎤 <b>Ник:</b> ${esc(r.nick || '—')}`,
+    `🪪 <b>ФИО:</b> ${esc(r.fio || '—')}`,
+    `📅 <b>Дата:</b> ${esc(r.date || '—')}`,
+    `🧩 <b>Версия:</b> ${esc(r.version || 'Оригинал')}`,
+    `🏷 <b>Жанр:</b> ${esc(r.genre || '—')}`,
+    `🔗 <b>Ссылка:</b> ${esc(r.link || '—')}`,
+    `🟡 <b>Яндекс Музыка:</b> ${esc(yandexText)}`,
+    `⚠️ <b>Мат:</b> ${esc(r.mat || '—')}`,
+    `📢 <b>Промо:</b> ${esc(r.promo || '.')}`,
+    `💬 <b>Комментарий:</b> ${esc(r.comment || '.')}`
   ];
-  if (r.type === 'альбом') lines.push(`• <b>Tracklist:</b> ${esc(r.tracklist || '.')}`);
-  lines.push(`• <b>Tg:</b> ${esc(r.tg || '—')}`);
+  if (r.type === 'альбом') lines.push(`📋 <b>Tracklist:</b> ${esc(r.tracklist || '.')}`);
+  lines.push(`📱 <b>Tg:</b> ${esc(r.tg || '—')}`);
   return lines.join('\n');
 }
 function withStatus(status, original) {
@@ -777,6 +861,140 @@ function statusText(status) {
 function statusEmoji(status) {
   const canon = canonicalStatus(status);
   return STATUS_EMOJI[canon] || '⏳';
+}
+function normalizeInteractionLog(listRaw) {
+  const src = Array.isArray(listRaw) ? listRaw : [];
+  const out = [];
+  for (const row of src) {
+    if (!row || typeof row !== 'object') continue;
+    const type = clean(row.type || 'action');
+    const at = clean(row.at || row.timestamp || row.time || '');
+    const actorId = clean(row.actor_id || row.user_id || row.moderator_id || '');
+    const actorUsername = clean(row.actor_username || row.username || '');
+    const actorName = clean(row.actor_name || row.name || '');
+    const statusFromRaw = clean(row.status_from || row.from_status || '');
+    const statusToRaw = clean(row.status_to || row.to_status || '');
+    const ev = {
+      type: type || 'action',
+      at,
+      actor_id: actorId,
+      actor_username: actorUsername,
+      actor_name: actorName,
+      status_from: statusFromRaw ? canonicalStatus(statusFromRaw) : '',
+      status_to: statusToRaw ? canonicalStatus(statusToRaw) : '',
+      upc: clean(row.upc || ''),
+      reason: clean(row.reason || row.reject_reason || ''),
+      note: clean(row.note || row.details || '')
+    };
+    out.push(ev);
+  }
+  return out;
+}
+function formatInteractionTime(iso) {
+  const src = clean(iso);
+  if (!src) return '';
+  const dt = new Date(src);
+  if (!Number.isFinite(dt.getTime())) return src.slice(0, 19).replace('T', ' ');
+  const dd = String(dt.getDate()).padStart(2, '0');
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  const hh = String(dt.getHours()).padStart(2, '0');
+  const mi = String(dt.getMinutes()).padStart(2, '0');
+  return `${dd}.${mm} ${hh}:${mi}`;
+}
+function interactionActorLabel(ev) {
+  const username = clean(ev?.actor_username || '');
+  if (username) return `@${username}`;
+  const name = clean(ev?.actor_name || '');
+  if (name) return name;
+  const actorId = clean(ev?.actor_id || '');
+  if (actorId) return `ID ${actorId}`;
+  return 'неизвестный';
+}
+function shortenForInteraction(text, maxLen = 120) {
+  const src = clean(text);
+  if (!src) return '';
+  if (src.length <= maxLen) return src;
+  return `${src.slice(0, maxLen - 3)}...`;
+}
+function interactionActionLabel(ev) {
+  const type = clean(ev?.type || '');
+  if (type === 'status_change') {
+    const toStatus = clean(ev?.status_to || '');
+    const fromStatus = clean(ev?.status_from || '');
+    const toText = toStatus ? statusText(toStatus) : '';
+    const fromText = fromStatus ? statusText(fromStatus) : '';
+    if (fromText && toText && fromText !== toText) return `статус: ${fromText} -> ${toText}`;
+    if (toText) return `статус: ${toText}`;
+    return 'изменил статус';
+  }
+  if (type === 'upc_assigned') {
+    const upc = clean(ev?.upc || '');
+    return upc ? `присвоил UPC: ${upc}` : 'присвоил UPC';
+  }
+  if (type === 'marked_free') return 'пометил как свободный к отгрузке';
+  if (type === 'reject_reason') {
+    const reason = shortenForInteraction(ev?.reason || ev?.note, 100);
+    return reason ? `указал причину: ${reason}` : 'указал причину отклонения';
+  }
+  return shortenForInteraction(ev?.note || type || 'действие', 120) || 'действие';
+}
+function pushReleaseInteraction(rel, type, actor, payload = {}) {
+  if (!rel || typeof rel !== 'object') return;
+  const firstName = clean(actor?.first_name || '');
+  const lastName = clean(actor?.last_name || '');
+  const actorName = clean([firstName, lastName].filter(Boolean).join(' '));
+  const statusFromRaw = clean(payload.status_from || '');
+  const statusToRaw = clean(payload.status_to || '');
+  const event = {
+    type: clean(type || 'action') || 'action',
+    at: new Date().toISOString(),
+    actor_id: clean(actor?.id || payload.actor_id || ''),
+    actor_username: clean(actor?.username || payload.actor_username || ''),
+    actor_name: actorName || clean(payload.actor_name || ''),
+    status_from: statusFromRaw ? canonicalStatus(statusFromRaw) : '',
+    status_to: statusToRaw ? canonicalStatus(statusToRaw) : '',
+    upc: clean(payload.upc || ''),
+    reason: clean(payload.reason || ''),
+    note: clean(payload.note || '')
+  };
+  rel.interactions = normalizeInteractionLog(rel.interactions);
+  rel.interactions.push(event);
+  if (rel.interactions.length > MODERATION_ACTION_LOG_LIMIT) {
+    rel.interactions = rel.interactions.slice(-MODERATION_ACTION_LOG_LIMIT);
+  }
+  rel.last_action_at = event.at;
+  rel.last_actor_id = event.actor_id;
+  rel.last_actor_username = event.actor_username;
+  rel.last_actor_name = event.actor_name;
+  rel.last_action_type = event.type;
+  rel.last_action_note = event.note || event.reason || event.upc || '';
+}
+function buildModerationActionsBlock(rel) {
+  const list = normalizeInteractionLog(rel?.interactions);
+  if (!list.length) {
+    const fallbackUsername = clean(rel?.moderator_username || '');
+    const fallbackId = clean(rel?.moderator || '');
+    if (!fallbackUsername && !fallbackId) return '';
+    const actor = fallbackUsername
+      ? (fallbackUsername.includes(' ') ? fallbackUsername : `@${fallbackUsername}`)
+      : `ID ${fallbackId}`;
+    const when = formatInteractionTime(rel?.moderation_time || '');
+    const statusLabel = statusText(rel?.status || STATUS.ON_UPLOAD);
+    const line = when
+      ? `• <i>${esc(when)}</i> — ${esc(actor)}: ${esc(`статус: ${statusLabel}`)}`
+      : `• ${esc(actor)}: ${esc(`статус: ${statusLabel}`)}`;
+    return ['👤 <b>Действия:</b>', line].join('\n');
+  }
+  const tail = list.slice(-MODERATION_HISTORY_LIMIT).reverse();
+  const lines = ['👤 <b>Действия:</b>'];
+  for (const ev of tail) {
+    const when = formatInteractionTime(ev.at);
+    const actor = interactionActorLabel(ev);
+    const action = interactionActionLabel(ev);
+    if (when) lines.push(`• <i>${esc(when)}</i> — ${esc(actor)}: ${esc(action)}`);
+    else lines.push(`• ${esc(actor)}: ${esc(action)}`);
+  }
+  return lines.join('\n');
 }
 function ensureModDbShape() {
   modDb = modDb && typeof modDb === 'object' ? modDb : {};
@@ -822,6 +1040,7 @@ function resolveReleaseRef(uid, idx, fallbackMessageId = 0) {
 function syncModerationMirror(uid, idx, rel) {
   ensureModDbShape();
   let found = false;
+  const interactions = normalizeInteractionLog(rel.interactions);
   for (const it of modDb.moderation_messages) {
     if (
       String(it.user_id) === String(uid) &&
@@ -834,6 +1053,18 @@ function syncModerationMirror(uid, idx, rel) {
         moderator_comment: rel.moderator_comment || '',
         user_deleted: !!rel.user_deleted,
         upc: rel.upc || '',
+        interactions,
+        last_action_at: rel.last_action_at || '',
+        last_actor_id: rel.last_actor_id || '',
+        last_actor_username: rel.last_actor_username || '',
+        last_actor_name: rel.last_actor_name || '',
+        last_action_type: rel.last_action_type || '',
+        last_action_note: rel.last_action_note || '',
+        available_for_upload: !!rel.available_for_upload,
+        available_marked_at: rel.available_marked_at || '',
+        available_marked_by: rel.available_marked_by || '',
+        available_marked_by_username: rel.available_marked_by_username || '',
+        available_marked_by_name: rel.available_marked_by_name || '',
         moderation_message_id: rel.moderation_message_id || it.moderation_message_id || 0,
         message_id: rel.moderation_message_id || it.message_id || 0
       });
@@ -854,12 +1085,50 @@ function buildModerationText(uid, rel) {
   const details = [];
   if (rel.upc) details.push(`📦 <b>UPC:</b> <code>${esc(rel.upc)}</code>`);
   if (canonicalStatus(rel.status) === STATUS.REJECTED && rel.reject_reason) details.push(`❌ <b>Причина:</b> ${esc(rel.reject_reason)}`);
+  if (canonicalStatus(rel.status) === STATUS.ON_UPLOAD && rel.available_for_upload) {
+    const whoUsername = clean(rel.available_marked_by_username || rel.last_actor_username || '');
+    const whoName = clean(rel.available_marked_by_name || rel.last_actor_name || '');
+    const markedAt = formatInteractionTime(rel.available_marked_at || rel.last_action_at || '');
+    let freeLine = '🆕 <b>Свободно для отгрузки</b>';
+    if (whoUsername) freeLine += ` • @${esc(whoUsername)}`;
+    else if (whoName) freeLine += ` • ${esc(whoName)}`;
+    if (markedAt) freeLine += ` • <i>${esc(markedAt)}</i>`;
+    details.push(freeLine);
+  }
+  const actionsBlock = buildModerationActionsBlock(rel);
+  if (actionsBlock) details.push(actionsBlock);
   const body = details.length ? `${orig}\n\n${details.join('\n')}` : orig;
   return withStatus(rel.status || STATUS.ON_UPLOAD, body);
 }
+
+function truncateMiddle(text, maxLen = 280) {
+  const src = clean(text);
+  if (!src || src.length <= maxLen) return src || '.';
+  const head = Math.max(40, Math.floor(maxLen * 0.6));
+  const tail = Math.max(20, maxLen - head - 3);
+  return `${src.slice(0, head)}...${src.slice(src.length - tail)}`;
+}
+
+function buildCompactModerationOriginal(user, uid, rel) {
+  const compact = {
+    ...rel,
+    name: truncateMiddle(rel.name, 140),
+    subname: truncateMiddle(rel.subname, 120),
+    nick: truncateMiddle(rel.nick, 180),
+    fio: truncateMiddle(rel.fio, 180),
+    genre: truncateMiddle(rel.genre, 160),
+    link: truncateMiddle(rel.link, 220),
+    yandex: truncateMiddle(rel.yandex, 220),
+    promo: truncateMiddle(rel.promo, 320),
+    comment: truncateMiddle(rel.comment, 240),
+    tracklist: truncateMiddle(rel.tracklist, 350),
+    tg: truncateMiddle(rel.tg, 120)
+  };
+  return `${fmtForm(user, uid, compact)}\n\n⚠️ <i>Длинные поля автоматически сокращены для Telegram.</i>`;
+}
 async function refreshModerationMessage(uid, idx, rel, fallbackMessageId = 0) {
   const messageId = Number(rel.moderation_message_id || fallbackMessageId || 0);
-  if (!messageId) return;
+  if (!messageId) return false;
   try {
     await tg('editMessageText', {
       chat_id: MOD_CHAT,
@@ -869,10 +1138,12 @@ async function refreshModerationMessage(uid, idx, rel, fallbackMessageId = 0) {
       disable_web_page_preview: true,
       reply_markup: moderationKeyboard(uid, idx)
     });
+    return true;
   } catch (e) {
     const msg = clean(e?.message || e);
-    if (msg.includes('message is not modified')) return;
+    if (msg.includes('message is not modified')) return true;
     console.error('[MODERATION] edit failed:', msg || e);
+    return false;
   }
 }
 function removePendingActionByIndex(idx) {
@@ -937,6 +1208,7 @@ async function applyReleaseStatus(uid, idx, status, moderator, opts = {}) {
   uid = ref.uid;
   idx = ref.idx;
   const rel = ref.rel;
+  const prevStatus = canonicalStatus(rel.status || STATUS.ON_UPLOAD);
   const canonStatus = canonicalStatus(status);
 
   rel.status = canonStatus;
@@ -953,6 +1225,26 @@ async function applyReleaseStatus(uid, idx, status, moderator, opts = {}) {
   if (canonStatus === STATUS.NEEDS_FIX && !rel.moderator_comment) rel.moderator_comment = 'Нужны правки перед публикацией';
   if (canonStatus === STATUS.DELETED) rel.user_deleted = true;
   if (canonStatus !== STATUS.DELETED && opts.restoreFromDelete) rel.user_deleted = false;
+  if (canonStatus === STATUS.ON_UPLOAD) {
+    rel.available_for_upload = true;
+    rel.available_marked_at = rel.moderation_time;
+    rel.available_marked_by = String(moderator?.id || '');
+    rel.available_marked_by_username = clean(moderator?.username || '');
+    rel.available_marked_by_name = clean([moderator?.first_name || '', moderator?.last_name || ''].filter(Boolean).join(' '));
+  } else {
+    rel.available_for_upload = false;
+  }
+
+  const statusChanged = prevStatus !== canonStatus;
+  const reasonChanged = canonStatus === STATUS.REJECTED && clean(opts.rejectReason || '') !== '';
+  if (statusChanged || reasonChanged) {
+    pushReleaseInteraction(rel, 'status_change', moderator, {
+      status_from: prevStatus,
+      status_to: canonStatus,
+      reason: canonStatus === STATUS.REJECTED ? rel.reject_reason : '',
+      note: clean(opts.note || '')
+    });
+  }
 
   saveDb();
   syncModerationMirror(uid, idx, rel);
@@ -1050,6 +1342,7 @@ async function handleModerationReplyMessage(msg) {
     rel.upc = upc;
     rel.upc_assigned_at = new Date().toISOString();
     rel.upc_assigned_by = String(msg.from.id);
+    pushReleaseInteraction(rel, 'upc_assigned', msg.from, { upc, note: 'UPC присвоен в модерации' });
     saveDb();
     syncModerationMirror(uid, idx, rel);
     saveModDb();
@@ -1075,7 +1368,8 @@ async function handleModerationReplyMessage(msg) {
     if (pendingIndex >= 0) removePendingActionByIndex(pendingIndex);
     const out = await applyReleaseStatus(uid, idx, STATUS.REJECTED, msg.from, {
       rejectReason: reason,
-      fallbackMessageId
+      fallbackMessageId,
+      note: 'Причина отклонения добавлена ответом на анкету'
     });
     if (!out.ok) {
       await sendText(msg.chat.id, `❌ ${out.error}`);
@@ -1172,6 +1466,7 @@ function validateForm(form) {
 }
 
 async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_app') {
+  await ensureModerationHealth(false);
   db[uid] = Array.isArray(db[uid]) ? db[uid] : [];
   const idx = db[uid].length;
   const rel = {
@@ -1181,14 +1476,44 @@ async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_
     submission_time: new Date().toISOString(),
     username: user?.username || ''
   };
-  const orig = fmtForm(user, uid, rel);
-  const sent = await tg('sendMessage', {
-    chat_id: MOD_CHAT,
-    text: buildModerationText(uid, { ...rel, moderation_original_text: orig }),
-    parse_mode: 'HTML',
-    disable_web_page_preview: true,
-    reply_markup: moderationKeyboard(uid, idx)
-  });
+  let orig = fmtForm(user, uid, rel);
+  let moderationText = buildModerationText(uid, { ...rel, moderation_original_text: orig });
+  if (moderationText.length > MODERATION_TEXT_MAX) {
+    orig = buildCompactModerationOriginal(user, uid, rel);
+    moderationText = buildModerationText(uid, { ...rel, moderation_original_text: orig });
+  }
+
+  let sent;
+  try {
+    sent = await tg('sendMessage', moderationPayload({
+      text: moderationText,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      reply_markup: moderationKeyboard(uid, idx)
+    }));
+  } catch (e) {
+    const msg = clean(e?.message || e);
+    const retryable = msg.includes('message is too long') || msg.includes('message text is too long');
+    if (retryable) {
+      orig = buildCompactModerationOriginal(user, uid, rel);
+      moderationText = buildModerationText(uid, { ...rel, moderation_original_text: orig });
+      sent = await tg('sendMessage', moderationPayload({
+        text: moderationText,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: moderationKeyboard(uid, idx)
+      }));
+    } else {
+      const hint = moderationErrorHint(msg);
+      console.error(
+        `[MODERATION] submit failed: chat=${MOD_CHAT}` +
+        ` thread=${MODERATION_THREAD_ID > 0 ? MODERATION_THREAD_ID : 'default'}` +
+        ` error=${msg || 'unknown'}`
+      );
+      await verifyModerationChatAccess(true);
+      throw new Error(hint ? `${msg}. ${hint}` : msg);
+    }
+  }
 
   rel.moderation_message_id = sent.message_id;
   rel.moderation_original_text = orig;
@@ -1564,7 +1889,10 @@ async function handleFormCallback(query, data) {
       resetFormSession(uid);
       await sendText(query.message.chat.id, '✅ Анкета отправлена в модерацию.');
     } catch (e) {
-      await sendText(query.message.chat.id, '❌ Не удалось отправить анкету в модерацию.');
+      await sendText(
+        query.message.chat.id,
+        `❌ Не удалось отправить анкету в модерацию.\nПричина: <code>${esc(shortTgError(e))}</code>`
+      );
       console.error('[FORM] submit failed:', e.message || e);
     }
     return true;
@@ -1719,18 +2047,20 @@ async function handleCoverMessage(msg) {
       `Референс: ${esc(s.data.reference_text || 'фото')}`;
 
     try {
-      const sent = await tg('sendPhoto', {
-        chat_id: MOD_CHAT,
+      const sent = await tg('sendPhoto', moderationPayload({
         photo: msg.photo[msg.photo.length - 1].file_id,
         caption,
         parse_mode: 'HTML'
-      });
+      }));
       try { await tg('pinChatMessage', { chat_id: MOD_CHAT, message_id: sent.message_id }); } catch {}
       await sendText(chatId, '✅ Заказ обложки отправлен в модерацию.');
       resetCoverSession(uid);
     } catch (e) {
-      console.error('[COVER] submit failed:', e.message || e);
-      await sendText(chatId, '❌ Не удалось отправить заказ. Попробуйте ещё раз.');
+      const msgErr = clean(e?.message || e);
+      console.error('[COVER] submit failed:', msgErr || e);
+      await verifyModerationChatAccess(true);
+      const hint = moderationErrorHint(msgErr);
+      await sendText(chatId, `❌ Не удалось отправить заказ.${hint ? `\n${esc(hint)}` : '\nПопробуйте ещё раз.'}`);
     }
     return true;
   }
@@ -1936,13 +2266,11 @@ async function handlePromoCallback(query, data) {
 }
 
 async function sendWebappButton(chatId) {
-  if (!hasValidWebAppUrl()) {
-    await sendText(chatId, '❌ WEBAPP_URL не настроен.');
-    return;
+  let text = '🎵 Mini App открывается через системную кнопку «Приложение» внизу чата (настроено через BotFather).';
+  if (hasValidWebAppUrl()) {
+    text += `\n\nРучная ссылка: ${esc(WEBAPP_URL)}`;
   }
-  await sendText(chatId, '🎵 Открытие Mini App\n\nНажмите кнопку ниже.', {
-    reply_markup: { inline_keyboard: [[openAppInlineButton('Открыть приложение', 'open_app')]] }
-  });
+  await sendText(chatId, text);
 }
 function getUserReleaseEntries(uid, includeDeleted = false) {
   const list = Array.isArray(db?.[uid]) ? db[uid] : [];
@@ -1959,16 +2287,46 @@ function shortTitle(name, max = 22) {
   const src = clean(name) || 'Без названия';
   return src.length > max ? `${src.slice(0, max - 1)}…` : src;
 }
-function buildMyCabinetView(uid) {
+function getCabinetOrderedEntries(uid) {
   const entries = getUserReleaseEntries(uid, false);
+  entries.sort((a, b) => {
+    const ta = parseIsoTime(a.rel?.submission_time || a.rel?.moderation_time || '');
+    const tb = parseIsoTime(b.rel?.submission_time || b.rel?.moderation_time || '');
+    if (tb !== ta) return tb - ta;
+    return b.idx - a.idx;
+  });
+  return entries;
+}
+
+function buildMyCabinetView(uid, requestedPage = 0) {
+  const entries = getCabinetOrderedEntries(uid);
   if (!entries.length) {
     return {
-      text: '🎵 <b>Мой кабинет</b>\n\nРелизов пока нет.',
-      keyboard: { inline_keyboard: [[{ text: '🔄 Обновить', callback_data: 'my_back' }]] }
+      text:
+        '🎧 <b>МОЙ КАБИНЕТ</b>\n\n' +
+        'Пока у вас нет релизов.\n' +
+        'Нажмите «➕ Новый», чтобы отправить первую анкету.',
+      keyboard: {
+        inline_keyboard: [
+          [
+            { text: '➕ Новый', callback_data: 'report_text' },
+            { text: '◀️ Меню', callback_data: 'main' }
+          ],
+          [{ text: '🔄 Обновить', callback_data: 'my_back' }]
+        ]
+      },
+      page: 0,
+      total: 0
     };
   }
 
   const total = entries.length;
+  const page = Math.min(Math.max(Number(requestedPage) || 0, 0), total - 1);
+  const current = entries[page];
+  const rel = current.rel;
+  const status = canonicalStatus(rel?.status);
+  const upcText = clean(rel?.upc) ? `<code>${esc(rel.upc)}</code>` : '—';
+
   const counters = {
     [STATUS.ON_UPLOAD]: 0,
     [STATUS.MODERATION]: 0,
@@ -1978,40 +2336,57 @@ function buildMyCabinetView(uid) {
     [STATUS.PUBLISHED]: 0,
     [STATUS.DELETED]: 0
   };
-  for (const { rel } of entries) {
-    counters[canonicalStatus(rel?.status)] = (counters[canonicalStatus(rel?.status)] || 0) + 1;
+  for (const { rel: item } of entries) {
+    const st = canonicalStatus(item?.status);
+    counters[st] = (counters[st] || 0) + 1;
   }
   const approvedPct = total ? ((counters[STATUS.APPROVED] + counters[STATUS.PUBLISHED]) * 100 / total) : 0;
 
   let text =
-    '🎵 <b>Мой кабинет</b>\n' +
-    `Всего релизов: <b>${total}</b>\n` +
-    `✅ Одобрено: <b>${counters[STATUS.APPROVED]}</b>\n` +
-    `📢 Опубликовано: <b>${counters[STATUS.PUBLISHED]}</b>\n` +
-    `🕓 На отгрузке: <b>${counters[STATUS.ON_UPLOAD]}</b>\n` +
+    `🎧 <b>МОЙ КАБИНЕТ</b> • <b>${total}</b> релизов\n` +
+    `✅ Одобрено: <b>${counters[STATUS.APPROVED]}</b> (<b>${approvedPct.toFixed(0)}%</b>)\n` +
+    `⏳ На отгрузке: <b>${counters[STATUS.ON_UPLOAD]}</b>\n` +
     `🧠 На модерации: <b>${counters[STATUS.MODERATION]}</b>\n` +
-    `✏️ На исправлении: <b>${counters[STATUS.NEEDS_FIX]}</b>\n` +
-    `❌ Отклонено: <b>${counters[STATUS.REJECTED]}</b>\n` +
-    `📊 Процент принятия: <b>${approvedPct.toFixed(0)}%</b>\n\n` +
-    '<b>Последние релизы:</b>\n';
+    `⚠️ На правках: <b>${counters[STATUS.NEEDS_FIX]}</b>\n` +
+    `❌ Отклонено: <b>${counters[STATUS.REJECTED]}</b>\n\n` +
+    `🎵 <b>${esc(rel?.name || 'Без названия')}</b>\n` +
+    `📝 Тип: <i>${esc(clean(rel?.type) || 'сингл')}</i>\n` +
+    `📅 Дата: <i>${esc(rel?.date || '—')}</i>\n` +
+    `👤 Артист: <i>${esc(rel?.nick || '—')}</i>\n` +
+    `🏷 Жанр: <i>${esc(rel?.genre || '—')}</i>\n` +
+    `📦 UPC: ${upcText}\n\n` +
+    `📊 Статус: ${statusEmoji(status)} <b>${esc(statusText(status))}</b>\n`;
 
-  const lastEntries = entries.slice(-10).reverse();
-  for (let i = 0; i < lastEntries.length; i += 1) {
-    const { rel } = lastEntries[i];
-    text += `${i + 1}. ${statusEmoji(rel?.status)} ${esc(shortTitle(rel?.name, 28))} — ${esc(statusText(rel?.status))}\n`;
+  if (status === STATUS.REJECTED && clean(rel?.reject_reason)) {
+    text += `❌ Причина: ${esc(rel.reject_reason)}\n`;
   }
 
+  text += `\n🗂 Карточка <b>${page + 1}</b> из <b>${total}</b>`;
+
+  const prevPage = page > 0 ? page - 1 : total - 1;
+  const nextPage = page < total - 1 ? page + 1 : 0;
   const rows = [];
-  const forButtons = entries.slice(-8).reverse();
-  for (let i = 0; i < forButtons.length; i += 1) {
-    const { idx, rel } = forButtons[i];
+
+  if (total > 1) {
     rows.push([
-      { text: `ℹ️ ${i + 1}. ${shortTitle(rel?.name)}`, callback_data: `release_details_${uid}_${idx}` },
-      { text: '🗑', callback_data: `delete_release_${uid}_${idx}` }
+      { text: `(${page + 1}/${total})`, callback_data: 'my_page_info' },
+      { text: '⬅️ Назад', callback_data: `my_page_${uid}_${prevPage}` },
+      { text: 'Далее ➡️', callback_data: `my_page_${uid}_${nextPage}` }
     ]);
+  } else {
+    rows.push([{ text: '(1/1)', callback_data: 'my_page_info' }]);
   }
-  rows.push([{ text: '🔄 Обновить', callback_data: 'my_back' }]);
-  return { text, keyboard: { inline_keyboard: rows } };
+
+  rows.push([
+    { text: '📄 Детали', callback_data: `release_details_${uid}_${current.idx}_${page}` },
+    { text: '🗑 Удалить', callback_data: `delete_release_${uid}_${current.idx}_${page}` }
+  ]);
+  rows.push([
+    { text: '➕ Новый', callback_data: 'report_text' },
+    { text: '◀️ Меню', callback_data: 'main' }
+  ]);
+
+  return { text, keyboard: { inline_keyboard: rows }, page, total };
 }
 function buildReleaseDetailsText(uid, idx, rel) {
   const status = canonicalStatus(rel?.status);
@@ -2188,6 +2563,8 @@ function buildAdminPanelText() {
     '⚙️ <b>УПРАВЛЕНИЕ:</b>\n' +
     '/backup — 📦 База релизов\n' +
     '/moderation_backup — 🗂 Архив модерации\n' +
+    '/new — 🆕 Отметить «На отгрузке»\n' +
+    '/modtest — 🧪 Проверка отправки в модерацию\n' +
     '/stats /statss — 📊 Подробная статистика\n' +
     '/broadcast — 📢 Рассылка пользователям\n' +
     '/cleanup — 🧹 Очистка служебных данных\n' +
@@ -2399,6 +2776,63 @@ async function sendStatsPicker(chatId) {
   await sendText(chatId, '📊 Выберите период для статистики:', { reply_markup: statsPeriodKeyboard(true) });
 }
 
+async function verifyModerationChatAccess(force = false) {
+  const now = Date.now();
+  if (!force && moderationHealth.checked_at && (now - moderationHealth.checked_at) < MODERATION_HEALTH_TTL_MS) {
+    return moderationHealth.ok === true;
+  }
+  moderationHealth.checked_at = now;
+  try {
+    const [chat, me] = await Promise.all([
+      tg('getChat', { chat_id: MOD_CHAT }),
+      tg('getMe', {})
+    ]);
+    const title = clean(chat?.title || chat?.username || '') || String(MOD_CHAT);
+    moderationHealth.chat_title = title;
+    moderationHealth.bot_id = String(me?.id || '');
+    moderationHealth.bot_username = clean(me?.username || '');
+
+    let member = null;
+    try {
+      member = await tg('getChatMember', { chat_id: MOD_CHAT, user_id: Number(me?.id || 0) });
+    } catch (memberErr) {
+      moderationHealth.ok = false;
+      moderationHealth.reason = `не удалось получить статус бота в группе: ${shortTgError(memberErr)}`;
+      moderationHealth.bot_status = '';
+      moderationHealth.can_send_messages = null;
+      console.error(`[bot] moderation chat access failed: ${moderationHealth.reason}`);
+      return false;
+    }
+
+    const desc = describeBotMemberStatus(member);
+    moderationHealth.ok = !!desc.ok;
+    moderationHealth.reason = desc.reason || '';
+    moderationHealth.bot_status = desc.status || '';
+    moderationHealth.can_send_messages = desc.can_send_messages;
+
+    if (moderationHealth.ok) {
+      console.info(
+        `[bot] moderation chat access: ok (${title})` +
+        ` status=${desc.status || '-'} thread=${MODERATION_THREAD_ID > 0 ? MODERATION_THREAD_ID : 'default'}`
+      );
+      return true;
+    }
+
+    console.error(
+      `[bot] moderation chat access failed: ${moderationHealth.reason || 'unknown reason'}` +
+      ` (${title}) status=${desc.status || '-'}`
+    );
+    return false;
+  } catch (e) {
+    moderationHealth.ok = false;
+    moderationHealth.reason = shortTgError(e);
+    moderationHealth.bot_status = '';
+    moderationHealth.can_send_messages = null;
+    console.error(`[bot] moderation chat access failed: ${moderationHealth.reason}`);
+    return false;
+  }
+}
+
 async function processWebAppData(msg) {
   const raw = msg.web_app_data?.data || '';
   let payload;
@@ -2447,7 +2881,10 @@ async function processWebAppData(msg) {
     await sendText(msg.chat.id, '✅ <b>Анкета отправлена в модерацию</b>');
   } catch (e) {
     console.error('[WEBAPP] submit failed:', e.message || e);
-    await sendText(msg.chat.id, '❌ Не удалось отправить анкету в модерацию.');
+    await sendText(
+      msg.chat.id,
+      `❌ Не удалось отправить анкету в модерацию.\nПричина: <code>${esc(shortTgError(e))}</code>`
+    );
   }
 }
 
@@ -2497,6 +2934,78 @@ async function applyModeration(query, action, uid, idx) {
   await sendText(query.message.chat.id, `Статус обновлен: ${statusText(st)}`);
 }
 
+function collectOnUploadReleaseRefs() {
+  const out = [];
+  for (const [uidRaw, listRaw] of Object.entries(db || {})) {
+    const uid = String(uidRaw);
+    const list = Array.isArray(listRaw) ? listRaw : [];
+    for (let idx = 0; idx < list.length; idx += 1) {
+      const rel = list[idx];
+      if (!rel || typeof rel !== 'object') continue;
+      if (canonicalStatus(rel.status) !== STATUS.ON_UPLOAD) continue;
+      if (rel.user_deleted) continue;
+      out.push({ uid, idx, rel });
+    }
+  }
+  out.sort((a, b) => {
+    const ta = parseIsoTime(a.rel?.submission_time || a.rel?.moderation_time || '');
+    const tb = parseIsoTime(b.rel?.submission_time || b.rel?.moderation_time || '');
+    return tb - ta;
+  });
+  return out;
+}
+
+async function runNewModerationSweep(moderator) {
+  const refs = collectOnUploadReleaseRefs();
+  if (!refs.length) return { total: 0, marked: 0, refreshed: 0, missingMessage: 0 };
+
+  const nowIso = new Date().toISOString();
+  const nowTs = Date.now();
+  let marked = 0;
+  for (const item of refs) {
+    const rel = item.rel;
+    rel.status = STATUS.ON_UPLOAD;
+    rel.available_for_upload = true;
+    rel.available_marked_at = nowIso;
+    rel.available_marked_by = String(moderator?.id || '');
+    rel.available_marked_by_username = clean(moderator?.username || '');
+    rel.available_marked_by_name = clean([moderator?.first_name || '', moderator?.last_name || ''].filter(Boolean).join(' '));
+    rel.moderation_time = nowIso;
+
+    const events = normalizeInteractionLog(rel.interactions);
+    const last = events.length ? events[events.length - 1] : null;
+    const lastTs = parseIsoTime(last?.at || '');
+    const sameActor = clean(last?.actor_id || '') === String(moderator?.id || '');
+    const sameType = clean(last?.type || '') === 'marked_free';
+    const tooSoon = sameType && sameActor && lastTs > 0 && (nowTs - lastTs) < (5 * 60 * 1000);
+    if (!tooSoon) {
+      pushReleaseInteraction(rel, 'marked_free', moderator, {
+        status_to: STATUS.ON_UPLOAD,
+        note: 'Анкета отмечена как свободная к отгрузке (/new)'
+      });
+    }
+
+    syncModerationMirror(item.uid, item.idx, rel);
+    marked += 1;
+  }
+  saveDb();
+  saveModDb();
+
+  let refreshed = 0;
+  let missingMessage = 0;
+  for (const item of refs) {
+    const messageId = Number(item.rel?.moderation_message_id || 0);
+    if (!messageId) {
+      missingMessage += 1;
+      continue;
+    }
+    const ok = await refreshModerationMessage(item.uid, item.idx, item.rel, messageId);
+    if (ok) refreshed += 1;
+    await new Promise((r) => setTimeout(r, 35));
+  }
+  return { total: refs.length, marked, refreshed, missingMessage };
+}
+
 async function onMessage(msg) {
   if (msg.web_app_data?.data) { await processWebAppData(msg); return; }
   const chatId = msg.chat?.id;
@@ -2510,6 +3019,31 @@ async function onMessage(msg) {
   if (await handleFormTextMessage(msg)) return;
 
   if (!text) return;
+
+  if (/^\/new(?:@\w+)?$/i.test(text)) {
+    if (Number(chatId) !== Number(MOD_CHAT)) {
+      await sendText(chatId, 'Команда /new работает только в группе модерации.');
+      return;
+    }
+    if (!(await canModerate(msg.from?.id))) {
+      await sendText(chatId, 'Доступ только участникам группы модерации.');
+      return;
+    }
+    const summary = await runNewModerationSweep(msg.from);
+    if (!summary.total) {
+      await sendText(chatId, '🆕 Анкет со статусом «На отгрузке» сейчас нет.');
+      return;
+    }
+    await sendText(
+      chatId,
+      '🆕 <b>/new выполнено</b>\n\n' +
+      `⏳ На отгрузке: <b>${summary.total}</b>\n` +
+      `✅ Отмечено свободными: <b>${summary.marked}</b>\n` +
+      `📝 Обновлено сообщений: <b>${summary.refreshed}</b>\n` +
+      `⚠️ Без moderation_message_id: <b>${summary.missingMessage}</b>`
+    );
+    return;
+  }
 
   if (isAdmin(uid) && hasBroadcastSession(uid)) {
     if (text === '/cancel') {
@@ -2541,6 +3075,36 @@ async function onMessage(msg) {
       return;
     }
     await sendAdminPanel(chatId);
+    return;
+  }
+  if (/^\/modtest(?:@\w+)?$/i.test(text)) {
+    if (!isAdmin(uid)) {
+      await sendText(chatId, '❌ Команда доступна только администраторам.');
+      return;
+    }
+    await ensureModerationHealth(true);
+    try {
+      const probe = await sendModerationText(
+        `🧪 <b>Проверка модерации</b>\n` +
+        `Время: <code>${esc(new Date().toISOString())}</code>\n` +
+        `Проверка отправки из node_bot.js`
+      );
+      await sendText(
+        chatId,
+        `✅ Отправка в модерацию работает.\n` +
+        `message_id: <code>${esc(String(probe?.message_id || '0'))}</code>\n` +
+        `status бота: <b>${esc(moderationHealth.bot_status || '-')}</b>`
+      );
+    } catch (e) {
+      const errText = shortTgError(e);
+      const hint = moderationErrorHint(errText);
+      await sendText(
+        chatId,
+        `❌ Отправка в модерацию не работает.\n` +
+        `Причина: <code>${esc(errText)}</code>` +
+        (hint ? `\nПодсказка: ${esc(hint)}` : '')
+      );
+    }
     return;
   }
   if (/^\/statss(?:@\w+)?$/i.test(text) || /^\/stats(?:@\w+)?$/i.test(text)) {
@@ -2786,16 +3350,33 @@ async function onCallback(query) {
     await edit(buildPeriodStatsText(key), statsPeriodKeyboard(true));
     return;
   }
+  if (data === 'my_page_info') {
+    return;
+  }
+  const myPageMatch = /^my_page_(\d+)_(\d+)$/.exec(data);
+  if (myPageMatch) {
+    const ownerId = String(myPageMatch[1]);
+    const page = Number.parseInt(myPageMatch[2], 10);
+    const requester = String(query.from.id);
+    if (requester !== ownerId && !isAdmin(requester)) {
+      await sendText(chatId, '❌ Это не ваш кабинет.');
+      return;
+    }
+    const view = buildMyCabinetView(ownerId, page);
+    await edit(view.text, view.keyboard);
+    return;
+  }
   if (data === 'my_back') {
     const uid = String(query.from.id);
     const view = buildMyCabinetView(uid);
     await edit(view.text, view.keyboard);
     return;
   }
-  const detailsMatch = /^release_details_(\d+)_(\d+)$/.exec(data);
+  const detailsMatch = /^release_details_(\d+)_(\d+)(?:_(\d+))?$/.exec(data);
   if (detailsMatch) {
     const ownerId = String(detailsMatch[1]);
     const idx = Number.parseInt(detailsMatch[2], 10);
+    const page = Number.parseInt(detailsMatch[3] || '0', 10);
     const requester = String(query.from.id);
     if (requester !== ownerId && !isAdmin(requester)) {
       await sendText(chatId, '❌ Это не ваш релиз.');
@@ -2807,14 +3388,15 @@ async function onCallback(query) {
       return;
     }
     await edit(buildReleaseDetailsText(ownerId, idx, rel), {
-      inline_keyboard: [[{ text: '◀ В кабинет', callback_data: 'my_back' }]]
+      inline_keyboard: [[{ text: '◀ В кабинет', callback_data: `my_page_${ownerId}_${Number.isFinite(page) ? Math.max(0, page) : 0}` }]]
     });
     return;
   }
-  const deleteMatch = /^delete_release_(\d+)_(\d+)$/.exec(data);
+  const deleteMatch = /^delete_release_(\d+)_(\d+)(?:_(\d+))?$/.exec(data);
   if (deleteMatch) {
     const ownerId = String(deleteMatch[1]);
     const idx = Number.parseInt(deleteMatch[2], 10);
+    const page = Number.parseInt(deleteMatch[3] || '0', 10);
     const requester = String(query.from.id);
     if (requester !== ownerId && !isAdmin(requester)) {
       await sendText(chatId, '❌ Это не ваш релиз.');
@@ -2832,15 +3414,14 @@ async function onCallback(query) {
       syncModerationMirror(ownerId, idx, rel);
       saveModDb();
       try {
-        await sendText(
-          MOD_CHAT,
+        await sendModerationText(
           `🗑 <b>Релиз удалён артистом из кабинета</b>\n\n🎵 ${esc(rel.name || 'Релиз')}\n👤 ${esc(rel.nick || '—')}\nID: <code>${esc(ownerId)}</code>`
         );
       } catch {
         // ignore moderation notify errors
       }
     }
-    const view = buildMyCabinetView(ownerId);
+    const view = buildMyCabinetView(ownerId, page);
     await edit(view.text, view.keyboard);
     return;
   }
@@ -2849,7 +3430,10 @@ async function onCallback(query) {
   if (data === 'menu_services') { await edit('<b>Сервисы</b>\n\nВыберите действие:', keyboardServices()); return; }
   if (data === 'menu_cabinet') { await edit('<b>Кабинет</b>\n\nВыберите действие:', keyboardCabinet()); return; }
   if (data === 'menu_community') { await edit('<b>Комьюнити</b>\n\nОфициальные площадки CXRNER MUSIC:', keyboardCommunity()); return; }
-  if (data === 'open_app' || data === 'report_app') { await sendWebappButton(chatId); return; }
+  if (data === 'open_app' || data === 'report_app') {
+    await sendText(chatId, 'Mini App открывается через кнопку «Приложение» внизу чата.');
+    return;
+  }
   if (data === 'report' || data === 'report_text') {
     await startTextForm(chatId, String(query.from.id), query.from);
     return;
@@ -2967,7 +3551,9 @@ async function loop() {
   } else {
     console.info('[bot] supabase sync: disabled');
   }
+  console.info(`[bot] moderation thread: ${MODERATION_THREAD_ID > 0 ? MODERATION_THREAD_ID : 'default'}`);
   if (WEBAPP_URL) console.info(`[bot] webapp url: ${WEBAPP_URL}`);
+  await verifyModerationChatAccess();
   try { await tg('deleteWebhook', { drop_pending_updates: false }); } catch {}
   process.on('SIGINT', () => { stopping = true; process.exit(0); });
   process.on('SIGTERM', () => { stopping = true; process.exit(0); });
