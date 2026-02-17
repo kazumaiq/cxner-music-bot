@@ -11,6 +11,7 @@ history.json
 drafts.json
 cabinet_users.json
 webapp/data/*.json
+!webapp/data/supabase-config.json
 
 # OS/editor noise
 .DS_Store

@@ -1,0 +1,8 @@
+﻿{
+  "url": "https://zjwlprncjmtbcdlypdwx.supabase.co",
+  "anonKey": "",
+  "schema": "public",
+  "formsTable": "cxrner_forms",
+  "usersTable": "cxrner_users",
+  "releasesTable": "cxrner_public_releases"
+}

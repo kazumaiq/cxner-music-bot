@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const dns = require('node:dns');
+const crypto = require('node:crypto');
 
 const ROOT = __dirname;
 const CFG = loadJson('deploy_config.json', {});
@@ -75,6 +76,122 @@ function envIntList(name, def = []) {
   return out.length ? [...new Set(out)] : def;
 }
 
+function stripHtml(input) {
+  return String(input ?? '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function sanitizeText(input, maxLen = 320) {
+  const txt = stripHtml(input);
+  if (!txt) return '';
+  if (txt.length <= maxLen) return txt;
+  return txt.slice(0, Math.max(0, maxLen)).trim();
+}
+
+function safeJson(value) {
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return null;
+  }
+}
+
+function sha1Hex(input) {
+  return crypto.createHash('sha1').update(String(input ?? ''), 'utf8').digest('hex');
+}
+
+function mapReleaseStatusToFormStatus(status) {
+  const canon = canonicalStatus(status);
+  if (canon === STATUS.APPROVED || canon === STATUS.PUBLISHED) return FORM_STATUS.APPROVED;
+  if (canon === STATUS.REJECTED || canon === STATUS.DELETED) return FORM_STATUS.REJECTED;
+  if (canon === STATUS.ON_UPLOAD) return FORM_STATUS.PENDING;
+  return FORM_STATUS.ON_MODERATION;
+}
+
+function mapFormStatusToReleaseStatus(formStatus) {
+  const st = clean(formStatus).toLowerCase();
+  if (st === FORM_STATUS.APPROVED) return STATUS.APPROVED;
+  if (st === FORM_STATUS.REJECTED) return STATUS.REJECTED;
+  if (st === FORM_STATUS.PENDING) return STATUS.ON_UPLOAD;
+  return STATUS.MODERATION;
+}
+
+function verifyTelegramInitData(initDataRaw, expectedUserId = '') {
+  const initData = clean(initDataRaw);
+  if (!initData) {
+    return { ok: false, reason: 'initData отсутствует' };
+  }
+  try {
+    const params = new URLSearchParams(initData);
+    const hash = clean(params.get('hash')).toLowerCase();
+    if (!hash) {
+      return { ok: false, reason: 'hash отсутствует в initData' };
+    }
+    params.delete('hash');
+    const pairs = [];
+    for (const [k, v] of params.entries()) {
+      pairs.push(`${k}=${v}`);
+    }
+    pairs.sort((a, b) => a.localeCompare(b));
+    const dataCheckString = pairs.join('\n');
+    const secretKey = crypto
+      .createHmac('sha256', 'WebAppData')
+      .update(TOKEN, 'utf8')
+      .digest();
+    const calc = crypto
+      .createHmac('sha256', secretKey)
+      .update(dataCheckString, 'utf8')
+      .digest('hex')
+      .toLowerCase();
+    if (calc !== hash) {
+      return { ok: false, reason: 'hash initData не прошёл проверку' };
+    }
+    const authDateRaw = clean(params.get('auth_date'));
+    const authDate = Number.parseInt(authDateRaw, 10);
+    if (Number.isFinite(authDate) && TELEGRAM_INITDATA_MAX_AGE_SEC > 0) {
+      const now = Math.floor(Date.now() / 1000);
+      if (Math.abs(now - authDate) > TELEGRAM_INITDATA_MAX_AGE_SEC) {
+        return { ok: false, reason: 'initData устарел' };
+      }
+    }
+    let user = null;
+    const rawUser = params.get('user');
+    if (rawUser) {
+      try { user = JSON.parse(rawUser); } catch { user = null; }
+    }
+    const initUserId = clean(user?.id ?? '');
+    if (expectedUserId && initUserId && initUserId !== String(expectedUserId)) {
+      return { ok: false, reason: 'telegram_id не совпадает с initData user.id' };
+    }
+    return { ok: true, user };
+  } catch (e) {
+    return { ok: false, reason: `ошибка проверки initData: ${clean(e?.message || e)}` };
+  }
+}
+
+function verifyWebappAntiSpam(userId, payloadJson) {
+  const uid = clean(userId);
+  if (!uid) return { ok: false, reason: 'user_id отсутствует' };
+  const payloadHash = sha1Hex(payloadJson);
+  const now = Date.now();
+  const prev = webappSubmitAntiSpam.get(uid);
+  if (prev && prev.hash === payloadHash && (now - prev.at) < WEBAPP_SUBMIT_THROTTLE_MS) {
+    return { ok: false, reason: 'дубликат анкеты отправлен слишком быстро' };
+  }
+  webappSubmitAntiSpam.set(uid, { hash: payloadHash, at: now });
+  if (webappSubmitAntiSpam.size > 3000) {
+    for (const [key, row] of webappSubmitAntiSpam.entries()) {
+      if ((now - Number(row?.at || 0)) > Math.max(60000, WEBAPP_SUBMIT_THROTTLE_MS * 10)) {
+        webappSubmitAntiSpam.delete(key);
+      }
+    }
+  }
+  return { ok: true };
+}
+
 const TOKEN = envStr('BOT_TOKEN') || envStr('TOKEN') || envStr('bot_token');
 if (!TOKEN) {
   console.error('BOT_TOKEN is missing.');
@@ -97,11 +214,17 @@ const WEB_DIR = envStr('WEB_SERVER_DIR', 'webapp');
 const WEB_ENABLED = envBool('ENABLE_WEB_SERVER', true);
 const ADMIN_IDS = envIntList('ADMIN_IDS', [881379104]);
 const MODERATION_HEALTH_TTL_MS = envInt('MODERATION_HEALTH_TTL_MS', 180000);
+const TELEGRAM_INITDATA_MAX_AGE_SEC = envInt('TELEGRAM_INITDATA_MAX_AGE_SEC', 86400);
+const WEBAPP_SUBMIT_THROTTLE_MS = envInt('WEBAPP_SUBMIT_THROTTLE_MS', 7000);
+const WEBAPP_MAX_PAYLOAD_BYTES = envInt('WEBAPP_MAX_PAYLOAD_BYTES', 3900);
 const SUPABASE_URL = envStr('SUPABASE_URL', '');
 const SUPABASE_SERVICE_ROLE_KEY = envStr('SUPABASE_SERVICE_ROLE_KEY', envStr('SUPABASE_KEY', ''));
 const SUPABASE_SCHEMA = envStr('SUPABASE_SCHEMA', 'public') || 'public';
 const SUPABASE_RELEASES_TABLE_RAW = envStr('SUPABASE_RELEASES_TABLE', 'cxrner_releases') || 'cxrner_releases';
 const SUPABASE_CABINET_TABLE_RAW = envStr('SUPABASE_CABINET_TABLE', 'cxrner_cabinet_users') || 'cxrner_cabinet_users';
+const SUPABASE_FORMS_TABLE_RAW = envStr('SUPABASE_FORMS_TABLE', 'cxrner_forms') || 'cxrner_forms';
+const SUPABASE_USERS_TABLE_RAW = envStr('SUPABASE_USERS_TABLE', 'cxrner_users') || 'cxrner_users';
+const SUPABASE_PUBLIC_RELEASES_TABLE_RAW = envStr('SUPABASE_PUBLIC_RELEASES_TABLE', 'cxrner_public_releases') || 'cxrner_public_releases';
 const SUPABASE_SYNC_ENABLED = !!SUPABASE_URL && !!SUPABASE_SERVICE_ROLE_KEY;
 const SUPABASE_FETCH_TIMEOUT_MS = envInt('SUPABASE_FETCH_TIMEOUT_MS', 25000);
 const SUPABASE_FETCH_RETRIES = envInt('SUPABASE_FETCH_RETRIES', 2);
@@ -171,6 +294,21 @@ const SUPABASE_RELEASES_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_RELEASE
 const SUPABASE_CABINET_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_CABINET_TABLE_RAW)
   ? SUPABASE_CABINET_TABLE_RAW
   : 'cxrner_cabinet_users';
+const SUPABASE_FORMS_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_FORMS_TABLE_RAW)
+  ? SUPABASE_FORMS_TABLE_RAW
+  : 'cxrner_forms';
+const SUPABASE_USERS_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_USERS_TABLE_RAW)
+  ? SUPABASE_USERS_TABLE_RAW
+  : 'cxrner_users';
+const SUPABASE_PUBLIC_RELEASES_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_PUBLIC_RELEASES_TABLE_RAW)
+  ? SUPABASE_PUBLIC_RELEASES_TABLE_RAW
+  : 'cxrner_public_releases';
+const FORM_STATUS = {
+  PENDING: 'pending',
+  ON_MODERATION: 'on_moderation',
+  APPROVED: 'approved',
+  REJECTED: 'rejected'
+};
 const moderationHealth = {
   ok: null,
   checked_at: 0,
@@ -184,6 +322,12 @@ const moderationHealth = {
 let supabaseSyncInProgress = false;
 let supabaseSyncQueued = false;
 let supabaseSyncTimer = null;
+const webappSubmitAntiSpam = new Map();
+const supabaseFeatureState = {
+  forms: true,
+  users: true,
+  public_releases: true
+};
 ensureModDbShape();
 
 const API = `${TELEGRAM_API_BASE}/bot${TOKEN}`;
@@ -639,20 +783,395 @@ async function supabaseSelectAll(tableName, selectCols, orderExpr = '') {
   return out;
 }
 
+async function supabaseSelectWhere(tableName, selectCols, filters = [], orderExpr = '', limit = 0) {
+  const query = [];
+  query.push(`select=${encodeURIComponent(selectCols)}`);
+  for (const row of filters) {
+    const key = clean(row?.key);
+    const op = clean(row?.op || 'eq');
+    const value = clean(row?.value);
+    if (!key || !value) continue;
+    query.push(`${encodeURIComponent(key)}=${encodeURIComponent(`${op}.${value}`)}`);
+  }
+  if (orderExpr) query.push(`order=${encodeURIComponent(orderExpr)}`);
+  if (Number(limit) > 0) query.push(`limit=${Number(limit)}`);
+  const rows = await supabaseRequest(`${tableName}?${query.join('&')}`);
+  return Array.isArray(rows) ? rows : [];
+}
+
+function mapFormRowToCabinetRelease(row) {
+  const payload = row?.form_payload && typeof row.form_payload === 'object' ? row.form_payload : {};
+  return normalizeRelease({
+    type: normalizeType(payload?.type || row?.release_type) || 'сингл',
+    name: clean(payload?.name || row?.track_name || ''),
+    subname: clean(payload?.subname || '.'),
+    nick: clean(payload?.nick || row?.artist_name || ''),
+    fio: clean(payload?.fio || payload?.artist_name || row?.artist_name || ''),
+    date: clean(payload?.date || ''),
+    version: clean(payload?.version || 'Оригинал'),
+    genre: clean(payload?.genre || row?.genre || ''),
+    link: clean(payload?.link || '.'),
+    yandex: clean(payload?.yandex || '.'),
+    mat: clean(payload?.mat || 'Нет'),
+    promo: clean(payload?.promo || '.'),
+    comment: clean(payload?.comment || '.'),
+    tracklist: clean(payload?.tracklist || '.'),
+    tg: clean(payload?.tg || payload?.telegram_contact || ''),
+    status: mapFormStatusToReleaseStatus(row?.status || ''),
+    reject_reason: clean(row?.reject_reason || payload?.reject_reason || ''),
+    upc: clean(row?.upc || payload?.upc || ''),
+    submission_time: clean(row?.submission_key || row?.created_at || payload?.submission_time || ''),
+    moderation_time: clean(row?.updated_at || payload?.moderation_time || ''),
+    source: clean(payload?.source || row?.source || 'supabase'),
+    username: clean(payload?.username || row?.username || ''),
+    supabase_form_id: clean(row?.id || row?.form_id || '')
+  });
+}
+
+async function getCabinetSnapshot(userId) {
+  const uid = clean(userId);
+  const fallback = () => {
+    const local = Array.isArray(db[uid]) ? db[uid] : [];
+    const releases = local
+      .filter((rel) => rel && typeof rel === 'object' && !rel.user_deleted)
+      .map((rel) => normalizeRelease(rel));
+    const localProfile = cabUsers[uid] && typeof cabUsers[uid] === 'object' ? cabUsers[uid] : {};
+    return {
+      source: 'local',
+      cabinet_active: !!localProfile.approved,
+      profile: {
+        telegram_id: uid,
+        username: clean(localProfile.username || ''),
+        first_name: clean(localProfile.first_name || '')
+      },
+      releases
+    };
+  };
+
+  if (!SUPABASE_SYNC_ENABLED || !uid) {
+    return fallback();
+  }
+
+  try {
+    const tasks = [];
+    tasks.push(
+      supabaseFeatureState.users
+        ? supabaseSelectWhere(
+          SUPABASE_USERS_TABLE,
+          'telegram_id,username,first_name,cabinet_active,created_at,updated_at',
+          [{ key: 'telegram_id', value: uid }],
+          'updated_at.desc',
+          1
+        ).catch(() => [])
+        : Promise.resolve([])
+    );
+    tasks.push(
+      supabaseFeatureState.forms
+        ? supabaseSelectWhere(
+          SUPABASE_FORMS_TABLE,
+          'id,telegram_id,username,artist_name,track_name,genre,release_type,status,reject_reason,upc,submission_key,created_at,updated_at,source,form_payload',
+          [{ key: 'telegram_id', value: uid }],
+          'created_at.desc',
+          300
+        ).catch(() => [])
+        : Promise.resolve([])
+    );
+    const [userRows, formRows] = await Promise.all(tasks);
+    const userRow = Array.isArray(userRows) && userRows.length ? userRows[0] : null;
+    const releases = Array.isArray(formRows) ? formRows.map((row) => mapFormRowToCabinetRelease(row)) : [];
+    if (userRow || releases.length) {
+      return {
+        source: 'supabase',
+        cabinet_active: !!(userRow?.cabinet_active),
+        profile: {
+          telegram_id: uid,
+          username: clean(userRow?.username || ''),
+          first_name: clean(userRow?.first_name || '')
+        },
+        releases
+      };
+    }
+  } catch (e) {
+    console.error('[miniapp] cabinet supabase fetch failed:', clean(e?.message || e));
+  }
+  return fallback();
+}
+
+async function supabaseUpsertCabinetUser(userId, user, cabinetActive = true) {
+  if (!SUPABASE_SYNC_ENABLED) return false;
+  const uid = clean(userId);
+  if (!uid) return false;
+  const now = new Date().toISOString();
+  const username = clean(user?.username || '');
+  const firstName = clean(user?.first_name || '');
+  let ok = false;
+
+  if (supabaseFeatureState.users) {
+    try {
+      await supabaseRequest(`${SUPABASE_USERS_TABLE}?on_conflict=telegram_id`, {
+        method: 'POST',
+        headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+        body: [{
+          telegram_id: uid,
+          username,
+          first_name: firstName,
+          cabinet_active: !!cabinetActive,
+          created_at: now,
+          updated_at: now
+        }]
+      });
+      ok = true;
+    } catch (e) {
+      const errText = clean(e?.message || e);
+      console.error('[supabase] users upsert failed:', errText);
+      if (isSupabaseSchemaError(e)) disableSupabaseFeature('users', errText);
+    }
+  }
+
+  try {
+    await supabaseRequest(`${SUPABASE_CABINET_TABLE}?on_conflict=user_id`, {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: [{
+        user_id: uid,
+        profile: {
+          approved: !!cabinetActive,
+          activated_at: now,
+          username,
+          first_name: firstName
+        },
+        updated_at: now
+      }]
+    });
+    ok = true;
+  } catch (e) {
+    console.error('[supabase] cabinet upsert failed:', clean(e?.message || e));
+  }
+
+  return ok;
+}
+
+function buildSupabaseFormRow(userId, user, rel, status = FORM_STATUS.PENDING) {
+  const uid = clean(userId);
+  const rowStatus = clean(status) || FORM_STATUS.PENDING;
+  const now = new Date().toISOString();
+  const relSafe = rel && typeof rel === 'object' ? rel : {};
+  const type = normalizeType(relSafe.type) === 'альбом' ? 'album' : 'single';
+  const payload = safeJson({
+    ...relSafe,
+    telegram_id: uid,
+    artist_name: sanitizeText(relSafe.nick || relSafe.artist_name || '', 130),
+    track_name: sanitizeText(relSafe.name || relSafe.track_name || '', 160),
+    genre: sanitizeText(relSafe.genre || '', 90),
+    release_type: type
+  }) || {};
+  const submissionKey = clean(relSafe.submission_time || now);
+  return {
+    telegram_id: uid,
+    username: clean(user?.username || relSafe.username || ''),
+    artist_name: sanitizeText(relSafe.nick || relSafe.artist_name || '', 130),
+    track_name: sanitizeText(relSafe.name || relSafe.track_name || '', 160),
+    genre: sanitizeText(relSafe.genre || '', 90),
+    release_type: type,
+    status: rowStatus,
+    reject_reason: clean(relSafe.reject_reason || ''),
+    upc: clean(relSafe.upc || ''),
+    moderation_message_id: Number(relSafe.moderation_message_id || 0) || null,
+    source: clean(relSafe.source || 'mini_app'),
+    submission_key: submissionKey,
+    form_payload: payload,
+    created_at: submissionKey,
+    updated_at: now
+  };
+}
+
+async function supabaseInsertForm(userId, user, rel, status = FORM_STATUS.PENDING) {
+  if (!SUPABASE_SYNC_ENABLED) return '';
+  if (!supabaseFeatureState.forms) return '';
+  const row = buildSupabaseFormRow(userId, user, rel, status);
+  try {
+    const inserted = await supabaseRequest(SUPABASE_FORMS_TABLE, {
+      method: 'POST',
+      headers: { Prefer: 'return=representation' },
+      body: [row]
+    });
+    const first = Array.isArray(inserted) ? inserted[0] : null;
+    const formId = clean(first?.id || first?.form_id || '');
+    console.info(
+      `[supabase] form inserted: telegram_id=${row.telegram_id || '-'} id=${formId || '-'} status=${row.status}`
+    );
+    return formId;
+  } catch (e) {
+    const errText = clean(e?.message || e);
+    console.error('[supabase] form insert failed:', errText);
+    if (isSupabaseSchemaError(e)) disableSupabaseFeature('forms', errText);
+    return '';
+  }
+}
+
+function isSupabaseSchemaError(error) {
+  const txt = clean(error?.message || error).toLowerCase();
+  return txt.includes(' does not exist')
+    || txt.includes('relation ')
+    || txt.includes('column ')
+    || txt.includes('schema cache')
+    || txt.includes('42p01')
+    || txt.includes('42703');
+}
+
+function disableSupabaseFeature(featureKey, reason) {
+  if (!Object.prototype.hasOwnProperty.call(supabaseFeatureState, featureKey)) return;
+  if (!supabaseFeatureState[featureKey]) return;
+  supabaseFeatureState[featureKey] = false;
+  console.error(`[supabase] feature disabled (${featureKey}): ${clean(reason || 'schema error')}`);
+}
+
+async function supabasePatchFormByRelease(userId, rel, patch = {}) {
+  if (!SUPABASE_SYNC_ENABLED || !rel || typeof rel !== 'object') return false;
+  if (!supabaseFeatureState.forms) return false;
+  const uid = clean(userId);
+  const now = new Date().toISOString();
+  const formId = clean(rel.supabase_form_id || '');
+  const body = {
+    ...patch,
+    updated_at: now
+  };
+  if (Object.prototype.hasOwnProperty.call(body, 'status')) {
+    body.status = clean(body.status || FORM_STATUS.ON_MODERATION);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'reject_reason')) {
+    body.reject_reason = clean(body.reject_reason || '');
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'upc')) {
+    body.upc = clean(body.upc || '');
+  }
+
+  try {
+    if (formId) {
+      await supabaseRequest(`${SUPABASE_FORMS_TABLE}?id=eq.${encodeURIComponent(formId)}`, {
+        method: 'PATCH',
+        headers: { Prefer: 'return=minimal' },
+        body
+      });
+      return true;
+    }
+    const key = clean(rel.submission_time || '');
+    if (!uid || !key) return false;
+    await supabaseRequest(
+      `${SUPABASE_FORMS_TABLE}?telegram_id=eq.${encodeURIComponent(uid)}&submission_key=eq.${encodeURIComponent(key)}`,
+      {
+        method: 'PATCH',
+        headers: { Prefer: 'return=minimal' },
+        body
+      }
+    );
+    return true;
+  } catch (e) {
+    const errText = clean(e?.message || e);
+    console.error('[supabase] form patch failed:', errText);
+    if (isSupabaseSchemaError(e)) disableSupabaseFeature('forms', errText);
+    return false;
+  }
+}
+
+async function supabaseUpsertApprovedRelease(userId, rel) {
+  if (!SUPABASE_SYNC_ENABLED || !rel || typeof rel !== 'object') return false;
+  if (!supabaseFeatureState.public_releases) return false;
+  const uid = clean(userId);
+  if (!uid) return false;
+  const now = new Date().toISOString();
+  const formId = clean(rel.supabase_form_id || `${uid}:${clean(rel.submission_time || now)}`);
+  const row = {
+    form_id: formId,
+    telegram_id: uid,
+    username: clean(rel.username || ''),
+    artist_name: sanitizeText(rel.nick || '', 130),
+    track_name: sanitizeText(rel.name || '', 160),
+    genre: sanitizeText(rel.genre || '', 90),
+    release_type: normalizeType(rel.type) === 'альбом' ? 'album' : 'single',
+    status: 'approved',
+    approved_at: clean(rel.moderation_time || now),
+    updated_at: now,
+    release_data: safeJson(rel) || {}
+  };
+  try {
+    await supabaseRequest(`${SUPABASE_PUBLIC_RELEASES_TABLE}?on_conflict=form_id`, {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: [row]
+    });
+    return true;
+  } catch (e) {
+    const errText = clean(e?.message || e);
+    console.error('[supabase] approved release upsert failed:', errText);
+    if (isSupabaseSchemaError(e)) disableSupabaseFeature('public_releases', errText);
+    return false;
+  }
+}
+
+async function supabaseDeleteApprovedRelease(userId, rel) {
+  if (!SUPABASE_SYNC_ENABLED || !rel || typeof rel !== 'object') return false;
+  if (!supabaseFeatureState.public_releases) return false;
+  const uid = clean(userId);
+  const formId = clean(rel.supabase_form_id || `${uid}:${clean(rel.submission_time || '')}`);
+  if (!formId) return false;
+  try {
+    await supabaseRequest(`${SUPABASE_PUBLIC_RELEASES_TABLE}?form_id=eq.${encodeURIComponent(formId)}`, {
+      method: 'DELETE',
+      headers: { Prefer: 'return=minimal' }
+    });
+    return true;
+  } catch (e) {
+    const errText = clean(e?.message || e);
+    console.error('[supabase] approved release delete failed:', errText);
+    if (isSupabaseSchemaError(e)) disableSupabaseFeature('public_releases', errText);
+    return false;
+  }
+}
+
 async function hydrateFromSupabase() {
   if (!SUPABASE_SYNC_ENABLED) return;
   try {
-    const [releaseRows, cabinetRows] = await Promise.all([
-      supabaseSelectAll(
-        SUPABASE_RELEASES_TABLE,
-        'user_id,release_idx,release_data,updated_at',
-        'user_id.asc,release_idx.asc'
-      ),
-      supabaseSelectAll(
-        SUPABASE_CABINET_TABLE,
-        'user_id,profile,updated_at',
-        'user_id.asc'
-      )
+    const releasePromise = supabaseSelectAll(
+      SUPABASE_RELEASES_TABLE,
+      'user_id,release_idx,release_data,updated_at',
+      'user_id.asc,release_idx.asc'
+    );
+    const cabinetPromise = supabaseSelectAll(
+      SUPABASE_CABINET_TABLE,
+      'user_id,profile,updated_at',
+      'user_id.asc'
+    );
+    const formsPromise = supabaseFeatureState.forms
+      ? supabaseSelectAll(
+        SUPABASE_FORMS_TABLE,
+        'id,telegram_id,username,artist_name,track_name,genre,release_type,status,reject_reason,upc,moderation_message_id,submission_key,source,created_at,updated_at,form_payload',
+        'created_at.asc'
+      ).catch((e) => {
+        const errText = clean(e?.message || e);
+        console.error('[supabase] forms hydrate failed:', errText);
+        if (isSupabaseSchemaError(e)) disableSupabaseFeature('forms', errText);
+        return [];
+      })
+      : Promise.resolve([]);
+    const usersPromise = supabaseFeatureState.users
+      ? supabaseSelectAll(
+        SUPABASE_USERS_TABLE,
+        'telegram_id,username,first_name,cabinet_active,created_at,updated_at',
+        'updated_at.asc'
+      ).catch((e) => {
+        const errText = clean(e?.message || e);
+        console.error('[supabase] users hydrate failed:', errText);
+        if (isSupabaseSchemaError(e)) disableSupabaseFeature('users', errText);
+        return [];
+      })
+      : Promise.resolve([]);
+
+    const [releaseRows, cabinetRows, formsRows, userRows] = await Promise.all([
+      releasePromise,
+      cabinetPromise,
+      formsPromise,
+      usersPromise
     ]);
 
     const remoteDb = {};
@@ -664,11 +1183,47 @@ async function hydrateFromSupabase() {
       const rel = normalizeRelease(row?.release_data || {});
       remoteDb[uid][idx] = rel;
     }
+
+    for (const row of formsRows || []) {
+      const uid = clean(row?.telegram_id || '');
+      if (!uid) continue;
+      if (!Array.isArray(remoteDb[uid])) remoteDb[uid] = [];
+      const payload = row?.form_payload && typeof row.form_payload === 'object' ? row.form_payload : {};
+      const rel = normalizeRelease({
+        ...payload,
+        type: normalizeType(payload?.type || row?.release_type) || 'сингл',
+        name: clean(payload?.name || row?.track_name || ''),
+        nick: clean(payload?.nick || row?.artist_name || ''),
+        genre: clean(payload?.genre || row?.genre || ''),
+        tg: clean(payload?.tg || payload?.telegram_contact || ''),
+        status: mapFormStatusToReleaseStatus(row?.status || ''),
+        reject_reason: clean(row?.reject_reason || payload?.reject_reason || ''),
+        upc: clean(row?.upc || payload?.upc || ''),
+        moderation_message_id: Number(row?.moderation_message_id || payload?.moderation_message_id || 0) || 0,
+        submission_time: clean(row?.submission_key || row?.created_at || payload?.submission_time || ''),
+        moderation_time: clean(row?.updated_at || payload?.moderation_time || ''),
+        source: clean(payload?.source || row?.source || 'mini_app'),
+        username: clean(payload?.username || row?.username || ''),
+        supabase_form_id: clean(row?.id || row?.form_id || '')
+      });
+      remoteDb[uid].push(rel);
+    }
+
     const remoteCab = {};
     for (const row of cabinetRows) {
       const uid = String(row?.user_id || '');
       if (!uid) continue;
       remoteCab[uid] = row?.profile && typeof row.profile === 'object' ? row.profile : {};
+    }
+    for (const row of userRows || []) {
+      const uid = clean(row?.telegram_id || '');
+      if (!uid) continue;
+      remoteCab[uid] = {
+        approved: !!row?.cabinet_active,
+        activated_at: clean(row?.created_at || ''),
+        username: clean(row?.username || ''),
+        first_name: clean(row?.first_name || '')
+      };
     }
 
     mergeReleasesIntoDb(remoteDb, 'supabase');
@@ -677,7 +1232,9 @@ async function hydrateFromSupabase() {
     saveJson(CAB_FILE, cabUsers);
     exportReleases();
     exportCabinet();
-    console.info(`[supabase] hydrated: releases=${releaseRows.length}, cabinet=${cabinetRows.length}`);
+    console.info(
+      `[supabase] hydrated: releases=${releaseRows.length}, cabinet=${cabinetRows.length}, forms=${formsRows.length}, users=${userRows.length}`
+    );
   } catch (e) {
     console.error('[supabase] hydrate failed:', clean(e?.message || e));
   }
@@ -722,6 +1279,66 @@ function buildSupabaseCabinetRows() {
   return rows;
 }
 
+function buildSupabaseFormRows() {
+  const rows = [];
+  for (const [uid, listRaw] of Object.entries(db || {})) {
+    const list = Array.isArray(listRaw) ? listRaw : [];
+    for (let idx = 0; idx < list.length; idx += 1) {
+      const rel = normalizeRelease(list[idx] || {});
+      const row = buildSupabaseFormRow(uid, { username: rel.username || '' }, rel, mapReleaseStatusToFormStatus(rel.status));
+      row.form_payload = safeJson(rel) || {};
+      row.moderation_message_id = Number(rel.moderation_message_id || 0) || null;
+      rows.push(row);
+    }
+  }
+  return rows;
+}
+
+function buildSupabaseUserRows() {
+  const rows = [];
+  const now = new Date().toISOString();
+  for (const [uid, profileRaw] of Object.entries(cabUsers || {})) {
+    const profile = profileRaw && typeof profileRaw === 'object' ? profileRaw : {};
+    rows.push({
+      telegram_id: String(uid),
+      username: clean(profile.username || ''),
+      first_name: clean(profile.first_name || ''),
+      cabinet_active: !!profile.approved,
+      created_at: clean(profile.activated_at || now),
+      updated_at: now
+    });
+  }
+  return rows;
+}
+
+function buildSupabaseApprovedReleaseRows() {
+  const rows = [];
+  const now = new Date().toISOString();
+  for (const [uid, listRaw] of Object.entries(db || {})) {
+    const list = Array.isArray(listRaw) ? listRaw : [];
+    for (let idx = 0; idx < list.length; idx += 1) {
+      const rel = normalizeRelease(list[idx] || {});
+      const st = canonicalStatus(rel.status);
+      if (![STATUS.APPROVED, STATUS.PUBLISHED].includes(st)) continue;
+      const formId = clean(rel.supabase_form_id || `${uid}:${clean(rel.submission_time || idx)}`);
+      rows.push({
+        form_id: formId,
+        telegram_id: String(uid),
+        username: clean(rel.username || ''),
+        artist_name: sanitizeText(rel.nick || '', 130),
+        track_name: sanitizeText(rel.name || '', 160),
+        genre: sanitizeText(rel.genre || '', 90),
+        release_type: normalizeType(rel.type) === 'альбом' ? 'album' : 'single',
+        status: 'approved',
+        approved_at: clean(rel.moderation_time || now),
+        updated_at: now,
+        release_data: safeJson(rel) || {}
+      });
+    }
+  }
+  return rows;
+}
+
 async function supabaseUpsertRows(tableName, rows, chunkSize = 250) {
   if (!rows.length) return;
   for (let i = 0; i < rows.length; i += chunkSize) {
@@ -746,6 +1363,42 @@ async function supabaseUpsertCabinetRows(tableName, rows, chunkSize = 250) {
   }
 }
 
+async function supabaseUpsertFormRows(tableName, rows, chunkSize = 250) {
+  if (!rows.length) return;
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    await supabaseRequest(`${tableName}?on_conflict=telegram_id,submission_key`, {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: chunk
+    });
+  }
+}
+
+async function supabaseUpsertUserRows(tableName, rows, chunkSize = 250) {
+  if (!rows.length) return;
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    await supabaseRequest(`${tableName}?on_conflict=telegram_id`, {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: chunk
+    });
+  }
+}
+
+async function supabaseUpsertApprovedRows(tableName, rows, chunkSize = 250) {
+  if (!rows.length) return;
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    await supabaseRequest(`${tableName}?on_conflict=form_id`, {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: chunk
+    });
+  }
+}
+
 async function syncSupabaseNow(reason = '') {
   if (!SUPABASE_SYNC_ENABLED) return;
   if (supabaseSyncInProgress) {
@@ -756,11 +1409,45 @@ async function syncSupabaseNow(reason = '') {
   try {
     const relRows = buildSupabaseReleaseRows();
     const cabRows = buildSupabaseCabinetRows();
-    await Promise.all([
-      supabaseUpsertRows(SUPABASE_RELEASES_TABLE, relRows),
-      supabaseUpsertCabinetRows(SUPABASE_CABINET_TABLE, cabRows)
-    ]);
-    console.info(`[supabase] synced (${reason || 'manual'}): releases=${relRows.length}, cabinet=${cabRows.length}`);
+    const formRows = supabaseFeatureState.forms ? buildSupabaseFormRows() : [];
+    const userRows = supabaseFeatureState.users ? buildSupabaseUserRows() : [];
+    const approvedRows = supabaseFeatureState.public_releases ? buildSupabaseApprovedReleaseRows() : [];
+
+    await supabaseUpsertRows(SUPABASE_RELEASES_TABLE, relRows);
+    await supabaseUpsertCabinetRows(SUPABASE_CABINET_TABLE, cabRows);
+
+    if (supabaseFeatureState.forms) {
+      try {
+        await supabaseUpsertFormRows(SUPABASE_FORMS_TABLE, formRows);
+      } catch (e) {
+        const errText = clean(e?.message || e);
+        console.error('[supabase] forms sync failed:', errText);
+        if (isSupabaseSchemaError(e)) disableSupabaseFeature('forms', errText);
+      }
+    }
+    if (supabaseFeatureState.users) {
+      try {
+        await supabaseUpsertUserRows(SUPABASE_USERS_TABLE, userRows);
+      } catch (e) {
+        const errText = clean(e?.message || e);
+        console.error('[supabase] users sync failed:', errText);
+        if (isSupabaseSchemaError(e)) disableSupabaseFeature('users', errText);
+      }
+    }
+    if (supabaseFeatureState.public_releases) {
+      try {
+        await supabaseUpsertApprovedRows(SUPABASE_PUBLIC_RELEASES_TABLE, approvedRows);
+      } catch (e) {
+        const errText = clean(e?.message || e);
+        console.error('[supabase] public releases sync failed:', errText);
+        if (isSupabaseSchemaError(e)) disableSupabaseFeature('public_releases', errText);
+      }
+    }
+
+    console.info(
+      `[supabase] synced (${reason || 'manual'}): releases=${relRows.length}, cabinet=${cabRows.length}` +
+      ` forms=${formRows.length} users=${userRows.length} approved=${approvedRows.length}`
+    );
   } catch (e) {
     console.error('[supabase] sync failed:', clean(e?.message || e));
   } finally {
@@ -1393,6 +2080,26 @@ async function applyReleaseStatus(uid, idx, status, moderator, opts = {}) {
   saveDb();
   syncModerationMirror(uid, idx, rel);
   saveModDb();
+
+  const formStatus = mapReleaseStatusToFormStatus(canonStatus);
+  await supabasePatchFormByRelease(uid, rel, {
+    status: formStatus,
+    reject_reason: canonStatus === STATUS.REJECTED ? clean(rel.reject_reason || '') : '',
+    upc: clean(rel.upc || ''),
+    moderation_message_id: Number(rel.moderation_message_id || 0) || null,
+    form_payload: safeJson(rel) || {}
+  });
+  if (canonStatus === STATUS.APPROVED || canonStatus === STATUS.PUBLISHED) {
+    await supabaseUpsertApprovedRelease(uid, rel);
+  } else if ([STATUS.REJECTED, STATUS.DELETED].includes(canonStatus)) {
+    await supabaseDeleteApprovedRelease(uid, rel);
+  }
+
+  console.info(
+    `[MODERATION] status change: user_id=${uid} idx=${idx} ${prevStatus} -> ${canonStatus}` +
+    ` by=${clean(moderator?.username || moderator?.id || '-')}`
+  );
+
   await refreshModerationMessage(uid, idx, rel, opts.fallbackMessageId);
   await notifyArtistAboutRelease(uid, rel, canonStatus);
   return { ok: true, rel, uid, idx, status: canonStatus };
@@ -1488,6 +2195,13 @@ async function handleModerationReplyMessage(msg) {
     rel.upc_assigned_by = String(msg.from.id);
     pushReleaseInteraction(rel, 'upc_assigned', msg.from, { upc, note: 'UPC присвоен в модерации' });
     saveDb();
+    await supabasePatchFormByRelease(uid, rel, {
+      upc,
+      form_payload: safeJson(rel) || {}
+    });
+    if ([STATUS.APPROVED, STATUS.PUBLISHED].includes(canonicalStatus(rel.status))) {
+      await supabaseUpsertApprovedRelease(uid, rel);
+    }
     syncModerationMirror(uid, idx, rel);
     saveModDb();
     await refreshModerationMessage(uid, idx, rel, fallbackMessageId);
@@ -1527,53 +2241,113 @@ async function handleModerationReplyMessage(msg) {
   return false;
 }
 function parseWebappPayload(payload) {
-  let action = clean(payload?.action);
-  const hasForm = payload?.form && typeof payload.form === 'object';
-  if (!action && hasForm) action = 'submit_release';
-  let form = hasForm ? payload.form : null;
-  if (!form && payload && typeof payload === 'object' && (payload.type || payload.name || payload.track_title)) {
-    action = action || 'submit_release';
-    form = payload;
+  const src = payload && typeof payload === 'object' ? payload : {};
+  let action = sanitizeText(src.action || '', 64).toLowerCase();
+  const hasForm = src.form && typeof src.form === 'object';
+  if (!action && hasForm) action = 'webapp_release_submit';
+
+  let form = hasForm ? src.form : null;
+  if (!form && src && typeof src === 'object' && (src.type || src.name || src.track_title || src.track_name)) {
+    action = action || 'webapp_release_submit';
+    form = src;
   }
-  if (!form) return { action, form: null };
-  if (!form.type && (form.artist_name || form.track_title || form.release_date || form.telegram_contact)) {
-    let date = clean(form.release_date || form.date);
-    if (date.includes('-')) {
-      const p = date.split('-');
-      if (p.length === 3) date = `${p[2]}.${p[1]}.${p[0]}`;
-    }
-    const tr = clean(form.release_type || form.type || 'single').toLowerCase();
-    const type = ['альбом', 'album'].includes(tr) ? 'альбом' : 'сингл';
-    form = {
-      type,
-      name: form.track_title || form.name || '',
-      subname: form.subname || '.',
-      has_lyrics: form.has_lyrics || form.lyrics || 'Нет, это инструментал',
-      nick: form.artist_name || form.nick || '',
-      fio: form.artist_name || form.fio || '',
-      date,
-      version: form.version || 'Оригинал',
-      genre: form.genre || '',
-      link: form.link || form.files_link || form.audio_link || '.',
-      yandex: form.yandex || form.yandex_link || '.',
-      mat: form.mat || 'Нет',
-      promo: form.promo || '.',
-      comment: form.comment || '.',
-      tracklist: form.tracklist || '.',
-      tg: form.telegram_contact || form.contact || form.tg || ''
+
+  const telegramId = clean(
+    src.telegram_id ||
+    src.telegramId ||
+    src.user_id ||
+    src.userId ||
+    src.user?.id ||
+    form?.telegram_id ||
+    form?.telegramId
+  );
+
+  const initData = clean(src.init_data || src.initData || src.tg_init_data || '');
+  const requestId = sanitizeText(src.request_id || src.requestId || '', 72);
+  const source = sanitizeText(src.source || '', 40) || 'mini_app';
+  if (!form) {
+    return {
+      action,
+      form: null,
+      telegram_id: telegramId,
+      init_data: initData,
+      request_id: requestId,
+      source
     };
   }
-  return { action, form };
+
+  let date = sanitizeText(form.release_date || form.date || '', 32);
+  if (date.includes('-')) {
+    const p = date.split('-');
+    if (p.length === 3) date = `${p[2]}.${p[1]}.${p[0]}`;
+  }
+  const trRaw = sanitizeText(form.release_type || form.type || 'single', 20).toLowerCase();
+  const type = ['альбом', 'album'].includes(trRaw) ? 'альбом' : 'сингл';
+  const artistName = sanitizeText(form.artist_name || form.nick || '', 130);
+  const trackName = sanitizeText(form.track_name || form.track_title || form.name || '', 160);
+  const genre = sanitizeText(form.genre || '', 90);
+  const tgContact = sanitizeText(form.telegram_contact || form.contact || form.tg || '', 180);
+
+  const normalizedForm = {
+    type,
+    name: trackName,
+    subname: sanitizeText(form.subname || '.', 120) || '.',
+    has_lyrics: sanitizeText(form.has_lyrics || form.lyrics || 'Нет, это инструментал', 64),
+    nick: artistName,
+    fio: sanitizeText(form.fio || artistName, 180),
+    date,
+    version: sanitizeText(form.version || 'Оригинал', 120) || 'Оригинал',
+    genre,
+    link: sanitizeText(form.link || form.files_link || form.audio_link || '.', 500) || '.',
+    yandex: sanitizeText(form.yandex || form.yandex_link || '.', 500) || '.',
+    mat: sanitizeText(form.mat || 'Нет', 20) || 'Нет',
+    promo: sanitizeText(form.promo || '.', 1200) || '.',
+    comment: sanitizeText(form.comment || '.', 1200) || '.',
+    tracklist: sanitizeText(form.tracklist || '.', 2400) || '.',
+    tg: tgContact,
+    artist_name: artistName,
+    track_name: trackName,
+    release_type: type === 'альбом' ? 'album' : 'single',
+    telegram_id: clean(form.telegram_id || form.telegramId || telegramId),
+    source
+  };
+
+  return {
+    action,
+    form: normalizedForm,
+    telegram_id: telegramId,
+    init_data: initData,
+    request_id: requestId,
+    source
+  };
 }
-function validateForm(form) {
+function validateForm(form, envelope = {}) {
   const errors = [];
+  const artistName = sanitizeText(form?.artist_name || form?.nick || '', 130);
+  const trackName = sanitizeText(form?.track_name || form?.name || '', 160);
+  const genreRaw = sanitizeText(form?.genre || '', 90);
+  const releaseTypeRaw = sanitizeText(form?.release_type || form?.type || '', 20).toLowerCase();
+  const releaseType = ['album', 'альбом'].includes(releaseTypeRaw)
+    ? 'album'
+    : (['single', 'сингл'].includes(releaseTypeRaw) ? 'single' : '');
+  const telegramId = clean(form?.telegram_id || envelope?.telegram_id || '');
+
+  if (!artistName) errors.push('Поле «Artist Name» (artist_name) обязательно.');
+  if (!trackName) errors.push('Поле «Track Name» (track_name) обязательно.');
+  if (!genreRaw) errors.push('Поле «Genre» (genre) обязательно.');
+  if (!releaseType) errors.push('Поле «Release Type» (release_type) должно быть single или album.');
+  if (!telegramId) errors.push('Поле «telegram_id» обязательно.');
+  if (telegramId && !/^\d{4,20}$/.test(telegramId)) {
+    errors.push('Поле «telegram_id» содержит неверный формат.');
+  }
+
   const type = normalizeType(form?.type);
   if (!type) errors.push('Укажите тип релиза: сингл или альбом.');
-  const name = clean(form?.name); if (!name) errors.push('Поле «Название релиза» обязательно.');
+  const name = sanitizeText(form?.name || trackName, 160); if (!name) errors.push('Поле «Название релиза» обязательно.');
   const subname = clean(form?.subname) || '.';
-  const hasLyrics = clean(form?.has_lyrics); if (!hasLyrics) errors.push('Укажите, есть ли слова в релизе.');
-  const nick = clean(form?.nick); if (!nick) errors.push('Поле «Ник исполнителя» обязательно.');
-  const fio = clean(form?.fio); if (!fio) errors.push('Поле «ФИО исполнителя» обязательно.');
+  const hasLyrics = sanitizeText(form?.has_lyrics, 64); if (!hasLyrics) errors.push('Укажите, есть ли слова в релизе.');
+  const nick = sanitizeText(form?.nick || artistName, 130); if (!nick) errors.push('Поле «Ник исполнителя» обязательно.');
+  const fio = sanitizeText(form?.fio, 180); if (!fio) errors.push('Поле «ФИО исполнителя» обязательно.');
   const date = clean(form?.date);
   if (!date) errors.push('Укажите дату релиза в формате ДД.ММ.ГГГГ.');
   else {
@@ -1586,11 +2360,11 @@ function validateForm(form) {
     }
   }
   const version = clean(form?.version) || 'Оригинал';
-  const genre = clean(form?.genre); if (!genre) errors.push('Поле «Жанр» обязательно.');
-  const link = clean(form?.link);
+  const genre = genreRaw || clean(form?.genre); if (!genre) errors.push('Поле «Жанр» обязательно.');
+  const link = sanitizeText(form?.link, 500);
   if (!link) errors.push('Добавьте ссылку на файлы.');
   else if (!isHttpUrl(link)) errors.push('Ссылка на файлы должна начинаться с http:// или https://.');
-  let yandex = clean(form?.yandex);
+  let yandex = sanitizeText(form?.yandex, 500);
   const yandexLower = yandex.toLowerCase();
   if (!yandex || ['-', 'нет', 'none'].includes(yandexLower)) {
     yandex = '.';
@@ -1600,26 +2374,57 @@ function validateForm(form) {
     errors.push('Поле «Яндекс Музыка» должно быть URL, точкой или вариантом «Создать новую карточку».');
   }
   const mat = clean(form?.mat); if (!mat) errors.push('Укажите, есть ли ненормативная лексика.');
-  const promo = clean(form?.promo) || '.';
-  const comment = clean(form?.comment) || '.';
-  let tracklist = clean(form?.tracklist) || '.';
+  const promo = sanitizeText(form?.promo, 1200) || '.';
+  const comment = sanitizeText(form?.comment, 1200) || '.';
+  let tracklist = sanitizeText(form?.tracklist, 2400) || '.';
   if (type !== 'альбом') tracklist = '.';
   if (type === 'альбом' && tracklist === '.') errors.push('Для альбома заполните Tracklist.');
-  const tgContact = clean(form?.tg); if (!tgContact) errors.push('Укажите контакт Telegram.');
-  return { errors, data: { type, name, subname, has_lyrics: hasLyrics, nick, fio, date, version, genre, link, yandex, mat, promo, comment, tracklist, tg: tgContact } };
+  const tgContact = sanitizeText(form?.tg, 180); if (!tgContact) errors.push('Укажите контакт Telegram.');
+  return {
+    errors,
+    data: {
+      type,
+      name,
+      subname,
+      has_lyrics: hasLyrics,
+      nick,
+      fio,
+      date,
+      version,
+      genre,
+      link,
+      yandex,
+      mat,
+      promo,
+      comment,
+      tracklist,
+      tg: tgContact,
+      artist_name: artistName || nick,
+      track_name: trackName || name,
+      release_type: releaseType || (type === 'альбом' ? 'album' : 'single'),
+      telegram_id: telegramId
+    }
+  };
 }
 
 async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_app') {
   await ensureModerationHealth(false);
   db[uid] = Array.isArray(db[uid]) ? db[uid] : [];
   const idx = db[uid].length;
+  const submissionTime = new Date().toISOString();
   const rel = {
     ...releaseData,
     status: STATUS.ON_UPLOAD,
     source,
-    submission_time: new Date().toISOString(),
+    submission_time: submissionTime,
     username: user?.username || ''
   };
+
+  if (SUPABASE_SYNC_ENABLED) {
+    const formId = await supabaseInsertForm(uid, user, rel, FORM_STATUS.PENDING);
+    if (formId) rel.supabase_form_id = formId;
+  }
+
   let orig = fmtForm(user, uid, rel);
   let moderationText = buildModerationText(uid, { ...rel, moderation_original_text: orig });
   if (moderationText.length > MODERATION_TEXT_MAX) {
@@ -1655,6 +2460,10 @@ async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_
         ` error=${msg || 'unknown'}`
       );
       await verifyModerationChatAccess(true);
+      await supabasePatchFormByRelease(uid, rel, {
+        status: FORM_STATUS.PENDING,
+        form_payload: safeJson(rel) || {}
+      });
       throw new Error(hint ? `${msg}. ${hint}` : msg);
     }
   }
@@ -1663,6 +2472,16 @@ async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_
   rel.moderation_original_text = orig;
   db[uid].push(rel);
   saveDb();
+
+  await supabasePatchFormByRelease(uid, rel, {
+    status: FORM_STATUS.ON_MODERATION,
+    moderation_message_id: Number(sent.message_id || 0) || null,
+    form_payload: safeJson(rel) || {}
+  });
+
+  console.info(
+    `[WEBAPP] release accepted to moderation: user_id=${uid} idx=${idx} msg_id=${Number(sent.message_id || 0)}`
+  );
 
   ensureModDbShape();
   modDb.moderation_messages.push({ ...rel, user_id: uid, idx, message_id: sent.message_id });
@@ -2979,6 +3798,11 @@ async function verifyModerationChatAccess(force = false) {
 
 async function processWebAppData(msg) {
   const raw = msg.web_app_data?.data || '';
+  const rawBytes = Buffer.byteLength(raw, 'utf8');
+  if (!raw || rawBytes > WEBAPP_MAX_PAYLOAD_BYTES) {
+    await sendText(msg.chat.id, '❌ Payload Mini App слишком большой или пустой.');
+    return;
+  }
   let payload;
   try { payload = JSON.parse(raw); }
   catch {
@@ -2989,7 +3813,32 @@ async function processWebAppData(msg) {
   const user = msg.from;
   const parsed = parseWebappPayload(payload);
   const action = parsed.action;
-  console.info(`[WEBAPP] action=${action || '-'} user_id=${uid || '-'} bytes=${Buffer.byteLength(raw, 'utf8')}`);
+  console.info(`[WEBAPP] action=${action || '-'} user_id=${uid || '-'} bytes=${rawBytes}`);
+
+  if (!uid) {
+    await sendText(msg.chat.id, '❌ Не удалось определить Telegram ID отправителя.');
+    return;
+  }
+
+  const envelopeTgId = clean(parsed.telegram_id || '');
+  if (envelopeTgId && envelopeTgId !== uid) {
+    console.error(`[WEBAPP] blocked spoof attempt: payload_tg=${envelopeTgId} sender_tg=${uid}`);
+    await sendText(msg.chat.id, '❌ Ошибка безопасности: telegram_id в payload не совпадает с отправителем.');
+    return;
+  }
+
+  const shouldRequireInitData = ['webapp_release_submit', 'submit_release', 'cabinet_activate', 'cabinet_sync_request'].includes(action);
+  if (shouldRequireInitData && !clean(parsed.init_data || '')) {
+    await sendText(msg.chat.id, '❌ Ошибка безопасности: Mini App initData не передан.');
+    return;
+  }
+
+  const initDataCheck = verifyTelegramInitData(parsed.init_data || '', uid);
+  if (parsed.init_data && !initDataCheck.ok) {
+    console.error(`[WEBAPP] initData validation failed: user_id=${uid} reason=${initDataCheck.reason}`);
+    await sendText(msg.chat.id, `❌ Ошибка проверки Mini App: ${esc(initDataCheck.reason)}.`);
+    return;
+  }
 
   if (action === 'cabinet_activate') {
     cabUsers[uid] = {
@@ -2999,7 +3848,15 @@ async function processWebAppData(msg) {
       first_name: user?.first_name || ''
     };
     saveCab();
+    await supabaseUpsertCabinetUser(uid, user, true);
+    console.info(`[WEBAPP] cabinet activated: user_id=${uid}`);
     await sendText(msg.chat.id, '✅ <b>Личный кабинет активирован</b>');
+    return;
+  }
+
+  if (action === 'cabinet_sync_request') {
+    await supabaseUpsertCabinetUser(uid, user, true);
+    console.info(`[WEBAPP] cabinet sync requested: user_id=${uid}`);
     return;
   }
 
@@ -3008,12 +3865,18 @@ async function processWebAppData(msg) {
     return;
   }
 
+  const antiSpam = verifyWebappAntiSpam(uid, raw);
+  if (!antiSpam.ok) {
+    await sendText(msg.chat.id, '⚠️ Анкета уже была отправлена только что. Подождите несколько секунд и попробуйте снова.');
+    return;
+  }
+
   if (!parsed.form || typeof parsed.form !== 'object') {
     await sendText(msg.chat.id, '❌ Ошибка данных формы. Отправьте анкету еще раз.');
     return;
   }
 
-  const vr = validateForm(parsed.form);
+  const vr = validateForm(parsed.form, parsed);
   if (vr.errors.length) {
     const list = vr.errors.slice(0, 8).map((e) => `• ${esc(e)}`).join('\n');
     await sendText(msg.chat.id, `❌ <b>Анкета Mini App не отправлена</b>\n\n${list}`);
@@ -3021,8 +3884,17 @@ async function processWebAppData(msg) {
   }
 
   try {
-    await submitReleaseToModeration(user, uid, vr.data, 'mini_app');
-    await sendText(msg.chat.id, '✅ <b>Анкета отправлена в модерацию</b>');
+    const out = await submitReleaseToModeration(user, uid, vr.data, 'mini_app');
+    await supabaseUpsertCabinetUser(uid, user, true);
+    console.info(
+      `[WEBAPP] release stored: user_id=${uid} idx=${out?.idx ?? '-'} name=${sanitizeText(vr.data?.name || '', 80)}`
+    );
+    await sendText(
+      msg.chat.id,
+      '✅ <b>Анкета отправлена в модерацию</b>\n\n' +
+      `🎵 ${esc(vr.data?.name || 'Релиз')}\n` +
+      `👤 ${esc(vr.data?.nick || '—')}`
+    );
   } catch (e) {
     console.error('[WEBAPP] submit failed:', e.message || e);
     await sendText(
@@ -3130,6 +4002,10 @@ async function runNewModerationSweep(moderator) {
     }
 
     syncModerationMirror(item.uid, item.idx, rel);
+    await supabasePatchFormByRelease(item.uid, rel, {
+      status: FORM_STATUS.PENDING,
+      form_payload: safeJson(rel) || {}
+    });
     marked += 1;
   }
   saveDb();
@@ -3615,6 +4491,29 @@ function startStaticServer() {
   if (!WEB_ENABLED) return;
   const root = path.resolve(ROOT, WEB_DIR);
   if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) return;
+  const allowedOrigins = new Set(
+    [
+      BASE,
+      envStr('MINIAPP_ORIGIN', ''),
+      'https://cxrnermusic.vercel.app',
+      'https://web.telegram.org'
+    ]
+      .map((v) => clean(v).replace(/\/+$/, ''))
+      .filter(Boolean)
+  );
+  function setCors(req, res) {
+    const origin = clean(req.headers?.origin || '').replace(/\/+$/, '');
+    if (origin && allowedOrigins.has(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization');
+  }
+  function sendJson(res, statusCode, data) {
+    res.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(data));
+  }
   const ct = {
     '.html': 'text/html; charset=utf-8',
     '.css': 'text/css; charset=utf-8',
@@ -3629,6 +4528,46 @@ function startStaticServer() {
   const srv = http.createServer((req, res) => {
     try {
       const u = new URL(req.url || '/', 'http://localhost');
+      if (u.pathname.startsWith('/api/')) {
+        setCors(req, res);
+      }
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+      }
+      if (u.pathname === '/api/miniapp/ping') {
+        sendJson(res, 200, {
+          ok: true,
+          now: new Date().toISOString(),
+          supabase_sync: SUPABASE_SYNC_ENABLED,
+          features: { ...supabaseFeatureState }
+        });
+        return;
+      }
+      if (u.pathname === '/api/miniapp/cabinet') {
+        const telegramId = clean(u.searchParams.get('telegram_id') || '');
+        const initData = clean(u.searchParams.get('init_data') || '');
+        if (!telegramId || !/^\d{4,20}$/.test(telegramId)) {
+          sendJson(res, 400, { ok: false, error: 'telegram_id is required' });
+          return;
+        }
+        if (initData) {
+          const check = verifyTelegramInitData(initData, telegramId);
+          if (!check.ok) {
+            sendJson(res, 403, { ok: false, error: 'initData validation failed', reason: check.reason });
+            return;
+          }
+        }
+        getCabinetSnapshot(telegramId)
+          .then((snapshot) => {
+            sendJson(res, 200, { ok: true, telegram_id: telegramId, ...snapshot });
+          })
+          .catch((err) => {
+            sendJson(res, 500, { ok: false, error: clean(err?.message || err) });
+          });
+        return;
+      }
       let p = decodeURIComponent(u.pathname || '/');
       if (p === '/') p = '/index.html';
       const f = path.normalize(path.join(root, p));
@@ -3709,7 +4648,10 @@ async function loop() {
   }
   if (SUPABASE_SYNC_ENABLED) {
     console.info(`[bot] supabase sync: enabled (${SUPABASE_URL})`);
-    console.info(`[bot] supabase tables: ${SUPABASE_RELEASES_TABLE}, ${SUPABASE_CABINET_TABLE}`);
+    console.info(
+      `[bot] supabase tables: ${SUPABASE_RELEASES_TABLE}, ${SUPABASE_CABINET_TABLE}, ` +
+      `${SUPABASE_FORMS_TABLE}, ${SUPABASE_USERS_TABLE}, ${SUPABASE_PUBLIC_RELEASES_TABLE}`
+    );
     console.info(
       `[bot] supabase fetch: timeout=${SUPABASE_FETCH_TIMEOUT_MS}ms` +
       ` retries=${SUPABASE_FETCH_RETRIES} delay=${SUPABASE_FETCH_RETRY_DELAY_MS}ms`
