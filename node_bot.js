@@ -3228,13 +3228,6 @@ async function handlePromoCallback(query, data) {
   return false;
 }
 
-async function sendWebappButton(chatId) {
-  let text = '🎵 Mini App открывается через системную кнопку «Приложение» внизу чата (настроено через BotFather).';
-  if (hasValidWebAppUrl()) {
-    text += `\n\nРучная ссылка: ${esc(WEBAPP_URL)}`;
-  }
-  await sendText(chatId, text);
-}
 function getUserReleaseEntries(uid, includeDeleted = false) {
   const list = Array.isArray(db?.[uid]) ? db[uid] : [];
   const out = [];
@@ -4225,10 +4218,6 @@ async function onMessage(msg) {
     await sendText(chatId, hadAny ? 'Текущая анкета отменена.' : 'Нет активной анкеты.');
     return;
   }
-  if (text === '/app' || text === 'Открыть приложение') {
-    await sendWebappButton(chatId);
-    return;
-  }
   if (text === '/my' || text === '/my_releases') {
     await sendMy(chatId, uid);
     return;
@@ -4450,10 +4439,7 @@ async function onCallback(query) {
   if (data === 'menu_services') { await edit('<b>Сервисы</b>\n\nВыберите действие:', keyboardServices()); return; }
   if (data === 'menu_cabinet') { await edit('<b>Кабинет</b>\n\nВыберите действие:', keyboardCabinet()); return; }
   if (data === 'menu_community') { await edit('<b>Комьюнити</b>\n\nОфициальные площадки CXRNER MUSIC:', keyboardCommunity()); return; }
-  if (data === 'open_app' || data === 'report_app') {
-    await sendText(chatId, 'Mini App открывается через кнопку «Приложение» внизу чата.');
-    return;
-  }
+  if (data === 'open_app' || data === 'report_app') return;
   if (data === 'report' || data === 'report_text') {
     await startTextForm(chatId, String(query.from.id), query.from);
     return;

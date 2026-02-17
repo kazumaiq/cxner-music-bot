@@ -350,7 +350,7 @@ function mapFormStatusToCabinetStatus(status) {
 function mapSupabaseFormToCabinetRelease(row) {
   const payload = row?.form_payload && typeof row.form_payload === "object" ? row.form_payload : {};
   const releaseType = normalizeText(row?.release_type || payload?.release_type || payload?.type).toLowerCase();
-  const typeText = ["album", "Р°Р»СЊР±РѕРј"].includes(releaseType) ? "Р°Р»СЊР±РѕРј" : "СЃРёРЅРіР»";
+  const typeText = ["album", "альбом"].includes(releaseType) ? "альбом" : "сингл";
   return {
     id: normalizeText(row?.id || row?.form_id || payload?.id || `${row?.telegram_id || "u"}_${row?.submission_key || row?.created_at || Date.now()}`),
     type: typeText,
@@ -446,7 +446,7 @@ function initTelegramWebApp() {
   const user = getTelegramUser();
   if (user) {
     const badge = document.getElementById("userBadge");
-    const username = user.username ? `@${user.username}` : user.first_name || "РџСЂРѕС„РёР»СЊ";
+    const username = user.username ? `@${user.username}` : user.first_name || "Профиль";
     badge.textContent = username;
   }
 
@@ -617,19 +617,19 @@ function renderCabinetSummary(releases) {
   el.innerHTML = `
     <div class="cabinet-metric">
       <span class="cabinet-metric-value">${counts.total}</span>
-      <span class="cabinet-metric-label">Р’СЃРµРіРѕ СЂРµР»РёР·РѕРІ</span>
+      <span class="cabinet-metric-label">Всего релизов</span>
     </div>
     <div class="cabinet-metric">
       <span class="cabinet-metric-value">${counts.pending}</span>
-      <span class="cabinet-metric-label">РќР° РѕС‚РіСЂСѓР·РєРµ</span>
+      <span class="cabinet-metric-label">На отгрузке</span>
     </div>
     <div class="cabinet-metric">
       <span class="cabinet-metric-value">${counts.moderation}</span>
-      <span class="cabinet-metric-label">РќР° РјРѕРґРµСЂР°С†РёРё</span>
+      <span class="cabinet-metric-label">На модерации</span>
     </div>
     <div class="cabinet-metric">
       <span class="cabinet-metric-value">${counts.approved}</span>
-      <span class="cabinet-metric-label">РћРґРѕР±СЂРµРЅРѕ</span>
+      <span class="cabinet-metric-label">Одобрено</span>
     </div>
   `;
   el.classList.remove("hidden");
@@ -640,8 +640,8 @@ function renderCabinetList(releases) {
   if (!releases.length) {
     list.innerHTML = `
       <article class="cabinet-item">
-        <p class="cabinet-item-title">РџРѕРєР° РЅРµС‚ СЂРµР»РёР·РѕРІ</p>
-        <p class="cabinet-item-meta">РћС‚РїСЂР°РІСЊС‚Рµ РїРµСЂРІСѓСЋ Р°РЅРєРµС‚Сѓ РІРѕ РІРєР»Р°РґРєРµ В«РђРЅРєРµС‚Р°В».</p>
+        <p class="cabinet-item-title">Пока нет релизов</p>
+        <p class="cabinet-item-meta">Отправьте первую анкету во вкладке «Анкета».</p>
       </article>
     `;
     return;
@@ -655,10 +655,10 @@ function renderCabinetList(releases) {
 
   list.innerHTML = sorted.map((rel) => {
     const meta = getStatusMeta(rel.status);
-    const typeText = rel.type || "СЂРµР»РёР·";
-    const dateText = rel.date || "вЂ”";
+    const typeText = rel.type || "релиз";
+    const dateText = rel.date || "—";
     const reason = rel.reject_reason
-      ? `<p class="cabinet-item-meta">РџСЂРёС‡РёРЅР°: ${escapeHtml(rel.reject_reason)}</p>`
+      ? `<p class="cabinet-item-meta">Причина: ${escapeHtml(rel.reject_reason)}</p>`
       : "";
     const upc = rel.upc
       ? `<p class="cabinet-item-meta">UPC: ${escapeHtml(rel.upc)}</p>`
@@ -667,13 +667,13 @@ function renderCabinetList(releases) {
     return `
       <article class="cabinet-item">
         <div class="cabinet-item-head">
-          <p class="cabinet-item-title">${escapeHtml(rel.name || "Р‘РµР· РЅР°Р·РІР°РЅРёСЏ")}</p>
+          <p class="cabinet-item-title">${escapeHtml(rel.name || "Без названия")}</p>
           <span class="status-chip status-${escapeHtml(rel.status || "on_upload")}">
             ${meta.emoji} ${escapeHtml(meta.text)}
           </span>
         </div>
-        <p class="cabinet-item-meta">${escapeHtml(typeText)} вЂў ${escapeHtml(dateText)} вЂў ${escapeHtml(rel.genre || "вЂ”")}</p>
-        <p class="cabinet-item-meta">РђСЂС‚РёСЃС‚: ${escapeHtml(rel.nick || "вЂ”")}</p>
+        <p class="cabinet-item-meta">${escapeHtml(typeText)} • ${escapeHtml(dateText)} • ${escapeHtml(rel.genre || "—")}</p>
+        <p class="cabinet-item-meta">Артист: ${escapeHtml(rel.nick || "—")}</p>
         ${upc}
         ${reason}
       </article>
@@ -791,7 +791,7 @@ function requestCabinetSync() {
 }
 
 function buildArtistsCatalog() {
-  // РџРѕСЂСЏРґРѕРє РІР°Р¶РµРЅ: РѕС‚ Р±РѕР»СЊС€РµРіРѕ С‡РёСЃР»Р° СЃР»СѓС€Р°С‚РµР»РµР№ Рє РјРµРЅСЊС€РµРјСѓ.
+  // Порядок важен: от большего числа слушателей к меньшему.
   appState.artists = LABEL_ARTISTS.map((artist) => ({ ...artist }));
 }
 
@@ -805,7 +805,7 @@ function renderArtistFilter() {
   const releaseArtists = [...new Set(appState.releases.map((rel) => rel.artist))]
     .sort((a, b) => a.localeCompare(b));
   const options = [
-    { value: "all", label: "Р’СЃРµ Р°СЂС‚РёСЃС‚С‹" },
+    { value: "all", label: "Все артисты" },
     ...releaseArtists.map((name) => ({ value: name, label: name }))
   ];
   select.innerHTML = options
@@ -828,7 +828,7 @@ function renderReleasesGrid() {
         <p class="release-artist">${escapeHtml(rel.artist)}</p>
         <p class="release-date">${formatDate(rel.date)}</p>
       </div>
-      <button class="btn btn-ghost" data-open-release="${rel.id}" type="button">РћС‚РєСЂС‹С‚СЊ СЂРµР»РёР·</button>
+      <button class="btn btn-ghost" data-open-release="${rel.id}" type="button">Открыть релиз</button>
     </article>
   `).join("");
   observeLazyImages(grid);
@@ -843,10 +843,10 @@ function renderArtists() {
           <img class="artist-avatar lazy" data-src="${artist.avatar}" alt="${escapeHtml(artist.name)}" loading="lazy" decoding="async">
           <div>
             <p class="artist-name">${escapeHtml(artist.name)}</p>
-            <p class="artist-meta">РЎР»СѓС€Р°С‚РµР»РµР№ РІ РјРµСЃСЏС†: ${formatNumber(artist.monthlyListeners)}</p>
+            <p class="artist-meta">Слушателей в месяц: ${formatNumber(artist.monthlyListeners)}</p>
           </div>
         </div>
-        <button class="btn btn-ghost" data-open-artist="${escapeHtml(artist.name)}" data-artist-link="${escapeHtml(artist.profile || "")}" type="button">РћС‚РєСЂС‹С‚СЊ РїСЂРѕС„РёР»СЊ</button>
+        <button class="btn btn-ghost" data-open-artist="${escapeHtml(artist.name)}" data-artist-link="${escapeHtml(artist.profile || "")}" type="button">Открыть профиль</button>
       </article>
     `)
     .join("");
@@ -932,10 +932,10 @@ function normalizeReleaseTypeValue(value) {
   if (!raw) {
     return "";
   }
-  if (raw === "album" || raw === "Р°Р»СЊР±РѕРј" || raw === "СЂВ°СЂВ»СЃСљСЂВ±СЂС•СЂС") {
+  if (raw === "album" || raw === "альбом") {
     return "album";
   }
-  if (raw === "single" || raw === "singl" || raw === "СЃРёРЅРіР»" || raw === "СЃРёРЅРіР°Р»" || raw === "СЃРёРЅРіРµР»" || raw === "СЃСљСЃС“СЂР…СЂС–СЂВ»") {
+  if (raw === "single" || raw === "singl" || raw === "сингл" || raw === "сингал" || raw === "сингел") {
     return "single";
   }
   return "";
@@ -1089,14 +1089,14 @@ function submitReleaseForm(event) {
   if (tgApp?.sendData) {
     tgApp.sendData(result.payloadJson || JSON.stringify(result.payload));
     tgApp.HapticFeedback?.notificationOccurred?.("success");
-    showToast("РђРЅРєРµС‚Р° РѕС‚РїСЂР°РІР»РµРЅР°. РџСЂРѕРІРµСЂСЊС‚Рµ В«РљР°Р±РёРЅРµС‚В» Рё С‡Р°С‚ СЃ Р±РѕС‚РѕРј.");
+    showToast("Анкета отправлена. Проверьте «Кабинет» и чат с ботом.");
     form.reset();
     updateTracklistVisibility();
     syncMainButton();
     switchTab("cabinet");
     return;
   } else {
-    showToast("РћС‚РєСЂРѕР№С‚Рµ Mini App С‡РµСЂРµР· РєРЅРѕРїРєСѓ В«РћС‚РєСЂС‹С‚СЊ РїСЂРёР»РѕР¶РµРЅРёРµВ» РІ Р±РѕС‚Рµ.");
+    showToast("Откройте Mini App через кнопку «Приложение» в Telegram.");
     return;
   }
 }
@@ -1108,11 +1108,11 @@ function syncMainButton() {
   }
   const canShow = appState.activeTab === "submit";
   tgApp.MainButton.setParams({ color: "#8154ff", text_color: "#ffffff", is_visible: canShow });
-  tgApp.MainButton.setText("РћС‚РїСЂР°РІРёС‚СЊ Р°РЅРєРµС‚Сѓ");
+  tgApp.MainButton.setText("Отправить анкету");
   tgApp.MainButton.offClick(handleMainButtonClick);
   tgApp.MainButton.onClick(handleMainButtonClick);
   if (canShow && !document.getElementById("submitForm").checkValidity()) {
-    tgApp.MainButton.setText("Р—Р°РїРѕР»РЅРёС‚Рµ Р°РЅРєРµС‚Сѓ");
+    tgApp.MainButton.setText("Заполните анкету");
   }
   if (canShow) {
     tgApp.MainButton.show();
@@ -1166,7 +1166,7 @@ function wireEvents() {
       if (directLink) {
         safeOpenLink(directLink);
       } else {
-        showToast(`РџСЂРѕС„РёР»СЊ ${artistBtn.dataset.openArtist} РїРѕРєР° Р±РµР· СЃСЃС‹Р»РєРё.`);
+        showToast(`Профиль ${artistBtn.dataset.openArtist} пока без ссылки.`);
       }
       return;
     }
