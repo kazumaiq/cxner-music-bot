@@ -145,7 +145,8 @@ const supabaseRuntime = {
   schema: "public",
   formsTable: "cxrner_forms",
   usersTable: "cxrner_users",
-  releasesTable: "cxrner_public_releases"
+  releasesTable: "cxrner_public_releases",
+  botApiBaseUrl: ""
 };
 let supabaseConfigLoaded = false;
 const lazyObserver = typeof IntersectionObserver === "function"
@@ -281,6 +282,9 @@ async function ensureSupabaseConfig() {
       supabaseRuntime.formsTable = normalizeText(cfg.formsTable || supabaseRuntime.formsTable) || "cxrner_forms";
       supabaseRuntime.usersTable = normalizeText(cfg.usersTable || supabaseRuntime.usersTable) || "cxrner_users";
       supabaseRuntime.releasesTable = normalizeText(cfg.releasesTable || supabaseRuntime.releasesTable) || "cxrner_public_releases";
+      supabaseRuntime.botApiBaseUrl = normalizeText(
+        cfg.botApiBaseUrl || cfg.bot_api_base_url || cfg.apiBaseUrl || supabaseRuntime.botApiBaseUrl
+      );
     }
   } catch {
     // ignore runtime config fetch errors
@@ -294,6 +298,30 @@ function hasSupabaseRuntime() {
 function supabaseRestUrl(pathAndQuery) {
   const base = String(supabaseRuntime.url || "").replace(/\/+$/, "");
   return `${base}/rest/v1/${pathAndQuery}`;
+}
+
+function miniappApiBaseUrl() {
+  const base = normalizeText(supabaseRuntime.botApiBaseUrl || "");
+  return base ? base.replace(/\/+$/, "") : "";
+}
+
+async function postMiniappApi(pathname, payload) {
+  const base = miniappApiBaseUrl();
+  if (!base) {
+    throw new Error("botApiBaseUrl не настроен");
+  }
+  const url = `${base}${pathname.startsWith("/") ? pathname : `/${pathname}`}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload || {})
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data?.ok) {
+    const details = data?.errors?.[0] || data?.reason || data?.error || `${res.status} ${res.statusText}`;
+    throw new Error(String(details));
+  }
+  return data;
 }
 
 async function supabaseSelectRows(tableName, selectExpr, filters = [], orderExpr = "", limit = 0) {
@@ -1074,7 +1102,7 @@ function buildSubmitPayload(form) {
   return { errors: [], payload, payloadJson };
 }
 
-function submitReleaseForm(event) {
+async function submitReleaseForm(event) {
   event.preventDefault();
   const form = event.currentTarget;
   const result = buildSubmitPayload(form);
@@ -1086,19 +1114,47 @@ function submitReleaseForm(event) {
     return;
   }
 
-  if (tgApp?.sendData) {
-    tgApp.sendData(result.payloadJson || JSON.stringify(result.payload));
-    tgApp.HapticFeedback?.notificationOccurred?.("success");
+  const afterSuccess = () => {
+    tgApp?.HapticFeedback?.notificationOccurred?.("success");
     showToast("Анкета отправлена. Проверьте «Кабинет» и чат с ботом.");
     form.reset();
     updateTracklistVisibility();
     syncMainButton();
     switchTab("cabinet");
-    return;
-  } else {
-    showToast("Откройте Mini App через кнопку «Приложение» в Telegram.");
-    return;
+  };
+
+  const payloadJson = result.payloadJson || JSON.stringify(result.payload);
+  const hasApiBase = Boolean(miniappApiBaseUrl());
+  if (hasApiBase) {
+    try {
+      await postMiniappApi("/api/miniapp/submit", result.payload);
+      afterSuccess();
+      return;
+    } catch (e) {
+      console.error("Mini App API submit failed:", e);
+      if (!tgApp?.sendData) {
+        tgApp?.HapticFeedback?.notificationOccurred?.("error");
+        showToast(`Ошибка отправки: ${normalizeText(e?.message || e) || "попробуйте позже"}`);
+        return;
+      }
+    }
   }
+
+  if (tgApp?.sendData) {
+    try {
+      tgApp.sendData(payloadJson);
+      tgApp.close?.();
+      afterSuccess();
+      return;
+    } catch (e) {
+      console.error("Telegram sendData failed:", e);
+      tgApp?.HapticFeedback?.notificationOccurred?.("error");
+      showToast(`Ошибка отправки: ${normalizeText(e?.message || e) || "попробуйте позже"}`);
+      return;
+    }
+  }
+
+  showToast("Откройте Mini App через кнопку «Приложение» в Telegram.");
 }
 
 function syncMainButton() {

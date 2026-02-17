@@ -4511,12 +4511,40 @@ function startStaticServer() {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
     }
-    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization');
   }
   function sendJson(res, statusCode, data) {
     res.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(data));
+  }
+  function readJsonBody(req, maxBytes = 64 * 1024) {
+    return new Promise((resolve, reject) => {
+      let size = 0;
+      const chunks = [];
+      req.on('data', (chunk) => {
+        size += chunk.length;
+        if (size > maxBytes) {
+          reject(new Error('payload too large'));
+          req.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      req.on('end', () => {
+        try {
+          const raw = Buffer.concat(chunks).toString('utf8').trim();
+          if (!raw) {
+            resolve({});
+            return;
+          }
+          resolve(JSON.parse(raw));
+        } catch (e) {
+          reject(new Error(`invalid json: ${clean(e?.message || e)}`));
+        }
+      });
+      req.on('error', (e) => reject(e));
+    });
   }
   const ct = {
     '.html': 'text/html; charset=utf-8',
@@ -4529,7 +4557,7 @@ function startStaticServer() {
     '.svg': 'image/svg+xml',
     '.webp': 'image/webp'
   };
-  const srv = http.createServer((req, res) => {
+  const srv = http.createServer(async (req, res) => {
     try {
       const u = new URL(req.url || '/', 'http://localhost');
       if (u.pathname.startsWith('/api/')) {
@@ -4569,7 +4597,109 @@ function startStaticServer() {
           })
           .catch((err) => {
             sendJson(res, 500, { ok: false, error: clean(err?.message || err) });
+        });
+        return;
+      }
+      if (u.pathname === '/api/miniapp/submit') {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: 'method not allowed' });
+          return;
+        }
+        let payload;
+        try {
+          payload = await readJsonBody(req, Math.max(8192, WEBAPP_MAX_PAYLOAD_BYTES + 1024));
+        } catch (e) {
+          sendJson(res, 400, { ok: false, error: clean(e?.message || e) || 'invalid request body' });
+          return;
+        }
+        if (!payload || typeof payload !== 'object') {
+          sendJson(res, 400, { ok: false, error: 'json object expected' });
+          return;
+        }
+
+        const parsed = parseWebappPayload(payload);
+        const action = clean(parsed.action || '').toLowerCase();
+        if (!['webapp_release_submit', 'submit_release', ''].includes(action)) {
+          sendJson(res, 400, { ok: false, error: 'unsupported action' });
+          return;
+        }
+        if (!parsed.form || typeof parsed.form !== 'object') {
+          sendJson(res, 400, { ok: false, error: 'form object is required' });
+          return;
+        }
+
+        let uid = clean(parsed.telegram_id || payload.telegram_id || '');
+        let user = payload.user && typeof payload.user === 'object' ? payload.user : {};
+        const initData = clean(parsed.init_data || payload.init_data || '');
+
+        if (initData) {
+          const check = verifyTelegramInitData(initData, uid || '');
+          if (!check.ok) {
+            if (WEBAPP_REQUIRE_INITDATA) {
+              sendJson(res, 403, { ok: false, error: 'initData validation failed', reason: check.reason });
+              return;
+            }
+            console.warn(
+              `[WEBAPP] submit api initData warning: user_id=${uid || '-'} reason=${check.reason} (fallback mode)`
+            );
+          } else {
+            const initUid = clean(check.user?.id || '');
+            if (!uid && initUid) uid = initUid;
+            if ((!user || !user.id) && check.user && typeof check.user === 'object') {
+              user = check.user;
+            }
+          }
+        } else if (WEBAPP_REQUIRE_INITDATA) {
+          sendJson(res, 403, { ok: false, error: 'initData is required' });
+          return;
+        }
+
+        if (!uid || !/^\d{4,20}$/.test(uid)) {
+          sendJson(res, 400, { ok: false, error: 'valid telegram_id is required' });
+          return;
+        }
+        const antiSpam = verifyWebappAntiSpam(uid, JSON.stringify(payload));
+        if (!antiSpam.ok) {
+          sendJson(res, 429, { ok: false, error: antiSpam.reason || 'duplicate submit' });
+          return;
+        }
+
+        const vr = validateForm(parsed.form, {
+          ...parsed,
+          action: action || 'webapp_release_submit',
+          source: 'mini_app',
+          telegram_id: uid
+        });
+        if (vr.errors.length) {
+          sendJson(res, 422, { ok: false, errors: vr.errors });
+          return;
+        }
+
+        const submitUser = {
+          id: Number(uid),
+          username: sanitizeText(user?.username || '', 64),
+          first_name: sanitizeText(user?.first_name || '', 64)
+        };
+        try {
+          const out = await submitReleaseToModeration(submitUser, uid, vr.data, 'mini_app_api');
+          await supabaseUpsertCabinetUser(uid, submitUser, true);
+          try {
+            await sendText(
+              Number(uid),
+              '✅ <b>Анкета отправлена в модерацию</b>\n\n' +
+              `🎵 ${esc(vr.data?.name || 'Релиз')}\n` +
+              `👤 ${esc(vr.data?.nick || '—')}`
+            );
+          } catch {}
+          sendJson(res, 200, {
+            ok: true,
+            telegram_id: uid,
+            idx: Number(out?.idx ?? -1),
+            moderation_message_id: Number(out?.rel?.moderation_message_id || 0)
           });
+        } catch (e) {
+          sendJson(res, 500, { ok: false, error: clean(e?.message || e) || 'submit failed' });
+        }
         return;
       }
       let p = decodeURIComponent(u.pathname || '/');
