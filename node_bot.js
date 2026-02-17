@@ -2323,6 +2323,12 @@ function parseWebappPayload(payload) {
 }
 function validateForm(form, envelope = {}) {
   const errors = [];
+  const source = clean(envelope?.source || form?.source || '').toLowerCase();
+  const action = clean(envelope?.action || '').toLowerCase();
+  const requireTelegramId = source === 'mini_app'
+    || source === 'webapp'
+    || action === 'webapp_release_submit'
+    || action === 'submit_release';
   const artistName = sanitizeText(form?.artist_name || form?.nick || '', 130);
   const trackName = sanitizeText(form?.track_name || form?.name || '', 160);
   const genreRaw = sanitizeText(form?.genre || '', 90);
@@ -2336,8 +2342,8 @@ function validateForm(form, envelope = {}) {
   if (!trackName) errors.push('Поле «Track Name» (track_name) обязательно.');
   if (!genreRaw) errors.push('Поле «Genre» (genre) обязательно.');
   if (!releaseType) errors.push('Поле «Release Type» (release_type) должно быть single или album.');
-  if (!telegramId) errors.push('Поле «telegram_id» обязательно.');
-  if (telegramId && !/^\d{4,20}$/.test(telegramId)) {
+  if (requireTelegramId && !telegramId) errors.push('Поле «telegram_id» обязательно.');
+  if (requireTelegramId && telegramId && !/^\d{4,20}$/.test(telegramId)) {
     errors.push('Поле «telegram_id» содержит неверный формат.');
   }
 
@@ -2841,7 +2847,7 @@ async function handleFormCallback(query, data) {
   }
 
   if (data === 'form_send') {
-    const vr = validateForm(s.form);
+    const vr = validateForm(s.form, { source: 'bot_text', telegram_id: uid });
     if (vr.errors.length) {
       const list = vr.errors.slice(0, 5).map((e) => `• ${esc(e)}`).join('\n');
       await sendText(query.message.chat.id, `❌ Анкета не прошла проверку:\n${list}`);
