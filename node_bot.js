@@ -217,6 +217,7 @@ const MODERATION_HEALTH_TTL_MS = envInt('MODERATION_HEALTH_TTL_MS', 180000);
 const TELEGRAM_INITDATA_MAX_AGE_SEC = envInt('TELEGRAM_INITDATA_MAX_AGE_SEC', 86400);
 const WEBAPP_SUBMIT_THROTTLE_MS = envInt('WEBAPP_SUBMIT_THROTTLE_MS', 7000);
 const WEBAPP_MAX_PAYLOAD_BYTES = envInt('WEBAPP_MAX_PAYLOAD_BYTES', 3900);
+const WEBAPP_REQUIRE_INITDATA = envBool('WEBAPP_REQUIRE_INITDATA', false);
 const SUPABASE_URL = envStr('SUPABASE_URL', '');
 const SUPABASE_SERVICE_ROLE_KEY = envStr('SUPABASE_SERVICE_ROLE_KEY', envStr('SUPABASE_KEY', ''));
 const SUPABASE_SCHEMA = envStr('SUPABASE_SCHEMA', 'public') || 'public';
@@ -3826,17 +3827,28 @@ async function processWebAppData(msg) {
     return;
   }
 
-  const shouldRequireInitData = ['webapp_release_submit', 'submit_release', 'cabinet_activate', 'cabinet_sync_request'].includes(action);
-  if (shouldRequireInitData && !clean(parsed.init_data || '')) {
-    await sendText(msg.chat.id, '❌ Ошибка безопасности: Mini App initData не передан.');
-    return;
+  const shouldValidateInitData = ['webapp_release_submit', 'submit_release', 'cabinet_activate', 'cabinet_sync_request'].includes(action);
+  const initData = clean(parsed.init_data || '');
+  if (shouldValidateInitData && !initData) {
+    if (WEBAPP_REQUIRE_INITDATA) {
+      await sendText(msg.chat.id, '❌ Ошибка безопасности: Mini App initData не передан.');
+      return;
+    }
+    console.warn(`[WEBAPP] initData missing: user_id=${uid} action=${action || '-'} (fallback mode)`);
   }
 
-  const initDataCheck = verifyTelegramInitData(parsed.init_data || '', uid);
-  if (parsed.init_data && !initDataCheck.ok) {
-    console.error(`[WEBAPP] initData validation failed: user_id=${uid} reason=${initDataCheck.reason}`);
-    await sendText(msg.chat.id, `❌ Ошибка проверки Mini App: ${esc(initDataCheck.reason)}.`);
-    return;
+  if (initData) {
+    const initDataCheck = verifyTelegramInitData(initData, uid);
+    if (!initDataCheck.ok) {
+      if (WEBAPP_REQUIRE_INITDATA) {
+        console.error(`[WEBAPP] initData validation failed: user_id=${uid} reason=${initDataCheck.reason}`);
+        await sendText(msg.chat.id, `❌ Ошибка проверки Mini App: ${esc(initDataCheck.reason)}.`);
+        return;
+      }
+      console.warn(
+        `[WEBAPP] initData validation warning: user_id=${uid} reason=${initDataCheck.reason} (fallback mode)`
+      );
+    }
   }
 
   if (action === 'cabinet_activate') {
@@ -4653,6 +4665,7 @@ async function loop() {
   }
   console.info(`[bot] telegram api base: ${TELEGRAM_API_BASE}`);
   console.info(`[bot] tg fetch: timeout=${TG_FETCH_TIMEOUT_MS}ms retries=${TG_FETCH_RETRIES}`);
+  console.info(`[bot] webapp initData strict: ${WEBAPP_REQUIRE_INITDATA ? 'enabled' : 'disabled'}`);
   console.info(`[bot] moderation thread: ${MODERATION_THREAD_ID > 0 ? MODERATION_THREAD_ID : 'default'}`);
   if (WEBAPP_URL) console.info(`[bot] webapp url: ${WEBAPP_URL}`);
   await verifyModerationChatAccess();
