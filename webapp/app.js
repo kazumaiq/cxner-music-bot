@@ -1143,7 +1143,6 @@ async function submitReleaseForm(event) {
   if (tgApp?.sendData) {
     try {
       tgApp.sendData(payloadJson);
-      tgApp.close?.();
       afterSuccess();
       return;
     } catch (e) {
