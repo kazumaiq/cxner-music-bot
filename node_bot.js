@@ -3799,17 +3799,50 @@ async function verifyModerationChatAccess(force = false) {
 async function processWebAppData(msg) {
   const raw = msg.web_app_data?.data || '';
   const rawBytes = Buffer.byteLength(raw, 'utf8');
+  const uid = String(msg.from?.id || '');
+  const username = clean(msg.from?.username || '');
+  console.info(
+    `[WEBAPP] data received: user_id=${uid || '-'} username=@${username || '-'} bytes=${rawBytes}`
+  );
   if (!raw || rawBytes > WEBAPP_MAX_PAYLOAD_BYTES) {
     await sendText(msg.chat.id, '❌ Payload Mini App слишком большой или пустой.');
     return;
   }
+  const rawLower = clean(raw).toLowerCase();
+  if (rawLower.startsWith('test')) {
+    const healthOk = await verifyModerationChatAccess(true);
+    const diagText =
+      'ТЕСТ АНКЕТА ПОЛУЧЕНА:\n\n' +
+      `${raw}\n\n` +
+      `telegram_id: ${uid || '-'}\n` +
+      `username: @${username || '-'}\n` +
+      `WEB_APP_DATA received: yes\n` +
+      `handler: processWebAppData()\n` +
+      `moderation_chat_id: ${MOD_CHAT}\n` +
+      `moderation_chat_access: ${healthOk ? 'ok' : `failed (${moderationHealth.reason || 'unknown'})`}\n` +
+      `bot_status: ${moderationHealth.bot_status || '-'}\n` +
+      `bot_is_admin: ${['administrator', 'creator'].includes(clean(moderationHealth.bot_status).toLowerCase())}`;
+    try {
+      const sent = await tg('sendMessage', moderationPayload({
+        text: diagText,
+        disable_web_page_preview: true
+      }));
+      console.info(`[WEBAPP_DIAG] test forwarded to moderation: message_id=${Number(sent.message_id || 0)}`);
+      await sendText(msg.chat.id, '✅ Тест WEB_APP_DATA получен и отправлен в модерацию.');
+    } catch (e) {
+      const err = shortTgError(e);
+      console.error(`[WEBAPP_DIAG] moderation send failed: ${err}`);
+      await sendText(msg.chat.id, `❌ WEB_APP_DATA получен, но отправка в модерацию не удалась: <code>${esc(err)}</code>`);
+    }
+    return;
+  }
   let payload;
   try { payload = JSON.parse(raw); }
-  catch {
+  catch (e) {
+    console.error(`[WEBAPP] invalid json payload: ${clean(e?.message || e)}`);
     await sendText(msg.chat.id, '❌ Не удалось распознать данные Mini App.');
     return;
   }
-  const uid = String(msg.from?.id || '');
   const user = msg.from;
   const parsed = parseWebappPayload(payload);
   const action = parsed.action;

@@ -464,6 +464,7 @@ async function loadCabinetFromSupabase(userId) {
 function initTelegramWebApp() {
   const tgApp = getTelegramWebApp();
   if (!tgApp) {
+    console.error("Telegram.WebApp is undefined");
     return;
   }
 
@@ -489,6 +490,24 @@ function initTelegramWebApp() {
   if (params.text_color) {
     root.style.setProperty("--text", params.text_color);
   }
+}
+
+function logWebAppSendDiagnostics(reason = "submit_form") {
+  const tgApp = getTelegramWebApp();
+  if (!tgApp) {
+    console.error("Telegram.WebApp is undefined");
+    return null;
+  }
+  try {
+    // Required diagnostics for Mini App sendData chain.
+    console.log("SEND DATA TRIGGERED");
+    console.log(Telegram.WebApp.initData);
+    console.log(Telegram.WebApp.initDataUnsafe);
+    console.log(`[WEBAPP_DIAG] reason=${reason}`);
+  } catch (e) {
+    console.error("[WEBAPP_DIAG] diagnostics log failed", e);
+  }
+  return tgApp;
 }
 
 function safeOpenLink(url) {
@@ -1106,7 +1125,7 @@ async function submitReleaseForm(event) {
   event.preventDefault();
   const form = event.currentTarget;
   const result = buildSubmitPayload(form);
-  const tgApp = getTelegramWebApp();
+  const tgApp = logWebAppSendDiagnostics("submit_form");
 
   if (result.errors.length) {
     tgApp?.HapticFeedback?.notificationOccurred?.("error");
@@ -1123,37 +1142,40 @@ async function submitReleaseForm(event) {
     switchTab("cabinet");
   };
 
-  const payloadJson = result.payloadJson || JSON.stringify(result.payload);
-  const hasApiBase = Boolean(miniappApiBaseUrl());
-  if (hasApiBase) {
-    try {
-      await postMiniappApi("/api/miniapp/submit", result.payload);
-      afterSuccess();
-      return;
-    } catch (e) {
-      console.error("Mini App API submit failed:", e);
-      if (!tgApp?.sendData) {
-        tgApp?.HapticFeedback?.notificationOccurred?.("error");
-        showToast(`Ошибка отправки: ${normalizeText(e?.message || e) || "попробуйте позже"}`);
-        return;
-      }
-    }
+  if (!tgApp?.sendData) {
+    console.error("Telegram.WebApp.sendData unavailable");
+    showToast("Ошибка: Mini App открыт не через Telegram WebApp.");
+    return;
   }
 
-  if (tgApp?.sendData) {
-    try {
-      tgApp.sendData(payloadJson);
-      afterSuccess();
-      return;
-    } catch (e) {
-      console.error("Telegram sendData failed:", e);
-      tgApp?.HapticFeedback?.notificationOccurred?.("error");
-      showToast(`Ошибка отправки: ${normalizeText(e?.message || e) || "попробуйте позже"}`);
-      return;
-    }
+  try {
+    tgApp.sendData(result.payloadJson || JSON.stringify(result.payload));
+  } catch (e) {
+    console.error("Telegram sendData failed:", e);
+    tgApp?.HapticFeedback?.notificationOccurred?.("error");
+    showToast(`Ошибка отправки: ${normalizeText(e?.message || e) || "попробуйте позже"}`);
+    return;
   }
 
-  showToast("Откройте Mini App через кнопку «Приложение» в Telegram.");
+  afterSuccess();
+}
+
+function sendDiagnosticTestPayload() {
+  const tgApp = logWebAppSendDiagnostics("diag_button");
+  if (!tgApp?.sendData) {
+    console.error("Telegram.WebApp.sendData unavailable");
+    showToast("Ошибка: Telegram.WebApp undefined.");
+    return;
+  }
+  try {
+    tgApp.sendData("test анкета");
+    tgApp.HapticFeedback?.notificationOccurred?.("success");
+    showToast("Тест sendData отправлен.");
+  } catch (e) {
+    console.error("[WEBAPP_DIAG] test sendData failed", e);
+    tgApp.HapticFeedback?.notificationOccurred?.("error");
+    showToast("Ошибка тестовой отправки sendData.");
+  }
 }
 
 function syncMainButton() {
@@ -1247,6 +1269,10 @@ function wireEvents() {
   form.addEventListener("submit", submitReleaseForm);
   form.addEventListener("input", syncMainButton);
   form.addEventListener("change", syncMainButton);
+  const diagBtn = document.getElementById("diagSendDataBtn");
+  if (diagBtn) {
+    diagBtn.addEventListener("click", sendDiagnosticTestPayload);
+  }
 
   document.getElementById("releaseType").addEventListener("change", () => {
     updateTracklistVisibility();
