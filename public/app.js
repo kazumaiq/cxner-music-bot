@@ -302,7 +302,11 @@ function supabaseRestUrl(pathAndQuery) {
 
 function miniappApiBaseUrl() {
   const base = normalizeText(supabaseRuntime.botApiBaseUrl || "");
-  return base ? base.replace(/\/+$/, "") : "";
+  if (base) return base.replace(/\/+$/, "");
+  if (typeof window !== "undefined" && window.location && window.location.origin) {
+    return String(window.location.origin).replace(/\/+$/, "");
+  }
+  return "";
 }
 
 async function postMiniappApi(pathname, payload) {

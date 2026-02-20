@@ -76,6 +76,16 @@ function envIntList(name, def = []) {
   return out.length ? [...new Set(out)] : def;
 }
 
+function urlOrigin(value) {
+  const raw = clean(value);
+  if (!raw) return '';
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return '';
+  }
+}
+
 function stripHtml(input) {
   return String(input ?? '')
     .replace(/<[^>]*>/g, ' ')
@@ -203,11 +213,11 @@ const TELEGRAM_API_BASE = envStr('TELEGRAM_API_BASE', 'https://api.telegram.org'
 const TG_FETCH_TIMEOUT_MS = envInt('TG_FETCH_TIMEOUT_MS', 70000);
 const TG_FETCH_RETRIES = envInt('TG_FETCH_RETRIES', 2);
 const TG_FETCH_RETRY_DELAY_MS = envInt('TG_FETCH_RETRY_DELAY_MS', 800);
-const BASE = envStr('PUBLIC_BASE_URL', '');
-let WEBAPP_URL = envStr('WEBAPP_URL', BASE ? `${BASE.replace(/\/+$/, '')}/index.html` : '');
-if (/\.vercel\.app\/index\.html$/i.test(WEBAPP_URL)) {
-  WEBAPP_URL = WEBAPP_URL.replace(/\/index\.html$/i, '/');
-}
+const BASE = envStr('PUBLIC_BASE_URL', '').replace(/\/+$/, '');
+const BOT_PUBLIC_DOMAIN = envStr('BOT_PUBLIC_DOMAIN', '').replace(/\/+$/, '');
+let WEBAPP_URL = envStr('WEBAPP_URL', BASE ? `${BASE}/index.html` : '');
+const WEBAPP_ORIGIN = urlOrigin(WEBAPP_URL);
+const PUBLIC_ORIGIN = urlOrigin(BOT_PUBLIC_DOMAIN) || urlOrigin(BASE) || WEBAPP_ORIGIN;
 const WEB_HOST = envStr('WEB_SERVER_HOST', '0.0.0.0');
 const WEB_PORT = envInt('PORT', envInt('WEB_SERVER_PORT', 8080));
 const WEB_DIR = envStr('WEB_SERVER_DIR', 'webapp');
@@ -232,6 +242,7 @@ const SUPABASE_FETCH_RETRIES = envInt('SUPABASE_FETCH_RETRIES', 2);
 const SUPABASE_FETCH_RETRY_DELAY_MS = envInt('SUPABASE_FETCH_RETRY_DELAY_MS', 900);
 const SUPABASE_SYNC_DEBOUNCE_MS = envInt('SUPABASE_SYNC_DEBOUNCE_MS', 1200);
 const IMPORT_RELEASES_BACKUP_FILE = envStr('IMPORT_RELEASES_BACKUP_FILE', '');
+const OFFICIAL_SITE_URL = envStr('OFFICIAL_SITE_URL', PUBLIC_ORIGIN || '');
 
 const DB_FILE = 'releases.json';
 const MOD_DB_FILE = 'moderation_releases.json';
@@ -1577,12 +1588,15 @@ function keyboardCabinet() {
   ]};
 }
 function keyboardCommunity() {
-  return { inline_keyboard: [
+  const rows = [
     [{ text: 'Канал CXRNER MUSIC', url: 'https://t.me/cxrnermusic' }],
-    [{ text: 'Чат артистов', url: 'https://t.me/+oVmX3_dkyWJhNjJi' }],
-    [{ text: 'Официальный сайт', url: 'https://cxrnermusic.vercel.app/' }],
-    [{ text: '⬅️ Главное меню', callback_data: 'main' }]
-  ]};
+    [{ text: 'Чат артистов', url: 'https://t.me/+oVmX3_dkyWJhNjJi' }]
+  ];
+  if (OFFICIAL_SITE_URL) {
+    rows.push([{ text: 'Официальный сайт', url: OFFICIAL_SITE_URL }]);
+  }
+  rows.push([{ text: '⬅️ Главное меню', callback_data: 'main' }]);
+  return { inline_keyboard: rows };
 }
 function moderationKeyboard(uid, idx) {
   return { inline_keyboard: [
@@ -4528,16 +4542,20 @@ function startStaticServer() {
   if (!WEB_ENABLED) return;
   const root = path.resolve(ROOT, WEB_DIR);
   if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) return;
+  const configMiniappOrigin = urlOrigin(envStr('MINIAPP_ORIGIN', ''));
+  const webappOrigin = urlOrigin(WEBAPP_URL);
+  const baseOrigin = urlOrigin(BASE);
   const allowedOrigins = new Set(
     [
-      BASE,
-      envStr('MINIAPP_ORIGIN', ''),
-      'https://cxrnermusic.vercel.app',
+      baseOrigin,
+      configMiniappOrigin,
+      webappOrigin,
       'https://web.telegram.org'
     ]
       .map((v) => clean(v).replace(/\/+$/, ''))
       .filter(Boolean)
   );
+  let publicDomainLogged = false;
   function setCors(req, res) {
     const origin = clean(req.headers?.origin || '').replace(/\/+$/, '');
     if (origin && allowedOrigins.has(origin)) {
@@ -4592,6 +4610,18 @@ function startStaticServer() {
   };
   const srv = http.createServer(async (req, res) => {
     try {
+      if (!publicDomainLogged) {
+        const host = clean(req.headers['x-forwarded-host'] || req.headers.host || '');
+        const proto = clean(req.headers['x-forwarded-proto'] || 'https');
+        if (host) {
+          publicDomainLogged = true;
+          const detected = `${proto}://${host}`;
+          console.info(`[web] public domain detected: ${detected}`);
+          if (!PUBLIC_ORIGIN) {
+            console.info(`[web] tip: set PUBLIC_BASE_URL=${detected}`);
+          }
+        }
+      }
       const u = new URL(req.url || '/', 'http://localhost');
       if (u.pathname.startsWith('/api/')) {
         setCors(req, res);
@@ -4830,7 +4860,11 @@ async function loop() {
   console.info(`[bot] tg fetch: timeout=${TG_FETCH_TIMEOUT_MS}ms retries=${TG_FETCH_RETRIES}`);
   console.info(`[bot] webapp initData strict: ${WEBAPP_REQUIRE_INITDATA ? 'enabled' : 'disabled'}`);
   console.info(`[bot] moderation thread: ${MODERATION_THREAD_ID > 0 ? MODERATION_THREAD_ID : 'default'}`);
+  console.info(`[bot] public base: ${PUBLIC_ORIGIN || '(not configured)'}`);
   if (WEBAPP_URL) console.info(`[bot] webapp url: ${WEBAPP_URL}`);
+  if (!WEBAPP_URL) {
+    console.info('[bot] webapp url: (not configured, menu button can still be used via BotFather)');
+  }
   await verifyModerationChatAccess();
   try { await tg('deleteWebhook', { drop_pending_updates: false }); } catch {}
   process.on('SIGINT', () => { stopping = true; process.exit(0); });

@@ -663,7 +663,7 @@ def build_community_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Канал CXRNER MUSIC", url=CHANNEL)],
         [InlineKeyboardButton("Чат артистов", url=ARTISTS_CHAT)],
-        [InlineKeyboardButton("Официальный сайт", url="https://cxrnermusic.vercel.app/")],
+        [InlineKeyboardButton("Официальный сайт", url=PUBLIC_BASE_URL or "https://your-bothost-domain")],
         [InlineKeyboardButton("⬅️ Главное меню", callback_data='main')],
     ])
 

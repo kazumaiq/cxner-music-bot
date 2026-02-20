@@ -22,6 +22,12 @@ set BOT_TOKEN=123456:token
 node app.js
 ```
 
+Recommended for bothost:
+```bash
+set PUBLIC_BASE_URL=https://<your-bothost-domain>
+set WEBAPP_URL=https://<your-bothost-domain>/index.html
+```
+
 For production deployment on bothost, see `DEPLOY_BOTHOST.md`.
 
 ## App Modes (`app.js`)

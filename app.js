@@ -12,6 +12,8 @@ const ROOT_DIR = __dirname;
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const PORT = Number.parseInt(process.env.PORT || "3000", 10) || 3000;
 const APP_MODE = String(process.env.APP_MODE || "").trim().toLowerCase();
+const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || process.env.BOT_PUBLIC_DOMAIN || "").trim();
+const WEBAPP_URL = String(process.env.WEBAPP_URL || "").trim();
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -100,6 +102,10 @@ function startStaticServer() {
   server.listen(PORT, "0.0.0.0", () => {
     // eslint-disable-next-line no-console
     console.info(`[web] static mini app server started: http://0.0.0.0:${PORT} (dir: ${PUBLIC_DIR})`);
+    // eslint-disable-next-line no-console
+    console.info(`[web] public base: ${PUBLIC_BASE_URL || "(not configured)"}`);
+    // eslint-disable-next-line no-console
+    console.info(`[web] webapp url: ${WEBAPP_URL || "(not configured)"}`);
   });
 }
 
