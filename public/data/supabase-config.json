@@ -1,0 +1,9 @@
+﻿{
+  "url": "https://zjwlprncjmtbcdlypdwx.supabase.co",
+  "anonKey": "sb_publishable_HiLS40O7Q5V_Avcmcqg-YQ_tuHkBDhH",
+  "schema": "public",
+  "formsTable": "cxrner_forms",
+  "usersTable": "cxrner_users",
+  "releasesTable": "cxrner_public_releases",
+  "botApiBaseUrl": "https://cxrnermusic.vercel.app/miniapp"
+}

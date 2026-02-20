@@ -23,3 +23,16 @@ node app.js
 ```
 
 For production deployment on bothost, see `DEPLOY_BOTHOST.md`.
+
+## App Modes (`app.js`)
+By default, `node app.js` starts the Node bot (`node_bot.js`) to keep current behavior.
+
+- `APP_MODE` empty: bot mode (default)
+- `APP_MODE=miniapp` or `APP_MODE=static`: serves static Mini App from `public/`
+- `APP_MODE=both`: starts both static server and bot process
+
+BotHost static structure is included in `public/`:
+- `public/index.html`
+- `public/styles.css`
+- `public/app.js`
+- `public/assets/*`

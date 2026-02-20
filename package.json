@@ -1,0 +1,19 @@
+{
+  "name": "cxrner-music-bot",
+  "version": "1.0.0",
+  "description": "CXRNER MUSIC Telegram bot + Mini App",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "start:bot": "node app.js",
+    "start:miniapp": "APP_MODE=miniapp node app.js",
+    "dev": "nodemon app.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "nodemon": "^2.0.20"
+  }
+}
