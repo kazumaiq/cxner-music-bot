@@ -87,14 +87,14 @@ const TG_FETCH_TIMEOUT_MS = envInt('TG_FETCH_TIMEOUT_MS', 70000);
 const TG_FETCH_RETRIES = envInt('TG_FETCH_RETRIES', 2);
 const TG_FETCH_RETRY_DELAY_MS = envInt('TG_FETCH_RETRY_DELAY_MS', 800);
 const BASE = envStr('PUBLIC_BASE_URL', '');
-let WEBAPP_URL = envStr('WEBAPP_URL', BASE ? `${BASE.replace(/\/+$/, '')}/index.html` : '');
+let WEBAPP_URL = envStr('WEBAPP_URL', '');
 if (/\.vercel\.app\/index\.html$/i.test(WEBAPP_URL)) {
   WEBAPP_URL = WEBAPP_URL.replace(/\/index\.html$/i, '/');
 }
 const WEB_HOST = envStr('WEB_SERVER_HOST', '0.0.0.0');
 const WEB_PORT = envInt('PORT', envInt('WEB_SERVER_PORT', 8080));
 const WEB_DIR = envStr('WEB_SERVER_DIR', 'webapp');
-const WEB_ENABLED = envBool('ENABLE_WEB_SERVER', true);
+const WEB_ENABLED = envBool('ENABLE_WEB_SERVER', false);
 const WEBAPP_API_MAX_BODY_BYTES = envInt('WEBAPP_API_MAX_BODY_BYTES', 128 * 1024);
 const WEBAPP_API_ALLOWED_ORIGINS = envStr('WEBAPP_API_ALLOWED_ORIGINS', '*');
 const ADMIN_IDS = envIntList('ADMIN_IDS', [881379104]);
