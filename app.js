@@ -1,8 +1,8 @@
 "use strict";
 
-// bothost Mini App entrypoint:
-// - serves static files from ./public (required structure for Mini App hosting)
-// - can optionally start node_bot.js only when APP_MODE=bot
+// BotHost entrypoint:
+// - always serves static files from ./public for Mini App hosting
+// - starts node_bot.js by default, unless explicitly forced into static-only mode
 
 const http = require("node:http");
 const fs = require("node:fs");
@@ -110,14 +110,28 @@ function startStaticServer() {
 }
 
 function shouldStartNodeBot() {
+  const staticOnly = clean(process.env.STATIC_ONLY || process.env.MINIAPP_STATIC_MODE).toLowerCase();
+  if (["1", "true", "yes", "on"].includes(staticOnly)) {
+    return false;
+  }
+
   const appMode = clean(process.env.APP_MODE).toLowerCase();
-  return appMode === "bot";
+  if (appMode === "static") {
+    return false;
+  }
+  if (appMode === "bot") {
+    return true;
+  }
+
+  // BotHost free plan usually just runs `node app.js` with BOT_TOKEN only.
+  // In that setup the bot must start automatically without extra env flags.
+  return fs.existsSync(path.join(ROOT, "node_bot.js"));
 }
 
 startStaticServer();
 
 if (shouldStartNodeBot() && fs.existsSync(path.join(ROOT, "node_bot.js"))) {
-  console.info("[entry] APP_MODE=bot, starting node_bot.js");
+  console.info("[entry] starting app.js -> node_bot.js");
   try {
     require("./node_bot.js");
   } catch (error) {
