@@ -4,7 +4,6 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const dns = require('node:dns');
-const crypto = require('node:crypto');
 
 const ROOT = __dirname;
 const CFG = loadJson('deploy_config.json', {});
@@ -76,132 +75,6 @@ function envIntList(name, def = []) {
   return out.length ? [...new Set(out)] : def;
 }
 
-function urlOrigin(value) {
-  const raw = clean(value);
-  if (!raw) return '';
-  try {
-    return new URL(raw).origin;
-  } catch {
-    return '';
-  }
-}
-
-function stripHtml(input) {
-  return String(input ?? '')
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function sanitizeText(input, maxLen = 320) {
-  const txt = stripHtml(input);
-  if (!txt) return '';
-  if (txt.length <= maxLen) return txt;
-  return txt.slice(0, Math.max(0, maxLen)).trim();
-}
-
-function safeJson(value) {
-  try {
-    return JSON.parse(JSON.stringify(value));
-  } catch {
-    return null;
-  }
-}
-
-function sha1Hex(input) {
-  return crypto.createHash('sha1').update(String(input ?? ''), 'utf8').digest('hex');
-}
-
-function mapReleaseStatusToFormStatus(status) {
-  const canon = canonicalStatus(status);
-  if (canon === STATUS.APPROVED || canon === STATUS.PUBLISHED) return FORM_STATUS.APPROVED;
-  if (canon === STATUS.REJECTED || canon === STATUS.DELETED) return FORM_STATUS.REJECTED;
-  if (canon === STATUS.ON_UPLOAD) return FORM_STATUS.PENDING;
-  return FORM_STATUS.ON_MODERATION;
-}
-
-function mapFormStatusToReleaseStatus(formStatus) {
-  const st = clean(formStatus).toLowerCase();
-  if (st === FORM_STATUS.APPROVED) return STATUS.APPROVED;
-  if (st === FORM_STATUS.REJECTED) return STATUS.REJECTED;
-  if (st === FORM_STATUS.PENDING) return STATUS.ON_UPLOAD;
-  return STATUS.MODERATION;
-}
-
-function verifyTelegramInitData(initDataRaw, expectedUserId = '') {
-  const initData = clean(initDataRaw);
-  if (!initData) {
-    return { ok: false, reason: 'initData отсутствует' };
-  }
-  try {
-    const params = new URLSearchParams(initData);
-    const hash = clean(params.get('hash')).toLowerCase();
-    if (!hash) {
-      return { ok: false, reason: 'hash отсутствует в initData' };
-    }
-    params.delete('hash');
-    const pairs = [];
-    for (const [k, v] of params.entries()) {
-      pairs.push(`${k}=${v}`);
-    }
-    pairs.sort((a, b) => a.localeCompare(b));
-    const dataCheckString = pairs.join('\n');
-    const secretKey = crypto
-      .createHmac('sha256', 'WebAppData')
-      .update(TOKEN, 'utf8')
-      .digest();
-    const calc = crypto
-      .createHmac('sha256', secretKey)
-      .update(dataCheckString, 'utf8')
-      .digest('hex')
-      .toLowerCase();
-    if (calc !== hash) {
-      return { ok: false, reason: 'hash initData не прошёл проверку' };
-    }
-    const authDateRaw = clean(params.get('auth_date'));
-    const authDate = Number.parseInt(authDateRaw, 10);
-    if (Number.isFinite(authDate) && TELEGRAM_INITDATA_MAX_AGE_SEC > 0) {
-      const now = Math.floor(Date.now() / 1000);
-      if (Math.abs(now - authDate) > TELEGRAM_INITDATA_MAX_AGE_SEC) {
-        return { ok: false, reason: 'initData устарел' };
-      }
-    }
-    let user = null;
-    const rawUser = params.get('user');
-    if (rawUser) {
-      try { user = JSON.parse(rawUser); } catch { user = null; }
-    }
-    const initUserId = clean(user?.id ?? '');
-    if (expectedUserId && initUserId && initUserId !== String(expectedUserId)) {
-      return { ok: false, reason: 'telegram_id не совпадает с initData user.id' };
-    }
-    return { ok: true, user };
-  } catch (e) {
-    return { ok: false, reason: `ошибка проверки initData: ${clean(e?.message || e)}` };
-  }
-}
-
-function verifyWebappAntiSpam(userId, payloadJson) {
-  const uid = clean(userId);
-  if (!uid) return { ok: false, reason: 'user_id отсутствует' };
-  const payloadHash = sha1Hex(payloadJson);
-  const now = Date.now();
-  const prev = webappSubmitAntiSpam.get(uid);
-  if (prev && prev.hash === payloadHash && (now - prev.at) < WEBAPP_SUBMIT_THROTTLE_MS) {
-    return { ok: false, reason: 'дубликат анкеты отправлен слишком быстро' };
-  }
-  webappSubmitAntiSpam.set(uid, { hash: payloadHash, at: now });
-  if (webappSubmitAntiSpam.size > 3000) {
-    for (const [key, row] of webappSubmitAntiSpam.entries()) {
-      if ((now - Number(row?.at || 0)) > Math.max(60000, WEBAPP_SUBMIT_THROTTLE_MS * 10)) {
-        webappSubmitAntiSpam.delete(key);
-      }
-    }
-  }
-  return { ok: true };
-}
-
 const TOKEN = envStr('BOT_TOKEN') || envStr('TOKEN') || envStr('bot_token');
 if (!TOKEN) {
   console.error('BOT_TOKEN is missing.');
@@ -213,36 +86,30 @@ const TELEGRAM_API_BASE = envStr('TELEGRAM_API_BASE', 'https://api.telegram.org'
 const TG_FETCH_TIMEOUT_MS = envInt('TG_FETCH_TIMEOUT_MS', 70000);
 const TG_FETCH_RETRIES = envInt('TG_FETCH_RETRIES', 2);
 const TG_FETCH_RETRY_DELAY_MS = envInt('TG_FETCH_RETRY_DELAY_MS', 800);
-const BASE = envStr('PUBLIC_BASE_URL', '').replace(/\/+$/, '');
-const BOT_PUBLIC_DOMAIN = envStr('BOT_PUBLIC_DOMAIN', '').replace(/\/+$/, '');
-let WEBAPP_URL = envStr('WEBAPP_URL', BASE ? `${BASE}/index.html` : '');
-const WEBAPP_ORIGIN = urlOrigin(WEBAPP_URL);
-const PUBLIC_ORIGIN = urlOrigin(BOT_PUBLIC_DOMAIN) || urlOrigin(BASE) || WEBAPP_ORIGIN;
+const BASE = envStr('PUBLIC_BASE_URL', '');
+let WEBAPP_URL = envStr('WEBAPP_URL', BASE ? `${BASE.replace(/\/+$/, '')}/index.html` : '');
+if (/\.vercel\.app\/index\.html$/i.test(WEBAPP_URL)) {
+  WEBAPP_URL = WEBAPP_URL.replace(/\/index\.html$/i, '/');
+}
 const WEB_HOST = envStr('WEB_SERVER_HOST', '0.0.0.0');
 const WEB_PORT = envInt('PORT', envInt('WEB_SERVER_PORT', 8080));
 const WEB_DIR = envStr('WEB_SERVER_DIR', 'webapp');
 const WEB_ENABLED = envBool('ENABLE_WEB_SERVER', true);
+const WEBAPP_API_MAX_BODY_BYTES = envInt('WEBAPP_API_MAX_BODY_BYTES', 128 * 1024);
+const WEBAPP_API_ALLOWED_ORIGINS = envStr('WEBAPP_API_ALLOWED_ORIGINS', '*');
 const ADMIN_IDS = envIntList('ADMIN_IDS', [881379104]);
 const MODERATION_HEALTH_TTL_MS = envInt('MODERATION_HEALTH_TTL_MS', 180000);
-const TELEGRAM_INITDATA_MAX_AGE_SEC = envInt('TELEGRAM_INITDATA_MAX_AGE_SEC', 86400);
-const WEBAPP_SUBMIT_THROTTLE_MS = envInt('WEBAPP_SUBMIT_THROTTLE_MS', 7000);
-const WEBAPP_MAX_PAYLOAD_BYTES = envInt('WEBAPP_MAX_PAYLOAD_BYTES', 3900);
-const WEBAPP_REQUIRE_INITDATA = envBool('WEBAPP_REQUIRE_INITDATA', false);
 const SUPABASE_URL = envStr('SUPABASE_URL', '');
 const SUPABASE_SERVICE_ROLE_KEY = envStr('SUPABASE_SERVICE_ROLE_KEY', envStr('SUPABASE_KEY', ''));
 const SUPABASE_SCHEMA = envStr('SUPABASE_SCHEMA', 'public') || 'public';
 const SUPABASE_RELEASES_TABLE_RAW = envStr('SUPABASE_RELEASES_TABLE', 'cxrner_releases') || 'cxrner_releases';
 const SUPABASE_CABINET_TABLE_RAW = envStr('SUPABASE_CABINET_TABLE', 'cxrner_cabinet_users') || 'cxrner_cabinet_users';
-const SUPABASE_FORMS_TABLE_RAW = envStr('SUPABASE_FORMS_TABLE', 'cxrner_forms') || 'cxrner_forms';
-const SUPABASE_USERS_TABLE_RAW = envStr('SUPABASE_USERS_TABLE', 'cxrner_users') || 'cxrner_users';
-const SUPABASE_PUBLIC_RELEASES_TABLE_RAW = envStr('SUPABASE_PUBLIC_RELEASES_TABLE', 'cxrner_public_releases') || 'cxrner_public_releases';
 const SUPABASE_SYNC_ENABLED = !!SUPABASE_URL && !!SUPABASE_SERVICE_ROLE_KEY;
 const SUPABASE_FETCH_TIMEOUT_MS = envInt('SUPABASE_FETCH_TIMEOUT_MS', 25000);
 const SUPABASE_FETCH_RETRIES = envInt('SUPABASE_FETCH_RETRIES', 2);
 const SUPABASE_FETCH_RETRY_DELAY_MS = envInt('SUPABASE_FETCH_RETRY_DELAY_MS', 900);
 const SUPABASE_SYNC_DEBOUNCE_MS = envInt('SUPABASE_SYNC_DEBOUNCE_MS', 1200);
 const IMPORT_RELEASES_BACKUP_FILE = envStr('IMPORT_RELEASES_BACKUP_FILE', '');
-const OFFICIAL_SITE_URL = envStr('OFFICIAL_SITE_URL', PUBLIC_ORIGIN || '');
 
 const DB_FILE = 'releases.json';
 const MOD_DB_FILE = 'moderation_releases.json';
@@ -306,21 +173,6 @@ const SUPABASE_RELEASES_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_RELEASE
 const SUPABASE_CABINET_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_CABINET_TABLE_RAW)
   ? SUPABASE_CABINET_TABLE_RAW
   : 'cxrner_cabinet_users';
-const SUPABASE_FORMS_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_FORMS_TABLE_RAW)
-  ? SUPABASE_FORMS_TABLE_RAW
-  : 'cxrner_forms';
-const SUPABASE_USERS_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_USERS_TABLE_RAW)
-  ? SUPABASE_USERS_TABLE_RAW
-  : 'cxrner_users';
-const SUPABASE_PUBLIC_RELEASES_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_PUBLIC_RELEASES_TABLE_RAW)
-  ? SUPABASE_PUBLIC_RELEASES_TABLE_RAW
-  : 'cxrner_public_releases';
-const FORM_STATUS = {
-  PENDING: 'pending',
-  ON_MODERATION: 'on_moderation',
-  APPROVED: 'approved',
-  REJECTED: 'rejected'
-};
 const moderationHealth = {
   ok: null,
   checked_at: 0,
@@ -334,12 +186,6 @@ const moderationHealth = {
 let supabaseSyncInProgress = false;
 let supabaseSyncQueued = false;
 let supabaseSyncTimer = null;
-const webappSubmitAntiSpam = new Map();
-const supabaseFeatureState = {
-  forms: true,
-  users: true,
-  public_releases: true
-};
 ensureModDbShape();
 
 const API = `${TELEGRAM_API_BASE}/bot${TOKEN}`;
@@ -795,395 +641,20 @@ async function supabaseSelectAll(tableName, selectCols, orderExpr = '') {
   return out;
 }
 
-async function supabaseSelectWhere(tableName, selectCols, filters = [], orderExpr = '', limit = 0) {
-  const query = [];
-  query.push(`select=${encodeURIComponent(selectCols)}`);
-  for (const row of filters) {
-    const key = clean(row?.key);
-    const op = clean(row?.op || 'eq');
-    const value = clean(row?.value);
-    if (!key || !value) continue;
-    query.push(`${encodeURIComponent(key)}=${encodeURIComponent(`${op}.${value}`)}`);
-  }
-  if (orderExpr) query.push(`order=${encodeURIComponent(orderExpr)}`);
-  if (Number(limit) > 0) query.push(`limit=${Number(limit)}`);
-  const rows = await supabaseRequest(`${tableName}?${query.join('&')}`);
-  return Array.isArray(rows) ? rows : [];
-}
-
-function mapFormRowToCabinetRelease(row) {
-  const payload = row?.form_payload && typeof row.form_payload === 'object' ? row.form_payload : {};
-  return normalizeRelease({
-    type: normalizeType(payload?.type || row?.release_type) || 'сингл',
-    name: clean(payload?.name || row?.track_name || ''),
-    subname: clean(payload?.subname || '.'),
-    nick: clean(payload?.nick || row?.artist_name || ''),
-    fio: clean(payload?.fio || payload?.artist_name || row?.artist_name || ''),
-    date: clean(payload?.date || ''),
-    version: clean(payload?.version || 'Оригинал'),
-    genre: clean(payload?.genre || row?.genre || ''),
-    link: clean(payload?.link || '.'),
-    yandex: clean(payload?.yandex || '.'),
-    mat: clean(payload?.mat || 'Нет'),
-    promo: clean(payload?.promo || '.'),
-    comment: clean(payload?.comment || '.'),
-    tracklist: clean(payload?.tracklist || '.'),
-    tg: clean(payload?.tg || payload?.telegram_contact || ''),
-    status: mapFormStatusToReleaseStatus(row?.status || ''),
-    reject_reason: clean(row?.reject_reason || payload?.reject_reason || ''),
-    upc: clean(row?.upc || payload?.upc || ''),
-    submission_time: clean(row?.submission_key || row?.created_at || payload?.submission_time || ''),
-    moderation_time: clean(row?.updated_at || payload?.moderation_time || ''),
-    source: clean(payload?.source || row?.source || 'supabase'),
-    username: clean(payload?.username || row?.username || ''),
-    supabase_form_id: clean(row?.id || row?.form_id || '')
-  });
-}
-
-async function getCabinetSnapshot(userId) {
-  const uid = clean(userId);
-  const fallback = () => {
-    const local = Array.isArray(db[uid]) ? db[uid] : [];
-    const releases = local
-      .filter((rel) => rel && typeof rel === 'object' && !rel.user_deleted)
-      .map((rel) => normalizeRelease(rel));
-    const localProfile = cabUsers[uid] && typeof cabUsers[uid] === 'object' ? cabUsers[uid] : {};
-    return {
-      source: 'local',
-      cabinet_active: !!localProfile.approved,
-      profile: {
-        telegram_id: uid,
-        username: clean(localProfile.username || ''),
-        first_name: clean(localProfile.first_name || '')
-      },
-      releases
-    };
-  };
-
-  if (!SUPABASE_SYNC_ENABLED || !uid) {
-    return fallback();
-  }
-
-  try {
-    const tasks = [];
-    tasks.push(
-      supabaseFeatureState.users
-        ? supabaseSelectWhere(
-          SUPABASE_USERS_TABLE,
-          'telegram_id,username,first_name,cabinet_active,created_at,updated_at',
-          [{ key: 'telegram_id', value: uid }],
-          'updated_at.desc',
-          1
-        ).catch(() => [])
-        : Promise.resolve([])
-    );
-    tasks.push(
-      supabaseFeatureState.forms
-        ? supabaseSelectWhere(
-          SUPABASE_FORMS_TABLE,
-          'id,telegram_id,username,artist_name,track_name,genre,release_type,status,reject_reason,upc,submission_key,created_at,updated_at,source,form_payload',
-          [{ key: 'telegram_id', value: uid }],
-          'created_at.desc',
-          300
-        ).catch(() => [])
-        : Promise.resolve([])
-    );
-    const [userRows, formRows] = await Promise.all(tasks);
-    const userRow = Array.isArray(userRows) && userRows.length ? userRows[0] : null;
-    const releases = Array.isArray(formRows) ? formRows.map((row) => mapFormRowToCabinetRelease(row)) : [];
-    if (userRow || releases.length) {
-      return {
-        source: 'supabase',
-        cabinet_active: !!(userRow?.cabinet_active),
-        profile: {
-          telegram_id: uid,
-          username: clean(userRow?.username || ''),
-          first_name: clean(userRow?.first_name || '')
-        },
-        releases
-      };
-    }
-  } catch (e) {
-    console.error('[miniapp] cabinet supabase fetch failed:', clean(e?.message || e));
-  }
-  return fallback();
-}
-
-async function supabaseUpsertCabinetUser(userId, user, cabinetActive = true) {
-  if (!SUPABASE_SYNC_ENABLED) return false;
-  const uid = clean(userId);
-  if (!uid) return false;
-  const now = new Date().toISOString();
-  const username = clean(user?.username || '');
-  const firstName = clean(user?.first_name || '');
-  let ok = false;
-
-  if (supabaseFeatureState.users) {
-    try {
-      await supabaseRequest(`${SUPABASE_USERS_TABLE}?on_conflict=telegram_id`, {
-        method: 'POST',
-        headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
-        body: [{
-          telegram_id: uid,
-          username,
-          first_name: firstName,
-          cabinet_active: !!cabinetActive,
-          created_at: now,
-          updated_at: now
-        }]
-      });
-      ok = true;
-    } catch (e) {
-      const errText = clean(e?.message || e);
-      console.error('[supabase] users upsert failed:', errText);
-      if (isSupabaseSchemaError(e)) disableSupabaseFeature('users', errText);
-    }
-  }
-
-  try {
-    await supabaseRequest(`${SUPABASE_CABINET_TABLE}?on_conflict=user_id`, {
-      method: 'POST',
-      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
-      body: [{
-        user_id: uid,
-        profile: {
-          approved: !!cabinetActive,
-          activated_at: now,
-          username,
-          first_name: firstName
-        },
-        updated_at: now
-      }]
-    });
-    ok = true;
-  } catch (e) {
-    console.error('[supabase] cabinet upsert failed:', clean(e?.message || e));
-  }
-
-  return ok;
-}
-
-function buildSupabaseFormRow(userId, user, rel, status = FORM_STATUS.PENDING) {
-  const uid = clean(userId);
-  const rowStatus = clean(status) || FORM_STATUS.PENDING;
-  const now = new Date().toISOString();
-  const relSafe = rel && typeof rel === 'object' ? rel : {};
-  const type = normalizeType(relSafe.type) === 'альбом' ? 'album' : 'single';
-  const payload = safeJson({
-    ...relSafe,
-    telegram_id: uid,
-    artist_name: sanitizeText(relSafe.nick || relSafe.artist_name || '', 130),
-    track_name: sanitizeText(relSafe.name || relSafe.track_name || '', 160),
-    genre: sanitizeText(relSafe.genre || '', 90),
-    release_type: type
-  }) || {};
-  const submissionKey = clean(relSafe.submission_time || now);
-  return {
-    telegram_id: uid,
-    username: clean(user?.username || relSafe.username || ''),
-    artist_name: sanitizeText(relSafe.nick || relSafe.artist_name || '', 130),
-    track_name: sanitizeText(relSafe.name || relSafe.track_name || '', 160),
-    genre: sanitizeText(relSafe.genre || '', 90),
-    release_type: type,
-    status: rowStatus,
-    reject_reason: clean(relSafe.reject_reason || ''),
-    upc: clean(relSafe.upc || ''),
-    moderation_message_id: Number(relSafe.moderation_message_id || 0) || null,
-    source: clean(relSafe.source || 'mini_app'),
-    submission_key: submissionKey,
-    form_payload: payload,
-    created_at: submissionKey,
-    updated_at: now
-  };
-}
-
-async function supabaseInsertForm(userId, user, rel, status = FORM_STATUS.PENDING) {
-  if (!SUPABASE_SYNC_ENABLED) return '';
-  if (!supabaseFeatureState.forms) return '';
-  const row = buildSupabaseFormRow(userId, user, rel, status);
-  try {
-    const inserted = await supabaseRequest(SUPABASE_FORMS_TABLE, {
-      method: 'POST',
-      headers: { Prefer: 'return=representation' },
-      body: [row]
-    });
-    const first = Array.isArray(inserted) ? inserted[0] : null;
-    const formId = clean(first?.id || first?.form_id || '');
-    console.info(
-      `[supabase] form inserted: telegram_id=${row.telegram_id || '-'} id=${formId || '-'} status=${row.status}`
-    );
-    return formId;
-  } catch (e) {
-    const errText = clean(e?.message || e);
-    console.error('[supabase] form insert failed:', errText);
-    if (isSupabaseSchemaError(e)) disableSupabaseFeature('forms', errText);
-    return '';
-  }
-}
-
-function isSupabaseSchemaError(error) {
-  const txt = clean(error?.message || error).toLowerCase();
-  return txt.includes(' does not exist')
-    || txt.includes('relation ')
-    || txt.includes('column ')
-    || txt.includes('schema cache')
-    || txt.includes('42p01')
-    || txt.includes('42703');
-}
-
-function disableSupabaseFeature(featureKey, reason) {
-  if (!Object.prototype.hasOwnProperty.call(supabaseFeatureState, featureKey)) return;
-  if (!supabaseFeatureState[featureKey]) return;
-  supabaseFeatureState[featureKey] = false;
-  console.error(`[supabase] feature disabled (${featureKey}): ${clean(reason || 'schema error')}`);
-}
-
-async function supabasePatchFormByRelease(userId, rel, patch = {}) {
-  if (!SUPABASE_SYNC_ENABLED || !rel || typeof rel !== 'object') return false;
-  if (!supabaseFeatureState.forms) return false;
-  const uid = clean(userId);
-  const now = new Date().toISOString();
-  const formId = clean(rel.supabase_form_id || '');
-  const body = {
-    ...patch,
-    updated_at: now
-  };
-  if (Object.prototype.hasOwnProperty.call(body, 'status')) {
-    body.status = clean(body.status || FORM_STATUS.ON_MODERATION);
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'reject_reason')) {
-    body.reject_reason = clean(body.reject_reason || '');
-  }
-  if (Object.prototype.hasOwnProperty.call(body, 'upc')) {
-    body.upc = clean(body.upc || '');
-  }
-
-  try {
-    if (formId) {
-      await supabaseRequest(`${SUPABASE_FORMS_TABLE}?id=eq.${encodeURIComponent(formId)}`, {
-        method: 'PATCH',
-        headers: { Prefer: 'return=minimal' },
-        body
-      });
-      return true;
-    }
-    const key = clean(rel.submission_time || '');
-    if (!uid || !key) return false;
-    await supabaseRequest(
-      `${SUPABASE_FORMS_TABLE}?telegram_id=eq.${encodeURIComponent(uid)}&submission_key=eq.${encodeURIComponent(key)}`,
-      {
-        method: 'PATCH',
-        headers: { Prefer: 'return=minimal' },
-        body
-      }
-    );
-    return true;
-  } catch (e) {
-    const errText = clean(e?.message || e);
-    console.error('[supabase] form patch failed:', errText);
-    if (isSupabaseSchemaError(e)) disableSupabaseFeature('forms', errText);
-    return false;
-  }
-}
-
-async function supabaseUpsertApprovedRelease(userId, rel) {
-  if (!SUPABASE_SYNC_ENABLED || !rel || typeof rel !== 'object') return false;
-  if (!supabaseFeatureState.public_releases) return false;
-  const uid = clean(userId);
-  if (!uid) return false;
-  const now = new Date().toISOString();
-  const formId = clean(rel.supabase_form_id || `${uid}:${clean(rel.submission_time || now)}`);
-  const row = {
-    form_id: formId,
-    telegram_id: uid,
-    username: clean(rel.username || ''),
-    artist_name: sanitizeText(rel.nick || '', 130),
-    track_name: sanitizeText(rel.name || '', 160),
-    genre: sanitizeText(rel.genre || '', 90),
-    release_type: normalizeType(rel.type) === 'альбом' ? 'album' : 'single',
-    status: 'approved',
-    approved_at: clean(rel.moderation_time || now),
-    updated_at: now,
-    release_data: safeJson(rel) || {}
-  };
-  try {
-    await supabaseRequest(`${SUPABASE_PUBLIC_RELEASES_TABLE}?on_conflict=form_id`, {
-      method: 'POST',
-      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
-      body: [row]
-    });
-    return true;
-  } catch (e) {
-    const errText = clean(e?.message || e);
-    console.error('[supabase] approved release upsert failed:', errText);
-    if (isSupabaseSchemaError(e)) disableSupabaseFeature('public_releases', errText);
-    return false;
-  }
-}
-
-async function supabaseDeleteApprovedRelease(userId, rel) {
-  if (!SUPABASE_SYNC_ENABLED || !rel || typeof rel !== 'object') return false;
-  if (!supabaseFeatureState.public_releases) return false;
-  const uid = clean(userId);
-  const formId = clean(rel.supabase_form_id || `${uid}:${clean(rel.submission_time || '')}`);
-  if (!formId) return false;
-  try {
-    await supabaseRequest(`${SUPABASE_PUBLIC_RELEASES_TABLE}?form_id=eq.${encodeURIComponent(formId)}`, {
-      method: 'DELETE',
-      headers: { Prefer: 'return=minimal' }
-    });
-    return true;
-  } catch (e) {
-    const errText = clean(e?.message || e);
-    console.error('[supabase] approved release delete failed:', errText);
-    if (isSupabaseSchemaError(e)) disableSupabaseFeature('public_releases', errText);
-    return false;
-  }
-}
-
 async function hydrateFromSupabase() {
   if (!SUPABASE_SYNC_ENABLED) return;
   try {
-    const releasePromise = supabaseSelectAll(
-      SUPABASE_RELEASES_TABLE,
-      'user_id,release_idx,release_data,updated_at',
-      'user_id.asc,release_idx.asc'
-    );
-    const cabinetPromise = supabaseSelectAll(
-      SUPABASE_CABINET_TABLE,
-      'user_id,profile,updated_at',
-      'user_id.asc'
-    );
-    const formsPromise = supabaseFeatureState.forms
-      ? supabaseSelectAll(
-        SUPABASE_FORMS_TABLE,
-        'id,telegram_id,username,artist_name,track_name,genre,release_type,status,reject_reason,upc,moderation_message_id,submission_key,source,created_at,updated_at,form_payload',
-        'created_at.asc'
-      ).catch((e) => {
-        const errText = clean(e?.message || e);
-        console.error('[supabase] forms hydrate failed:', errText);
-        if (isSupabaseSchemaError(e)) disableSupabaseFeature('forms', errText);
-        return [];
-      })
-      : Promise.resolve([]);
-    const usersPromise = supabaseFeatureState.users
-      ? supabaseSelectAll(
-        SUPABASE_USERS_TABLE,
-        'telegram_id,username,first_name,cabinet_active,created_at,updated_at',
-        'updated_at.asc'
-      ).catch((e) => {
-        const errText = clean(e?.message || e);
-        console.error('[supabase] users hydrate failed:', errText);
-        if (isSupabaseSchemaError(e)) disableSupabaseFeature('users', errText);
-        return [];
-      })
-      : Promise.resolve([]);
-
-    const [releaseRows, cabinetRows, formsRows, userRows] = await Promise.all([
-      releasePromise,
-      cabinetPromise,
-      formsPromise,
-      usersPromise
+    const [releaseRows, cabinetRows] = await Promise.all([
+      supabaseSelectAll(
+        SUPABASE_RELEASES_TABLE,
+        'user_id,release_idx,release_data,updated_at',
+        'user_id.asc,release_idx.asc'
+      ),
+      supabaseSelectAll(
+        SUPABASE_CABINET_TABLE,
+        'user_id,profile,updated_at',
+        'user_id.asc'
+      )
     ]);
 
     const remoteDb = {};
@@ -1195,47 +666,11 @@ async function hydrateFromSupabase() {
       const rel = normalizeRelease(row?.release_data || {});
       remoteDb[uid][idx] = rel;
     }
-
-    for (const row of formsRows || []) {
-      const uid = clean(row?.telegram_id || '');
-      if (!uid) continue;
-      if (!Array.isArray(remoteDb[uid])) remoteDb[uid] = [];
-      const payload = row?.form_payload && typeof row.form_payload === 'object' ? row.form_payload : {};
-      const rel = normalizeRelease({
-        ...payload,
-        type: normalizeType(payload?.type || row?.release_type) || 'сингл',
-        name: clean(payload?.name || row?.track_name || ''),
-        nick: clean(payload?.nick || row?.artist_name || ''),
-        genre: clean(payload?.genre || row?.genre || ''),
-        tg: clean(payload?.tg || payload?.telegram_contact || ''),
-        status: mapFormStatusToReleaseStatus(row?.status || ''),
-        reject_reason: clean(row?.reject_reason || payload?.reject_reason || ''),
-        upc: clean(row?.upc || payload?.upc || ''),
-        moderation_message_id: Number(row?.moderation_message_id || payload?.moderation_message_id || 0) || 0,
-        submission_time: clean(row?.submission_key || row?.created_at || payload?.submission_time || ''),
-        moderation_time: clean(row?.updated_at || payload?.moderation_time || ''),
-        source: clean(payload?.source || row?.source || 'mini_app'),
-        username: clean(payload?.username || row?.username || ''),
-        supabase_form_id: clean(row?.id || row?.form_id || '')
-      });
-      remoteDb[uid].push(rel);
-    }
-
     const remoteCab = {};
     for (const row of cabinetRows) {
       const uid = String(row?.user_id || '');
       if (!uid) continue;
       remoteCab[uid] = row?.profile && typeof row.profile === 'object' ? row.profile : {};
-    }
-    for (const row of userRows || []) {
-      const uid = clean(row?.telegram_id || '');
-      if (!uid) continue;
-      remoteCab[uid] = {
-        approved: !!row?.cabinet_active,
-        activated_at: clean(row?.created_at || ''),
-        username: clean(row?.username || ''),
-        first_name: clean(row?.first_name || '')
-      };
     }
 
     mergeReleasesIntoDb(remoteDb, 'supabase');
@@ -1244,9 +679,7 @@ async function hydrateFromSupabase() {
     saveJson(CAB_FILE, cabUsers);
     exportReleases();
     exportCabinet();
-    console.info(
-      `[supabase] hydrated: releases=${releaseRows.length}, cabinet=${cabinetRows.length}, forms=${formsRows.length}, users=${userRows.length}`
-    );
+    console.info(`[supabase] hydrated: releases=${releaseRows.length}, cabinet=${cabinetRows.length}`);
   } catch (e) {
     console.error('[supabase] hydrate failed:', clean(e?.message || e));
   }
@@ -1291,66 +724,6 @@ function buildSupabaseCabinetRows() {
   return rows;
 }
 
-function buildSupabaseFormRows() {
-  const rows = [];
-  for (const [uid, listRaw] of Object.entries(db || {})) {
-    const list = Array.isArray(listRaw) ? listRaw : [];
-    for (let idx = 0; idx < list.length; idx += 1) {
-      const rel = normalizeRelease(list[idx] || {});
-      const row = buildSupabaseFormRow(uid, { username: rel.username || '' }, rel, mapReleaseStatusToFormStatus(rel.status));
-      row.form_payload = safeJson(rel) || {};
-      row.moderation_message_id = Number(rel.moderation_message_id || 0) || null;
-      rows.push(row);
-    }
-  }
-  return rows;
-}
-
-function buildSupabaseUserRows() {
-  const rows = [];
-  const now = new Date().toISOString();
-  for (const [uid, profileRaw] of Object.entries(cabUsers || {})) {
-    const profile = profileRaw && typeof profileRaw === 'object' ? profileRaw : {};
-    rows.push({
-      telegram_id: String(uid),
-      username: clean(profile.username || ''),
-      first_name: clean(profile.first_name || ''),
-      cabinet_active: !!profile.approved,
-      created_at: clean(profile.activated_at || now),
-      updated_at: now
-    });
-  }
-  return rows;
-}
-
-function buildSupabaseApprovedReleaseRows() {
-  const rows = [];
-  const now = new Date().toISOString();
-  for (const [uid, listRaw] of Object.entries(db || {})) {
-    const list = Array.isArray(listRaw) ? listRaw : [];
-    for (let idx = 0; idx < list.length; idx += 1) {
-      const rel = normalizeRelease(list[idx] || {});
-      const st = canonicalStatus(rel.status);
-      if (![STATUS.APPROVED, STATUS.PUBLISHED].includes(st)) continue;
-      const formId = clean(rel.supabase_form_id || `${uid}:${clean(rel.submission_time || idx)}`);
-      rows.push({
-        form_id: formId,
-        telegram_id: String(uid),
-        username: clean(rel.username || ''),
-        artist_name: sanitizeText(rel.nick || '', 130),
-        track_name: sanitizeText(rel.name || '', 160),
-        genre: sanitizeText(rel.genre || '', 90),
-        release_type: normalizeType(rel.type) === 'альбом' ? 'album' : 'single',
-        status: 'approved',
-        approved_at: clean(rel.moderation_time || now),
-        updated_at: now,
-        release_data: safeJson(rel) || {}
-      });
-    }
-  }
-  return rows;
-}
-
 async function supabaseUpsertRows(tableName, rows, chunkSize = 250) {
   if (!rows.length) return;
   for (let i = 0; i < rows.length; i += chunkSize) {
@@ -1375,42 +748,6 @@ async function supabaseUpsertCabinetRows(tableName, rows, chunkSize = 250) {
   }
 }
 
-async function supabaseUpsertFormRows(tableName, rows, chunkSize = 250) {
-  if (!rows.length) return;
-  for (let i = 0; i < rows.length; i += chunkSize) {
-    const chunk = rows.slice(i, i + chunkSize);
-    await supabaseRequest(`${tableName}?on_conflict=telegram_id,submission_key`, {
-      method: 'POST',
-      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
-      body: chunk
-    });
-  }
-}
-
-async function supabaseUpsertUserRows(tableName, rows, chunkSize = 250) {
-  if (!rows.length) return;
-  for (let i = 0; i < rows.length; i += chunkSize) {
-    const chunk = rows.slice(i, i + chunkSize);
-    await supabaseRequest(`${tableName}?on_conflict=telegram_id`, {
-      method: 'POST',
-      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
-      body: chunk
-    });
-  }
-}
-
-async function supabaseUpsertApprovedRows(tableName, rows, chunkSize = 250) {
-  if (!rows.length) return;
-  for (let i = 0; i < rows.length; i += chunkSize) {
-    const chunk = rows.slice(i, i + chunkSize);
-    await supabaseRequest(`${tableName}?on_conflict=form_id`, {
-      method: 'POST',
-      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
-      body: chunk
-    });
-  }
-}
-
 async function syncSupabaseNow(reason = '') {
   if (!SUPABASE_SYNC_ENABLED) return;
   if (supabaseSyncInProgress) {
@@ -1421,45 +758,11 @@ async function syncSupabaseNow(reason = '') {
   try {
     const relRows = buildSupabaseReleaseRows();
     const cabRows = buildSupabaseCabinetRows();
-    const formRows = supabaseFeatureState.forms ? buildSupabaseFormRows() : [];
-    const userRows = supabaseFeatureState.users ? buildSupabaseUserRows() : [];
-    const approvedRows = supabaseFeatureState.public_releases ? buildSupabaseApprovedReleaseRows() : [];
-
-    await supabaseUpsertRows(SUPABASE_RELEASES_TABLE, relRows);
-    await supabaseUpsertCabinetRows(SUPABASE_CABINET_TABLE, cabRows);
-
-    if (supabaseFeatureState.forms) {
-      try {
-        await supabaseUpsertFormRows(SUPABASE_FORMS_TABLE, formRows);
-      } catch (e) {
-        const errText = clean(e?.message || e);
-        console.error('[supabase] forms sync failed:', errText);
-        if (isSupabaseSchemaError(e)) disableSupabaseFeature('forms', errText);
-      }
-    }
-    if (supabaseFeatureState.users) {
-      try {
-        await supabaseUpsertUserRows(SUPABASE_USERS_TABLE, userRows);
-      } catch (e) {
-        const errText = clean(e?.message || e);
-        console.error('[supabase] users sync failed:', errText);
-        if (isSupabaseSchemaError(e)) disableSupabaseFeature('users', errText);
-      }
-    }
-    if (supabaseFeatureState.public_releases) {
-      try {
-        await supabaseUpsertApprovedRows(SUPABASE_PUBLIC_RELEASES_TABLE, approvedRows);
-      } catch (e) {
-        const errText = clean(e?.message || e);
-        console.error('[supabase] public releases sync failed:', errText);
-        if (isSupabaseSchemaError(e)) disableSupabaseFeature('public_releases', errText);
-      }
-    }
-
-    console.info(
-      `[supabase] synced (${reason || 'manual'}): releases=${relRows.length}, cabinet=${cabRows.length}` +
-      ` forms=${formRows.length} users=${userRows.length} approved=${approvedRows.length}`
-    );
+    await Promise.all([
+      supabaseUpsertRows(SUPABASE_RELEASES_TABLE, relRows),
+      supabaseUpsertCabinetRows(SUPABASE_CABINET_TABLE, cabRows)
+    ]);
+    console.info(`[supabase] synced (${reason || 'manual'}): releases=${relRows.length}, cabinet=${cabRows.length}`);
   } catch (e) {
     console.error('[supabase] sync failed:', clean(e?.message || e));
   } finally {
@@ -1588,15 +891,12 @@ function keyboardCabinet() {
   ]};
 }
 function keyboardCommunity() {
-  const rows = [
+  return { inline_keyboard: [
     [{ text: 'Канал CXRNER MUSIC', url: 'https://t.me/cxrnermusic' }],
-    [{ text: 'Чат артистов', url: 'https://t.me/+oVmX3_dkyWJhNjJi' }]
-  ];
-  if (OFFICIAL_SITE_URL) {
-    rows.push([{ text: 'Официальный сайт', url: OFFICIAL_SITE_URL }]);
-  }
-  rows.push([{ text: '⬅️ Главное меню', callback_data: 'main' }]);
-  return { inline_keyboard: rows };
+    [{ text: 'Чат артистов', url: 'https://t.me/+oVmX3_dkyWJhNjJi' }],
+    [{ text: 'Официальный сайт', url: 'https://cxrnermusic.vercel.app/' }],
+    [{ text: '⬅️ Главное меню', callback_data: 'main' }]
+  ]};
 }
 function moderationKeyboard(uid, idx) {
   return { inline_keyboard: [
@@ -2095,26 +1395,6 @@ async function applyReleaseStatus(uid, idx, status, moderator, opts = {}) {
   saveDb();
   syncModerationMirror(uid, idx, rel);
   saveModDb();
-
-  const formStatus = mapReleaseStatusToFormStatus(canonStatus);
-  await supabasePatchFormByRelease(uid, rel, {
-    status: formStatus,
-    reject_reason: canonStatus === STATUS.REJECTED ? clean(rel.reject_reason || '') : '',
-    upc: clean(rel.upc || ''),
-    moderation_message_id: Number(rel.moderation_message_id || 0) || null,
-    form_payload: safeJson(rel) || {}
-  });
-  if (canonStatus === STATUS.APPROVED || canonStatus === STATUS.PUBLISHED) {
-    await supabaseUpsertApprovedRelease(uid, rel);
-  } else if ([STATUS.REJECTED, STATUS.DELETED].includes(canonStatus)) {
-    await supabaseDeleteApprovedRelease(uid, rel);
-  }
-
-  console.info(
-    `[MODERATION] status change: user_id=${uid} idx=${idx} ${prevStatus} -> ${canonStatus}` +
-    ` by=${clean(moderator?.username || moderator?.id || '-')}`
-  );
-
   await refreshModerationMessage(uid, idx, rel, opts.fallbackMessageId);
   await notifyArtistAboutRelease(uid, rel, canonStatus);
   return { ok: true, rel, uid, idx, status: canonStatus };
@@ -2210,13 +1490,6 @@ async function handleModerationReplyMessage(msg) {
     rel.upc_assigned_by = String(msg.from.id);
     pushReleaseInteraction(rel, 'upc_assigned', msg.from, { upc, note: 'UPC присвоен в модерации' });
     saveDb();
-    await supabasePatchFormByRelease(uid, rel, {
-      upc,
-      form_payload: safeJson(rel) || {}
-    });
-    if ([STATUS.APPROVED, STATUS.PUBLISHED].includes(canonicalStatus(rel.status))) {
-      await supabaseUpsertApprovedRelease(uid, rel);
-    }
     syncModerationMirror(uid, idx, rel);
     saveModDb();
     await refreshModerationMessage(uid, idx, rel, fallbackMessageId);
@@ -2256,119 +1529,53 @@ async function handleModerationReplyMessage(msg) {
   return false;
 }
 function parseWebappPayload(payload) {
-  const src = payload && typeof payload === 'object' ? payload : {};
-  let action = sanitizeText(src.action || '', 64).toLowerCase();
-  const hasForm = src.form && typeof src.form === 'object';
-  if (!action && hasForm) action = 'webapp_release_submit';
-
-  let form = hasForm ? src.form : null;
-  if (!form && src && typeof src === 'object' && (src.type || src.name || src.track_title || src.track_name)) {
-    action = action || 'webapp_release_submit';
-    form = src;
+  let action = clean(payload?.action);
+  const hasForm = payload?.form && typeof payload.form === 'object';
+  if (!action && hasForm) action = 'submit_release';
+  let form = hasForm ? payload.form : null;
+  if (!form && payload && typeof payload === 'object' && (payload.type || payload.name || payload.track_title)) {
+    action = action || 'submit_release';
+    form = payload;
   }
-
-  const telegramId = clean(
-    src.telegram_id ||
-    src.telegramId ||
-    src.user_id ||
-    src.userId ||
-    src.user?.id ||
-    form?.telegram_id ||
-    form?.telegramId
-  );
-
-  const initData = clean(src.init_data || src.initData || src.tg_init_data || '');
-  const requestId = sanitizeText(src.request_id || src.requestId || '', 72);
-  const source = sanitizeText(src.source || '', 40) || 'mini_app';
-  if (!form) {
-    return {
-      action,
-      form: null,
-      telegram_id: telegramId,
-      init_data: initData,
-      request_id: requestId,
-      source
+  if (!form) return { action, form: null };
+  if (!form.type && (form.artist_name || form.track_title || form.release_date || form.telegram_contact)) {
+    let date = clean(form.release_date || form.date);
+    if (date.includes('-')) {
+      const p = date.split('-');
+      if (p.length === 3) date = `${p[2]}.${p[1]}.${p[0]}`;
+    }
+    const tr = clean(form.release_type || form.type || 'single').toLowerCase();
+    const type = ['альбом', 'album'].includes(tr) ? 'альбом' : 'сингл';
+    form = {
+      type,
+      name: form.track_title || form.name || '',
+      subname: form.subname || '.',
+      has_lyrics: form.has_lyrics || form.lyrics || 'Нет, это инструментал',
+      nick: form.artist_name || form.nick || '',
+      fio: form.artist_name || form.fio || '',
+      date,
+      version: form.version || 'Оригинал',
+      genre: form.genre || '',
+      link: form.link || form.files_link || form.audio_link || '.',
+      yandex: form.yandex || form.yandex_link || '.',
+      mat: form.mat || 'Нет',
+      promo: form.promo || '.',
+      comment: form.comment || '.',
+      tracklist: form.tracklist || '.',
+      tg: form.telegram_contact || form.contact || form.tg || ''
     };
   }
-
-  let date = sanitizeText(form.release_date || form.date || '', 32);
-  if (date.includes('-')) {
-    const p = date.split('-');
-    if (p.length === 3) date = `${p[2]}.${p[1]}.${p[0]}`;
-  }
-  const trRaw = sanitizeText(form.release_type || form.type || 'single', 20).toLowerCase();
-  const type = ['альбом', 'album'].includes(trRaw) ? 'альбом' : 'сингл';
-  const artistName = sanitizeText(form.artist_name || form.nick || '', 130);
-  const trackName = sanitizeText(form.track_name || form.track_title || form.name || '', 160);
-  const genre = sanitizeText(form.genre || '', 90);
-  const tgContact = sanitizeText(form.telegram_contact || form.contact || form.tg || '', 180);
-
-  const normalizedForm = {
-    type,
-    name: trackName,
-    subname: sanitizeText(form.subname || '.', 120) || '.',
-    has_lyrics: sanitizeText(form.has_lyrics || form.lyrics || 'Нет, это инструментал', 64),
-    nick: artistName,
-    fio: sanitizeText(form.fio || artistName, 180),
-    date,
-    version: sanitizeText(form.version || 'Оригинал', 120) || 'Оригинал',
-    genre,
-    link: sanitizeText(form.link || form.files_link || form.audio_link || '.', 500) || '.',
-    yandex: sanitizeText(form.yandex || form.yandex_link || '.', 500) || '.',
-    mat: sanitizeText(form.mat || 'Нет', 20) || 'Нет',
-    promo: sanitizeText(form.promo || '.', 1200) || '.',
-    comment: sanitizeText(form.comment || '.', 1200) || '.',
-    tracklist: sanitizeText(form.tracklist || '.', 2400) || '.',
-    tg: tgContact,
-    artist_name: artistName,
-    track_name: trackName,
-    release_type: type === 'альбом' ? 'album' : 'single',
-    telegram_id: clean(form.telegram_id || form.telegramId || telegramId),
-    source
-  };
-
-  return {
-    action,
-    form: normalizedForm,
-    telegram_id: telegramId,
-    init_data: initData,
-    request_id: requestId,
-    source
-  };
+  return { action, form };
 }
-function validateForm(form, envelope = {}) {
+function validateForm(form) {
   const errors = [];
-  const source = clean(envelope?.source || form?.source || '').toLowerCase();
-  const action = clean(envelope?.action || '').toLowerCase();
-  const requireTelegramId = source === 'mini_app'
-    || source === 'webapp'
-    || action === 'webapp_release_submit'
-    || action === 'submit_release';
-  const artistName = sanitizeText(form?.artist_name || form?.nick || '', 130);
-  const trackName = sanitizeText(form?.track_name || form?.name || '', 160);
-  const genreRaw = sanitizeText(form?.genre || '', 90);
-  const releaseTypeRaw = sanitizeText(form?.release_type || form?.type || '', 20).toLowerCase();
-  const releaseType = ['album', 'альбом'].includes(releaseTypeRaw)
-    ? 'album'
-    : (['single', 'сингл'].includes(releaseTypeRaw) ? 'single' : '');
-  const telegramId = clean(form?.telegram_id || envelope?.telegram_id || '');
-
-  if (!artistName) errors.push('Поле «Artist Name» (artist_name) обязательно.');
-  if (!trackName) errors.push('Поле «Track Name» (track_name) обязательно.');
-  if (!genreRaw) errors.push('Поле «Genre» (genre) обязательно.');
-  if (!releaseType) errors.push('Поле «Release Type» (release_type) должно быть single или album.');
-  if (requireTelegramId && !telegramId) errors.push('Поле «telegram_id» обязательно.');
-  if (requireTelegramId && telegramId && !/^\d{4,20}$/.test(telegramId)) {
-    errors.push('Поле «telegram_id» содержит неверный формат.');
-  }
-
   const type = normalizeType(form?.type);
   if (!type) errors.push('Укажите тип релиза: сингл или альбом.');
-  const name = sanitizeText(form?.name || trackName, 160); if (!name) errors.push('Поле «Название релиза» обязательно.');
+  const name = clean(form?.name); if (!name) errors.push('Поле «Название релиза» обязательно.');
   const subname = clean(form?.subname) || '.';
-  const hasLyrics = sanitizeText(form?.has_lyrics, 64); if (!hasLyrics) errors.push('Укажите, есть ли слова в релизе.');
-  const nick = sanitizeText(form?.nick || artistName, 130); if (!nick) errors.push('Поле «Ник исполнителя» обязательно.');
-  const fio = sanitizeText(form?.fio, 180); if (!fio) errors.push('Поле «ФИО исполнителя» обязательно.');
+  const hasLyrics = clean(form?.has_lyrics); if (!hasLyrics) errors.push('Укажите, есть ли слова в релизе.');
+  const nick = clean(form?.nick); if (!nick) errors.push('Поле «Ник исполнителя» обязательно.');
+  const fio = clean(form?.fio); if (!fio) errors.push('Поле «ФИО исполнителя» обязательно.');
   const date = clean(form?.date);
   if (!date) errors.push('Укажите дату релиза в формате ДД.ММ.ГГГГ.');
   else {
@@ -2381,11 +1588,11 @@ function validateForm(form, envelope = {}) {
     }
   }
   const version = clean(form?.version) || 'Оригинал';
-  const genre = genreRaw || clean(form?.genre); if (!genre) errors.push('Поле «Жанр» обязательно.');
-  const link = sanitizeText(form?.link, 500);
+  const genre = clean(form?.genre); if (!genre) errors.push('Поле «Жанр» обязательно.');
+  const link = clean(form?.link);
   if (!link) errors.push('Добавьте ссылку на файлы.');
   else if (!isHttpUrl(link)) errors.push('Ссылка на файлы должна начинаться с http:// или https://.');
-  let yandex = sanitizeText(form?.yandex, 500);
+  let yandex = clean(form?.yandex);
   const yandexLower = yandex.toLowerCase();
   if (!yandex || ['-', 'нет', 'none'].includes(yandexLower)) {
     yandex = '.';
@@ -2395,57 +1602,26 @@ function validateForm(form, envelope = {}) {
     errors.push('Поле «Яндекс Музыка» должно быть URL, точкой или вариантом «Создать новую карточку».');
   }
   const mat = clean(form?.mat); if (!mat) errors.push('Укажите, есть ли ненормативная лексика.');
-  const promo = sanitizeText(form?.promo, 1200) || '.';
-  const comment = sanitizeText(form?.comment, 1200) || '.';
-  let tracklist = sanitizeText(form?.tracklist, 2400) || '.';
+  const promo = clean(form?.promo) || '.';
+  const comment = clean(form?.comment) || '.';
+  let tracklist = clean(form?.tracklist) || '.';
   if (type !== 'альбом') tracklist = '.';
   if (type === 'альбом' && tracklist === '.') errors.push('Для альбома заполните Tracklist.');
-  const tgContact = sanitizeText(form?.tg, 180); if (!tgContact) errors.push('Укажите контакт Telegram.');
-  return {
-    errors,
-    data: {
-      type,
-      name,
-      subname,
-      has_lyrics: hasLyrics,
-      nick,
-      fio,
-      date,
-      version,
-      genre,
-      link,
-      yandex,
-      mat,
-      promo,
-      comment,
-      tracklist,
-      tg: tgContact,
-      artist_name: artistName || nick,
-      track_name: trackName || name,
-      release_type: releaseType || (type === 'альбом' ? 'album' : 'single'),
-      telegram_id: telegramId
-    }
-  };
+  const tgContact = clean(form?.tg); if (!tgContact) errors.push('Укажите контакт Telegram.');
+  return { errors, data: { type, name, subname, has_lyrics: hasLyrics, nick, fio, date, version, genre, link, yandex, mat, promo, comment, tracklist, tg: tgContact } };
 }
 
 async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_app') {
   await ensureModerationHealth(false);
   db[uid] = Array.isArray(db[uid]) ? db[uid] : [];
   const idx = db[uid].length;
-  const submissionTime = new Date().toISOString();
   const rel = {
     ...releaseData,
     status: STATUS.ON_UPLOAD,
     source,
-    submission_time: submissionTime,
+    submission_time: new Date().toISOString(),
     username: user?.username || ''
   };
-
-  if (SUPABASE_SYNC_ENABLED) {
-    const formId = await supabaseInsertForm(uid, user, rel, FORM_STATUS.PENDING);
-    if (formId) rel.supabase_form_id = formId;
-  }
-
   let orig = fmtForm(user, uid, rel);
   let moderationText = buildModerationText(uid, { ...rel, moderation_original_text: orig });
   if (moderationText.length > MODERATION_TEXT_MAX) {
@@ -2481,10 +1657,6 @@ async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_
         ` error=${msg || 'unknown'}`
       );
       await verifyModerationChatAccess(true);
-      await supabasePatchFormByRelease(uid, rel, {
-        status: FORM_STATUS.PENDING,
-        form_payload: safeJson(rel) || {}
-      });
       throw new Error(hint ? `${msg}. ${hint}` : msg);
     }
   }
@@ -2493,16 +1665,6 @@ async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_
   rel.moderation_original_text = orig;
   db[uid].push(rel);
   saveDb();
-
-  await supabasePatchFormByRelease(uid, rel, {
-    status: FORM_STATUS.ON_MODERATION,
-    moderation_message_id: Number(sent.message_id || 0) || null,
-    form_payload: safeJson(rel) || {}
-  });
-
-  console.info(
-    `[WEBAPP] release accepted to moderation: user_id=${uid} idx=${idx} msg_id=${Number(sent.message_id || 0)}`
-  );
 
   ensureModDbShape();
   modDb.moderation_messages.push({ ...rel, user_id: uid, idx, message_id: sent.message_id });
@@ -2590,7 +1752,10 @@ async function sendFormStep(chatId, uid) {
     return;
   }
   if (s.step === 'name') { await sendText(chatId, '🎵 Название релиза:'); return; }
-  if (s.step === 'subname') { await sendText(chatId, '✨ Саб-название (если нет, отправьте точку "."):'); return; }
+  if (s.step === 'subname') {
+    await sendText(chatId, '✨ Саб-название (если нет, отправьте точку "."):\nℹ️ Саб-название - это дополнительная подпись к названию релиза. Пример: Remix, Slowed, Instrumental, Extended Mix.');
+    return;
+  }
   if (s.step === 'has_lyrics') {
     await sendText(chatId, '🗣 Есть слова в релизе?', {
       reply_markup: {
@@ -2605,14 +1770,32 @@ async function sendFormStep(chatId, uid) {
     });
     return;
   }
-  if (s.step === 'nick') { await sendText(chatId, '🎤 Ник исполнителя:'); return; }
-  if (s.step === 'fio') { await sendText(chatId, '🪪 ФИО исполнителя:'); return; }
-  if (s.step === 'date') { await sendText(chatId, '📅 Дата релиза в формате ДД.ММ.ГГГГ:'); return; }
-  if (s.step === 'version') { await sendText(chatId, '🧩 Версия релиза (или "Оригинал"):'); return; }
-  if (s.step === 'genre') { await sendText(chatId, '🎚 Жанр:'); return; }
-  if (s.step === 'link') { await sendText(chatId, '🔗 Ссылка на файлы (http/https):'); return; }
+  if (s.step === 'nick') {
+    await sendText(chatId, '🎤 Ник исполнителя:\nℹ️ Это сценическое имя артиста, которое будет отображаться на стриминговых сервисах.');
+    return;
+  }
+  if (s.step === 'fio') {
+    await sendText(chatId, '🪪 ФИО исполнителя:\nℹ️ Укажите настоящее имя исполнителя. Это требуется для документов и авторских прав.');
+    return;
+  }
+  if (s.step === 'date') {
+    await sendText(chatId, '📅 Дата релиза в формате ДД.ММ.ГГГГ:\nℹ️ Укажите дату выхода релиза на площадках минимум за 4 дня.');
+    return;
+  }
+  if (s.step === 'version') {
+    await sendText(chatId, '🧩 Версия релиза:\nℹ️ Если это обычная версия трека - напишите "-". Если другая версия: Remix, Slowed, Sped Up, Instrumental.');
+    return;
+  }
+  if (s.step === 'genre') {
+    await sendText(chatId, '🏷 Жанр:\nℹ️ Укажите основной жанр трека. Примеры: Phonk, Brazilian Funk, Hip-Hop, Trap, EDM.');
+    return;
+  }
+  if (s.step === 'link') {
+    await sendText(chatId, '🔗 Ссылка на файлы (http/https):\nℹ️ В ссылке на Яндекс/Google Диск должна быть папка со следующими файлами:\n1. Обложка релиза в формате JPG 3000x3000\n2. Трек в формате WAV (44100Hz, 16 или 24 bit)\n3. Скриншот(ы) проекта как доказательство авторства');
+    return;
+  }
   if (s.step === 'yandex') {
-    await sendText(chatId, '🟡 Ссылка на карточку артиста в Яндекс Музыке.\nОтправьте URL, точку "." или нажмите кнопку ниже.', {
+    await sendText(chatId, '🟡 Ссылка на карточку артиста в Яндекс Музыке\nℹ️ Отправьте ссылку на существующую карточку артиста. Если карточки нет - нажмите кнопку "Создать новую карточку".', {
       reply_markup: {
         inline_keyboard: [
           [{ text: '➕ Создать новую карточку', callback_data: 'form_yandex_new_card' }],
@@ -2623,7 +1806,7 @@ async function sendFormStep(chatId, uid) {
     return;
   }
   if (s.step === 'mat') {
-    await sendText(chatId, '⚠️ Есть ненормативная лексика?', {
+    await sendText(chatId, '⚠️ Есть ненормативная лексика?\nℹ️ Выберите "Да", если в тексте трека присутствует мат. Если трек чистый - выберите "Нет".', {
       reply_markup: {
         inline_keyboard: [
           [
@@ -2636,17 +1819,26 @@ async function sendFormStep(chatId, uid) {
     });
     return;
   }
-  if (s.step === 'promo') { await sendText(chatId, '📢 Промо-текст (или точка "."):'); return; }
-  if (s.step === 'comment') { await sendText(chatId, '💬 Комментарий (или точка "."):'); return; }
+  if (s.step === 'promo') {
+    await sendText(chatId, '📢 Промо-текст (или точка "."):\nℹ️ Это описание релиза для редакторов стриминговых сервисов. Кратко опишите стиль трека, атмосферу и для каких плейлистов он подходит.');
+    return;
+  }
+  if (s.step === 'comment') {
+    await sendText(chatId, '💬 Комментарий (или точка "."):\nℹ️ Дополнительная информация для модераторов. Можно оставить пустым.');
+    return;
+  }
   if (s.step === 'tracklist') { await sendText(chatId, '📋 Tracklist для альбома (обязательно):'); return; }
-  if (s.step === 'tg') { await sendText(chatId, '📱 Контакт Telegram для связи (@username):'); return; }
+  if (s.step === 'tg') {
+    await sendText(chatId, '📱 Контакт Telegram для связи (@username):\nℹ️ Укажите ваш Telegram username для связи с менеджером.');
+    return;
+  }
   if (s.step === 'confirm') {
     const preview = fmtForm(s.user, s.uid, s.form);
     await sendText(chatId, `🧾 <b>Проверьте анкету</b>\n\n${preview}`, {
       parse_mode: 'HTML',
       reply_markup: {
         inline_keyboard: [
-          [{ text: '✅ Отправить в модерацию', callback_data: 'form_send' }],
+          [{ text: '✅ Отправить в модерацию', callback_data: 'form_warn' }],
           [{ text: '✖️ Отмена', callback_data: 'form_cancel' }]
         ]
       }
@@ -2659,6 +1851,27 @@ function parseYesNoText(value) {
   if (['да', 'yes', 'y', '1'].includes(v)) return 'yes';
   if (['нет', 'no', 'n', '0'].includes(v)) return 'no';
   return '';
+}
+
+function releaseWarningText() {
+  return [
+    '⚠️ <b>Перед отправкой релиза внимательно проверьте анкету.</b>',
+    'Отправляя релиз в модерацию, вы подтверждаете, что:',
+    '• все данные указаны корректно',
+    '• файлы соответствуют требованиям',
+    '• обложка соответствует правилам площадок',
+    '• у вас есть права на использование всех материалов релиза',
+    '',
+    'Если данные указаны неверно или файлы не соответствуют требованиям:',
+    '• релиз может быть отклонён модерацией',
+    '• релиз может быть снят с отгрузки',
+    '• релиз может не выйти в указанную дату',
+    '• релиз может быть удалён до исправления ошибок',
+    '',
+    'Команда CXRNER MUSIC не несёт ответственности за задержку выхода релиза, если анкета заполнена неверно или файлы не соответствуют требованиям.',
+    '',
+    'Отправляя релиз, вы подтверждаете согласие с правилами загрузки и пользовательским соглашением.'
+  ].join('\n');
 }
 
 async function startTextForm(chatId, uid, user) {
@@ -2861,8 +2074,21 @@ async function handleFormCallback(query, data) {
     return true;
   }
 
-  if (data === 'form_send') {
-    const vr = validateForm(s.form, { source: 'bot_text', telegram_id: uid });
+  if (data === 'form_warn') {
+    await sendText(query.message.chat.id, releaseWarningText(), {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '✅ Подтвердить и отправить', callback_data: 'form_send_confirm' }],
+          [{ text: '❌ Отмена', callback_data: 'form_cancel' }]
+        ]
+      }
+    });
+    return true;
+  }
+
+  if (data === 'form_send_confirm') {
+    const vr = validateForm(s.form);
     if (vr.errors.length) {
       const list = vr.errors.slice(0, 5).map((e) => `• ${esc(e)}`).join('\n');
       await sendText(query.message.chat.id, `❌ Анкета не прошла проверку:\n${list}`);
@@ -3249,6 +2475,13 @@ async function handlePromoCallback(query, data) {
   return false;
 }
 
+async function sendWebappButton(chatId) {
+  let text = '🎵 Mini App открывается через системную кнопку «Приложение» внизу чата (настроено через BotFather).';
+  if (hasValidWebAppUrl()) {
+    text += `\n\nРучная ссылка: ${esc(WEBAPP_URL)}`;
+  }
+  await sendText(chatId, text);
+}
 function getUserReleaseEntries(uid, includeDeleted = false) {
   const list = Array.isArray(db?.[uid]) ? db[uid] : [];
   const out = [];
@@ -3810,93 +3043,238 @@ async function verifyModerationChatAccess(force = false) {
   }
 }
 
+function getCorsOrigin(originRaw = '') {
+  const origin = clean(originRaw);
+  const allowRaw = clean(WEBAPP_API_ALLOWED_ORIGINS);
+  if (!allowRaw || allowRaw === '*') return '*';
+  const allowList = allowRaw
+    .split(/[,\s;]+/)
+    .map((v) => clean(v))
+    .filter(Boolean);
+  if (!allowList.length) return '*';
+  if (origin && allowList.includes(origin)) return origin;
+  return allowList[0];
+}
+
+function writeJson(res, statusCode, payload, headers = {}) {
+  const body = JSON.stringify(payload ?? {});
+  res.writeHead(statusCode, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    ...headers
+  });
+  res.end(body);
+}
+
+function readRequestBody(req, maxBytes = WEBAPP_API_MAX_BODY_BYTES) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        const err = new Error(`Body too large (${size} > ${maxBytes})`);
+        err.statusCode = 413;
+        reject(err);
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
+function parseInitDataUser(initDataRaw) {
+  try {
+    const params = new URLSearchParams(clean(initDataRaw));
+    const rawUser = params.get('user');
+    if (!rawUser) return null;
+    const parsed = JSON.parse(rawUser);
+    if (!parsed || !parsed.id) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function resolveWebAppApiUser(body) {
+  const direct = body?.user && typeof body.user === 'object' ? body.user : null;
+  const fromUnsafe = body?.initDataUnsafe?.user && typeof body.initDataUnsafe.user === 'object'
+    ? body.initDataUnsafe.user
+    : null;
+  const fromInitData = parseInitDataUser(body?.initData || '');
+  const picked = direct?.id ? direct : (fromUnsafe?.id ? fromUnsafe : fromInitData);
+  if (!picked || !picked.id) return null;
+  const n = Number.parseInt(String(picked.id), 10);
+  return {
+    id: Number.isFinite(n) ? n : picked.id,
+    username: clean(picked.username || ''),
+    first_name: clean(picked.first_name || ''),
+    last_name: clean(picked.last_name || '')
+  };
+}
+
+function extractWebAppPayload(body) {
+  const raw = body?.payload ?? body?.data ?? body;
+  if (typeof raw === 'string') {
+    const txt = clean(raw);
+    if (!txt) return { payload: null, raw: '' };
+    try {
+      return { payload: JSON.parse(txt), raw: txt };
+    } catch {
+      return { payload: null, raw: txt };
+    }
+  }
+  if (raw && typeof raw === 'object') {
+    try {
+      return { payload: raw, raw: JSON.stringify(raw) };
+    } catch {
+      return { payload: raw, raw: '[object]' };
+    }
+  }
+  return { payload: null, raw: '' };
+}
+
+function findRecentDuplicateRelease(uid, data, windowMs = 5 * 60 * 1000) {
+  const list = Array.isArray(db?.[uid]) ? db[uid] : [];
+  if (!list.length) return null;
+  const now = Date.now();
+  const keyType = normalizeType(data?.type);
+  const keyName = clean(data?.name).toLowerCase();
+  const keyDate = clean(data?.date);
+  const keyLink = clean(data?.link).toLowerCase();
+  if (!keyType || !keyName || !keyDate || !keyLink) return null;
+  for (let idx = list.length - 1; idx >= 0; idx -= 1) {
+    const rel = list[idx];
+    if (!rel || typeof rel !== 'object') continue;
+    if (rel.user_deleted) continue;
+    const ts = parseIsoTime(rel.submission_time || rel.moderation_time || '');
+    if (ts > 0 && (now - ts) > windowMs) break;
+    if (normalizeType(rel.type) !== keyType) continue;
+    if (clean(rel.name).toLowerCase() !== keyName) continue;
+    if (clean(rel.date) !== keyDate) continue;
+    if (clean(rel.link).toLowerCase() !== keyLink) continue;
+    return { idx, rel };
+  }
+  return null;
+}
+
+async function handleWebAppApiSubmit(body, reqMeta = {}) {
+  const actor = resolveWebAppApiUser(body);
+  if (!actor?.id) {
+    const err = new Error('telegram user not found in payload/initData');
+    err.statusCode = 400;
+    throw err;
+  }
+  const uid = String(actor.id);
+  const extracted = extractWebAppPayload(body);
+  if (!extracted.payload || typeof extracted.payload !== 'object') {
+    const err = new Error('invalid payload json');
+    err.statusCode = 400;
+    throw err;
+  }
+  const parsed = parseWebappPayload(extracted.payload);
+  const action = clean(parsed.action);
+  if (action && !['webapp_release_submit', 'submit_release', ''].includes(action)) {
+    const err = new Error(`unsupported action: ${action}`);
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!parsed.form || typeof parsed.form !== 'object') {
+    const err = new Error('form object is required');
+    err.statusCode = 400;
+    throw err;
+  }
+  const vr = validateForm(parsed.form);
+  if (vr.errors.length) {
+    const err = new Error(vr.errors.slice(0, 8).join(' | '));
+    err.statusCode = 422;
+    err.validationErrors = vr.errors;
+    throw err;
+  }
+
+  const duplicate = findRecentDuplicateRelease(uid, vr.data);
+  if (duplicate) {
+    console.info(`[WEBAPP_API] duplicate skipped: uid=${uid} idx=${duplicate.idx} ip=${clean(reqMeta.ip || '-')}`);
+    return { ok: true, duplicate: true, uid, idx: duplicate.idx, status: canonicalStatus(duplicate.rel?.status) };
+  }
+
+  const out = await submitReleaseToModeration(actor, uid, vr.data, 'mini_app_api');
+  console.info(
+    `[WEBAPP_API] accepted: uid=${uid} idx=${out.idx} msg_id=${Number(out.rel?.moderation_message_id || 0)}` +
+    ` ip=${clean(reqMeta.ip || '-')}`
+  );
+  return {
+    ok: true,
+    duplicate: false,
+    uid,
+    idx: out.idx,
+    moderation_message_id: Number(out.rel?.moderation_message_id || 0)
+  };
+}
+
+async function handleWebAppApiTest(body, reqMeta = {}) {
+  const actor = resolveWebAppApiUser(body);
+  const uid = String(actor?.id || '');
+  const txt = clean(body?.text || body?.data || 'test анкета');
+  const text =
+    '🧪 <b>WEBAPP TEST</b>\n' +
+    `text: <code>${esc(txt)}</code>\n` +
+    `from: ${actor?.username ? `@${esc(actor.username)}` : 'unknown'}\n` +
+    `uid: <code>${esc(uid || '-')}</code>\n` +
+    `ip: <code>${esc(clean(reqMeta.ip || '-'))}</code>`;
+  const sent = await tg('sendMessage', moderationPayload({
+    text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true
+  }));
+  if (uid) {
+    try {
+      await sendText(Number(uid), `✅ Тест Mini App получен. message_id: <code>${Number(sent.message_id || 0)}</code>`);
+    } catch {}
+  }
+  return { ok: true, message_id: Number(sent.message_id || 0), uid };
+}
+
 async function processWebAppData(msg) {
   const raw = msg.web_app_data?.data || '';
-  const rawBytes = Buffer.byteLength(raw, 'utf8');
   const uid = String(msg.from?.id || '');
-  const username = clean(msg.from?.username || '');
-  console.info(
-    `[WEBAPP] data received: user_id=${uid || '-'} username=@${username || '-'} bytes=${rawBytes}`
-  );
-  if (!raw || rawBytes > WEBAPP_MAX_PAYLOAD_BYTES) {
-    await sendText(msg.chat.id, '❌ Payload Mini App слишком большой или пустой.');
+  const user = msg.from;
+  if (!clean(raw)) {
+    console.warn(`[WEBAPP] empty payload user_id=${uid || '-'}`);
+    await sendText(msg.chat.id, '❌ Пустые данные Mini App. Повторите отправку.');
     return;
   }
-  const rawLower = clean(raw).toLowerCase();
-  if (rawLower.startsWith('test')) {
-    const healthOk = await verifyModerationChatAccess(true);
-    const diagText =
-      'ТЕСТ АНКЕТА ПОЛУЧЕНА:\n\n' +
-      `${raw}\n\n` +
-      `telegram_id: ${uid || '-'}\n` +
-      `username: @${username || '-'}\n` +
-      `WEB_APP_DATA received: yes\n` +
-      `handler: processWebAppData()\n` +
-      `moderation_chat_id: ${MOD_CHAT}\n` +
-      `moderation_chat_access: ${healthOk ? 'ok' : `failed (${moderationHealth.reason || 'unknown'})`}\n` +
-      `bot_status: ${moderationHealth.bot_status || '-'}\n` +
-      `bot_is_admin: ${['administrator', 'creator'].includes(clean(moderationHealth.bot_status).toLowerCase())}`;
+  if (clean(raw).toLowerCase() === 'test анкета' || clean(raw).toLowerCase() === 'test anketa') {
     try {
       const sent = await tg('sendMessage', moderationPayload({
-        text: diagText,
+        text:
+          '🧪 <b>ТЕСТ WEB_APP_DATA</b>\n' +
+          `from: ${user?.username ? `@${esc(user.username)}` : 'unknown'}\n` +
+          `uid: <code>${esc(uid)}</code>\n` +
+          `payload: <code>${esc(raw)}</code>`,
+        parse_mode: 'HTML',
         disable_web_page_preview: true
       }));
-      console.info(`[WEBAPP_DIAG] test forwarded to moderation: message_id=${Number(sent.message_id || 0)}`);
-      await sendText(msg.chat.id, '✅ Тест WEB_APP_DATA получен и отправлен в модерацию.');
+      await sendText(msg.chat.id, `✅ Тест WEB_APP_DATA получен. message_id: <code>${Number(sent.message_id || 0)}</code>`);
     } catch (e) {
-      const err = shortTgError(e);
-      console.error(`[WEBAPP_DIAG] moderation send failed: ${err}`);
-      await sendText(msg.chat.id, `❌ WEB_APP_DATA получен, но отправка в модерацию не удалась: <code>${esc(err)}</code>`);
+      console.error('[WEBAPP] test forwarding failed:', clean(e?.message || e));
+      await sendText(msg.chat.id, `❌ Тест не отправлен в модерацию: <code>${esc(shortTgError(e))}</code>`);
     }
     return;
   }
   let payload;
   try { payload = JSON.parse(raw); }
-  catch (e) {
-    console.error(`[WEBAPP] invalid json payload: ${clean(e?.message || e)}`);
+  catch {
+    console.warn(`[WEBAPP] non-json payload user_id=${uid || '-'} raw=${raw.slice(0, 140)}`);
     await sendText(msg.chat.id, '❌ Не удалось распознать данные Mini App.');
     return;
   }
-  const user = msg.from;
   const parsed = parseWebappPayload(payload);
   const action = parsed.action;
-  console.info(`[WEBAPP] action=${action || '-'} user_id=${uid || '-'} bytes=${rawBytes}`);
-
-  if (!uid) {
-    await sendText(msg.chat.id, '❌ Не удалось определить Telegram ID отправителя.');
-    return;
-  }
-
-  const envelopeTgId = clean(parsed.telegram_id || '');
-  if (envelopeTgId && envelopeTgId !== uid) {
-    console.error(`[WEBAPP] blocked spoof attempt: payload_tg=${envelopeTgId} sender_tg=${uid}`);
-    await sendText(msg.chat.id, '❌ Ошибка безопасности: telegram_id в payload не совпадает с отправителем.');
-    return;
-  }
-
-  const shouldValidateInitData = ['webapp_release_submit', 'submit_release', 'cabinet_activate', 'cabinet_sync_request'].includes(action);
-  const initData = clean(parsed.init_data || '');
-  if (shouldValidateInitData && !initData) {
-    if (WEBAPP_REQUIRE_INITDATA) {
-      await sendText(msg.chat.id, '❌ Ошибка безопасности: Mini App initData не передан.');
-      return;
-    }
-    console.warn(`[WEBAPP] initData missing: user_id=${uid} action=${action || '-'} (fallback mode)`);
-  }
-
-  if (initData) {
-    const initDataCheck = verifyTelegramInitData(initData, uid);
-    if (!initDataCheck.ok) {
-      if (WEBAPP_REQUIRE_INITDATA) {
-        console.error(`[WEBAPP] initData validation failed: user_id=${uid} reason=${initDataCheck.reason}`);
-        await sendText(msg.chat.id, `❌ Ошибка проверки Mini App: ${esc(initDataCheck.reason)}.`);
-        return;
-      }
-      console.warn(
-        `[WEBAPP] initData validation warning: user_id=${uid} reason=${initDataCheck.reason} (fallback mode)`
-      );
-    }
-  }
+  console.info(`[WEBAPP] action=${action || '-'} user_id=${uid || '-'} bytes=${Buffer.byteLength(raw, 'utf8')}`);
 
   if (action === 'cabinet_activate') {
     cabUsers[uid] = {
@@ -3906,15 +3284,7 @@ async function processWebAppData(msg) {
       first_name: user?.first_name || ''
     };
     saveCab();
-    await supabaseUpsertCabinetUser(uid, user, true);
-    console.info(`[WEBAPP] cabinet activated: user_id=${uid}`);
     await sendText(msg.chat.id, '✅ <b>Личный кабинет активирован</b>');
-    return;
-  }
-
-  if (action === 'cabinet_sync_request') {
-    await supabaseUpsertCabinetUser(uid, user, true);
-    console.info(`[WEBAPP] cabinet sync requested: user_id=${uid}`);
     return;
   }
 
@@ -3923,18 +3293,12 @@ async function processWebAppData(msg) {
     return;
   }
 
-  const antiSpam = verifyWebappAntiSpam(uid, raw);
-  if (!antiSpam.ok) {
-    await sendText(msg.chat.id, '⚠️ Анкета уже была отправлена только что. Подождите несколько секунд и попробуйте снова.');
-    return;
-  }
-
   if (!parsed.form || typeof parsed.form !== 'object') {
     await sendText(msg.chat.id, '❌ Ошибка данных формы. Отправьте анкету еще раз.');
     return;
   }
 
-  const vr = validateForm(parsed.form, parsed);
+  const vr = validateForm(parsed.form);
   if (vr.errors.length) {
     const list = vr.errors.slice(0, 8).map((e) => `• ${esc(e)}`).join('\n');
     await sendText(msg.chat.id, `❌ <b>Анкета Mini App не отправлена</b>\n\n${list}`);
@@ -3942,17 +3306,8 @@ async function processWebAppData(msg) {
   }
 
   try {
-    const out = await submitReleaseToModeration(user, uid, vr.data, 'mini_app');
-    await supabaseUpsertCabinetUser(uid, user, true);
-    console.info(
-      `[WEBAPP] release stored: user_id=${uid} idx=${out?.idx ?? '-'} name=${sanitizeText(vr.data?.name || '', 80)}`
-    );
-    await sendText(
-      msg.chat.id,
-      '✅ <b>Анкета отправлена в модерацию</b>\n\n' +
-      `🎵 ${esc(vr.data?.name || 'Релиз')}\n` +
-      `👤 ${esc(vr.data?.nick || '—')}`
-    );
+    await submitReleaseToModeration(user, uid, vr.data, 'mini_app');
+    await sendText(msg.chat.id, '✅ <b>Анкета отправлена в модерацию</b>');
   } catch (e) {
     console.error('[WEBAPP] submit failed:', e.message || e);
     await sendText(
@@ -4060,10 +3415,6 @@ async function runNewModerationSweep(moderator) {
     }
 
     syncModerationMirror(item.uid, item.idx, rel);
-    await supabasePatchFormByRelease(item.uid, rel, {
-      status: FORM_STATUS.PENDING,
-      form_payload: safeJson(rel) || {}
-    });
     marked += 1;
   }
   saveDb();
@@ -4281,6 +3632,10 @@ async function onMessage(msg) {
     resetAllSessions(uid);
     setBroadcastSession(uid, false);
     await sendText(chatId, hadAny ? 'Текущая анкета отменена.' : 'Нет активной анкеты.');
+    return;
+  }
+  if (text === '/app' || text === 'Открыть приложение') {
+    await sendWebappButton(chatId);
     return;
   }
   if (text === '/my' || text === '/my_releases') {
@@ -4504,7 +3859,10 @@ async function onCallback(query) {
   if (data === 'menu_services') { await edit('<b>Сервисы</b>\n\nВыберите действие:', keyboardServices()); return; }
   if (data === 'menu_cabinet') { await edit('<b>Кабинет</b>\n\nВыберите действие:', keyboardCabinet()); return; }
   if (data === 'menu_community') { await edit('<b>Комьюнити</b>\n\nОфициальные площадки CXRNER MUSIC:', keyboardCommunity()); return; }
-  if (data === 'open_app' || data === 'report_app') return;
+  if (data === 'open_app' || data === 'report_app') {
+    await sendText(chatId, 'Mini App открывается через кнопку «Приложение» внизу чата.');
+    return;
+  }
   if (data === 'report' || data === 'report_text') {
     await startTextForm(chatId, String(query.from.id), query.from);
     return;
@@ -4542,61 +3900,6 @@ function startStaticServer() {
   if (!WEB_ENABLED) return;
   const root = path.resolve(ROOT, WEB_DIR);
   if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) return;
-  const configMiniappOrigin = urlOrigin(envStr('MINIAPP_ORIGIN', ''));
-  const webappOrigin = urlOrigin(WEBAPP_URL);
-  const baseOrigin = urlOrigin(BASE);
-  const allowedOrigins = new Set(
-    [
-      baseOrigin,
-      configMiniappOrigin,
-      webappOrigin,
-      'https://web.telegram.org'
-    ]
-      .map((v) => clean(v).replace(/\/+$/, ''))
-      .filter(Boolean)
-  );
-  let publicDomainLogged = false;
-  function setCors(req, res) {
-    const origin = clean(req.headers?.origin || '').replace(/\/+$/, '');
-    if (origin && allowedOrigins.has(origin)) {
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Vary', 'Origin');
-    }
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization');
-  }
-  function sendJson(res, statusCode, data) {
-    res.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(data));
-  }
-  function readJsonBody(req, maxBytes = 64 * 1024) {
-    return new Promise((resolve, reject) => {
-      let size = 0;
-      const chunks = [];
-      req.on('data', (chunk) => {
-        size += chunk.length;
-        if (size > maxBytes) {
-          reject(new Error('payload too large'));
-          req.destroy();
-          return;
-        }
-        chunks.push(chunk);
-      });
-      req.on('end', () => {
-        try {
-          const raw = Buffer.concat(chunks).toString('utf8').trim();
-          if (!raw) {
-            resolve({});
-            return;
-          }
-          resolve(JSON.parse(raw));
-        } catch (e) {
-          reject(new Error(`invalid json: ${clean(e?.message || e)}`));
-        }
-      });
-      req.on('error', (e) => reject(e));
-    });
-  }
   const ct = {
     '.html': 'text/html; charset=utf-8',
     '.css': 'text/css; charset=utf-8',
@@ -4610,161 +3913,65 @@ function startStaticServer() {
   };
   const srv = http.createServer(async (req, res) => {
     try {
-      if (!publicDomainLogged) {
-        const host = clean(req.headers['x-forwarded-host'] || req.headers.host || '');
-        const proto = clean(req.headers['x-forwarded-proto'] || 'https');
-        if (host) {
-          publicDomainLogged = true;
-          const detected = `${proto}://${host}`;
-          console.info(`[web] public domain detected: ${detected}`);
-          if (!PUBLIC_ORIGIN) {
-            console.info(`[web] tip: set PUBLIC_BASE_URL=${detected}`);
-          }
-        }
-      }
       const u = new URL(req.url || '/', 'http://localhost');
-      if (u.pathname.startsWith('/api/')) {
-        setCors(req, res);
-      }
-      if (req.method === 'OPTIONS') {
-        res.writeHead(204);
-        res.end();
-        return;
-      }
-      if (u.pathname === '/api/miniapp/ping') {
-        sendJson(res, 200, {
-          ok: true,
-          now: new Date().toISOString(),
-          supabase_sync: SUPABASE_SYNC_ENABLED,
-          features: { ...supabaseFeatureState }
-        });
-        return;
-      }
-      if (u.pathname === '/api/miniapp/cabinet') {
-        const telegramId = clean(u.searchParams.get('telegram_id') || '');
-        const initData = clean(u.searchParams.get('init_data') || '');
-        if (!telegramId || !/^\d{4,20}$/.test(telegramId)) {
-          sendJson(res, 400, { ok: false, error: 'telegram_id is required' });
-          return;
-        }
-        if (initData) {
-          const check = verifyTelegramInitData(initData, telegramId);
-          if (!check.ok) {
-            sendJson(res, 403, { ok: false, error: 'initData validation failed', reason: check.reason });
-            return;
-          }
-        }
-        getCabinetSnapshot(telegramId)
-          .then((snapshot) => {
-            sendJson(res, 200, { ok: true, telegram_id: telegramId, ...snapshot });
-          })
-          .catch((err) => {
-            sendJson(res, 500, { ok: false, error: clean(err?.message || err) });
-        });
-        return;
-      }
-      if (u.pathname === '/api/miniapp/submit') {
-        if (req.method !== 'POST') {
-          sendJson(res, 405, { ok: false, error: 'method not allowed' });
-          return;
-        }
-        let payload;
-        try {
-          payload = await readJsonBody(req, Math.max(8192, WEBAPP_MAX_PAYLOAD_BYTES + 1024));
-        } catch (e) {
-          sendJson(res, 400, { ok: false, error: clean(e?.message || e) || 'invalid request body' });
-          return;
-        }
-        if (!payload || typeof payload !== 'object') {
-          sendJson(res, 400, { ok: false, error: 'json object expected' });
-          return;
-        }
+      const reqOrigin = clean(req.headers?.origin || '');
+      const corsOrigin = getCorsOrigin(reqOrigin);
+      const corsHeaders = {
+        'access-control-allow-origin': corsOrigin,
+        'access-control-allow-methods': 'GET,POST,OPTIONS',
+        'access-control-allow-headers': 'content-type,authorization,x-requested-with',
+        'access-control-max-age': '600'
+      };
 
-        const parsed = parseWebappPayload(payload);
-        const action = clean(parsed.action || '').toLowerCase();
-        if (!['webapp_release_submit', 'submit_release', ''].includes(action)) {
-          sendJson(res, 400, { ok: false, error: 'unsupported action' });
+      if ((u.pathname || '/').startsWith('/api/')) {
+        if ((req.method || 'GET').toUpperCase() === 'OPTIONS') {
+          res.writeHead(204, corsHeaders);
+          res.end();
           return;
         }
-        if (!parsed.form || typeof parsed.form !== 'object') {
-          sendJson(res, 400, { ok: false, error: 'form object is required' });
+        if (u.pathname === '/api/health') {
+          writeJson(res, 200, { ok: true, bot: 'node_bot', time: new Date().toISOString() }, corsHeaders);
           return;
         }
-
-        let uid = clean(parsed.telegram_id || payload.telegram_id || '');
-        let user = payload.user && typeof payload.user === 'object' ? payload.user : {};
-        const initData = clean(parsed.init_data || payload.init_data || '');
-
-        if (initData) {
-          const check = verifyTelegramInitData(initData, uid || '');
-          if (!check.ok) {
-            if (WEBAPP_REQUIRE_INITDATA) {
-              sendJson(res, 403, { ok: false, error: 'initData validation failed', reason: check.reason });
-              return;
-            }
-            console.warn(
-              `[WEBAPP] submit api initData warning: user_id=${uid || '-'} reason=${check.reason} (fallback mode)`
-            );
-          } else {
-            const initUid = clean(check.user?.id || '');
-            if (!uid && initUid) uid = initUid;
-            if ((!user || !user.id) && check.user && typeof check.user === 'object') {
-              user = check.user;
-            }
-          }
-        } else if (WEBAPP_REQUIRE_INITDATA) {
-          sendJson(res, 403, { ok: false, error: 'initData is required' });
-          return;
-        }
-
-        if (!uid || !/^\d{4,20}$/.test(uid)) {
-          sendJson(res, 400, { ok: false, error: 'valid telegram_id is required' });
-          return;
-        }
-        const antiSpam = verifyWebappAntiSpam(uid, JSON.stringify(payload));
-        if (!antiSpam.ok) {
-          sendJson(res, 429, { ok: false, error: antiSpam.reason || 'duplicate submit' });
-          return;
-        }
-
-        const vr = validateForm(parsed.form, {
-          ...parsed,
-          action: action || 'webapp_release_submit',
-          source: 'mini_app',
-          telegram_id: uid
-        });
-        if (vr.errors.length) {
-          sendJson(res, 422, { ok: false, errors: vr.errors });
-          return;
-        }
-
-        const submitUser = {
-          id: Number(uid),
-          username: sanitizeText(user?.username || '', 64),
-          first_name: sanitizeText(user?.first_name || '', 64)
-        };
-        try {
-          const out = await submitReleaseToModeration(submitUser, uid, vr.data, 'mini_app_api');
-          await supabaseUpsertCabinetUser(uid, submitUser, true);
+        if (u.pathname === '/api/webapp/submit' && (req.method || 'GET').toUpperCase() === 'POST') {
+          let bodyRaw = '';
           try {
-            await sendText(
-              Number(uid),
-              '✅ <b>Анкета отправлена в модерацию</b>\n\n' +
-              `🎵 ${esc(vr.data?.name || 'Релиз')}\n` +
-              `👤 ${esc(vr.data?.nick || '—')}`
-            );
-          } catch {}
-          sendJson(res, 200, {
-            ok: true,
-            telegram_id: uid,
-            idx: Number(out?.idx ?? -1),
-            moderation_message_id: Number(out?.rel?.moderation_message_id || 0)
-          });
-        } catch (e) {
-          sendJson(res, 500, { ok: false, error: clean(e?.message || e) || 'submit failed' });
+            bodyRaw = await readRequestBody(req, WEBAPP_API_MAX_BODY_BYTES);
+            const body = bodyRaw ? JSON.parse(bodyRaw) : {};
+            const reqMeta = {
+              ip: clean(req.headers?.['x-forwarded-for'] || req.socket?.remoteAddress || '')
+            };
+            const out = await handleWebAppApiSubmit(body, reqMeta);
+            writeJson(res, 200, out, corsHeaders);
+          } catch (e) {
+            const status = Number(e?.statusCode || 500);
+            const errText = clean(e?.message || e) || 'unknown error';
+            console.error(`[WEBAPP_API] submit failed: status=${status} error=${errText}`);
+            writeJson(res, status, { ok: false, error: errText }, corsHeaders);
+          }
+          return;
         }
+        if (u.pathname === '/api/webapp/test' && (req.method || 'GET').toUpperCase() === 'POST') {
+          try {
+            const bodyRaw = await readRequestBody(req, WEBAPP_API_MAX_BODY_BYTES);
+            const body = bodyRaw ? JSON.parse(bodyRaw) : {};
+            const reqMeta = {
+              ip: clean(req.headers?.['x-forwarded-for'] || req.socket?.remoteAddress || '')
+            };
+            const out = await handleWebAppApiTest(body, reqMeta);
+            writeJson(res, 200, out, corsHeaders);
+          } catch (e) {
+            const status = Number(e?.statusCode || 500);
+            const errText = clean(e?.message || e) || 'unknown error';
+            console.error(`[WEBAPP_API] test failed: status=${status} error=${errText}`);
+            writeJson(res, status, { ok: false, error: errText }, corsHeaders);
+          }
+          return;
+        }
+        writeJson(res, 404, { ok: false, error: 'API endpoint not found' }, corsHeaders);
         return;
       }
+
       let p = decodeURIComponent(u.pathname || '/');
       if (p === '/') p = '/index.html';
       const f = path.normalize(path.join(root, p));
@@ -4845,10 +4052,7 @@ async function loop() {
   }
   if (SUPABASE_SYNC_ENABLED) {
     console.info(`[bot] supabase sync: enabled (${SUPABASE_URL})`);
-    console.info(
-      `[bot] supabase tables: ${SUPABASE_RELEASES_TABLE}, ${SUPABASE_CABINET_TABLE}, ` +
-      `${SUPABASE_FORMS_TABLE}, ${SUPABASE_USERS_TABLE}, ${SUPABASE_PUBLIC_RELEASES_TABLE}`
-    );
+    console.info(`[bot] supabase tables: ${SUPABASE_RELEASES_TABLE}, ${SUPABASE_CABINET_TABLE}`);
     console.info(
       `[bot] supabase fetch: timeout=${SUPABASE_FETCH_TIMEOUT_MS}ms` +
       ` retries=${SUPABASE_FETCH_RETRIES} delay=${SUPABASE_FETCH_RETRY_DELAY_MS}ms`
@@ -4858,12 +4062,13 @@ async function loop() {
   }
   console.info(`[bot] telegram api base: ${TELEGRAM_API_BASE}`);
   console.info(`[bot] tg fetch: timeout=${TG_FETCH_TIMEOUT_MS}ms retries=${TG_FETCH_RETRIES}`);
-  console.info(`[bot] webapp initData strict: ${WEBAPP_REQUIRE_INITDATA ? 'enabled' : 'disabled'}`);
   console.info(`[bot] moderation thread: ${MODERATION_THREAD_ID > 0 ? MODERATION_THREAD_ID : 'default'}`);
-  console.info(`[bot] public base: ${PUBLIC_ORIGIN || '(not configured)'}`);
   if (WEBAPP_URL) console.info(`[bot] webapp url: ${WEBAPP_URL}`);
-  if (!WEBAPP_URL) {
-    console.info('[bot] webapp url: (not configured, menu button can still be used via BotFather)');
+  if (WEB_ENABLED) {
+    console.info(
+      `[bot] webapp api: /api/webapp/submit (cors=${WEBAPP_API_ALLOWED_ORIGINS || '*'})` +
+      ` max_body=${WEBAPP_API_MAX_BODY_BYTES}`
+    );
   }
   await verifyModerationChatAccess();
   try { await tg('deleteWebhook', { drop_pending_updates: false }); } catch {}

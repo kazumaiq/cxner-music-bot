@@ -1,21 +1,18 @@
 "use strict";
 
-// Unified BotHost entrypoint.
-// Default mode keeps current behavior (starts node_bot.js).
-// Optional static modes serve Mini App from ./public to follow BotHost manual.
+// bothost Mini App entrypoint:
+// - serves static files from ./public (required structure for Mini App hosting)
+// - can optionally start node_bot.js only when APP_MODE=bot
 
-const fs = require("node:fs");
 const http = require("node:http");
+const fs = require("node:fs");
 const path = require("node:path");
 
-const ROOT_DIR = __dirname;
-const PUBLIC_DIR = path.join(ROOT_DIR, "public");
+const ROOT = __dirname;
+const PUBLIC_DIR = path.join(ROOT, "public");
 const PORT = Number.parseInt(process.env.PORT || "3000", 10) || 3000;
-const APP_MODE = String(process.env.APP_MODE || "").trim().toLowerCase();
-const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || process.env.BOT_PUBLIC_DOMAIN || "").trim();
-const WEBAPP_URL = String(process.env.WEBAPP_URL || "").trim();
 
-const MIME_TYPES = {
+const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "application/javascript; charset=utf-8",
@@ -30,22 +27,26 @@ const MIME_TYPES = {
   ".txt": "text/plain; charset=utf-8"
 };
 
+function clean(v) {
+  return String(v ?? "").trim();
+}
+
 function resolvePublicPath(reqUrl) {
-  const parsed = new URL(reqUrl || "/", "http://localhost");
-  let pathname = decodeURIComponent(parsed.pathname || "/");
+  const baseUrl = new URL(reqUrl || "/", "http://localhost");
+  let urlPath = decodeURIComponent(baseUrl.pathname || "/");
 
-  // Backward compatibility for old miniapp paths.
-  if (pathname === "/miniapp" || pathname === "/miniapp/") {
-    pathname = "/index.html";
-  } else if (pathname.startsWith("/miniapp/")) {
-    pathname = pathname.slice("/miniapp".length);
+  // Support old paths like /miniapp/index.html and /miniapp/assets/*
+  if (urlPath === "/miniapp" || urlPath === "/miniapp/") {
+    urlPath = "/index.html";
+  } else if (urlPath.startsWith("/miniapp/")) {
+    urlPath = urlPath.slice("/miniapp".length);
   }
 
-  if (pathname === "/" || pathname === "") {
-    pathname = "/index.html";
+  if (urlPath === "/" || urlPath === "") {
+    urlPath = "/index.html";
   }
 
-  const fullPath = path.normalize(path.join(PUBLIC_DIR, pathname));
+  const fullPath = path.normalize(path.join(PUBLIC_DIR, urlPath));
   if (!fullPath.startsWith(PUBLIC_DIR)) {
     return null;
   }
@@ -63,7 +64,10 @@ function startStaticServer() {
   }
 
   const server = http.createServer((req, res) => {
-    const method = String(req.method || "GET").toUpperCase();
+    const method = clean(req.method || "GET").toUpperCase();
+    const reqPath = clean(req.url || "/") || "/";
+    console.info(`[miniapp] ${method} ${reqPath}`);
+
     if (method !== "GET" && method !== "HEAD") {
       res.writeHead(405, { "content-type": "text/plain; charset=utf-8" });
       res.end("Method not allowed");
@@ -81,16 +85,17 @@ function startStaticServer() {
       if (error) {
         if (error.code === "ENOENT") {
           res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-          res.end("File not found");
+          res.end("Файл не найден");
           return;
         }
         res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
-        res.end(`Server error: ${error.code || "unknown"}`);
+        res.end(`Ошибка сервера: ${error.code || "unknown"}`);
         return;
       }
 
-      const ext = path.extname(filePath).toLowerCase();
-      res.writeHead(200, { "content-type": MIME_TYPES[ext] || "application/octet-stream" });
+      const extname = path.extname(filePath).toLowerCase();
+      const contentType = mimeTypes[extname] || "application/octet-stream";
+      res.writeHead(200, { "content-type": contentType });
       if (method === "HEAD") {
         res.end();
         return;
@@ -100,35 +105,24 @@ function startStaticServer() {
   });
 
   server.listen(PORT, "0.0.0.0", () => {
-    // eslint-disable-next-line no-console
-    console.info(`[web] static mini app server started: http://0.0.0.0:${PORT} (dir: ${PUBLIC_DIR})`);
-    // eslint-disable-next-line no-console
-    console.info(`[web] public base: ${PUBLIC_BASE_URL || "(not configured)"}`);
-    // eslint-disable-next-line no-console
-    console.info(`[web] webapp url: ${WEBAPP_URL || "(not configured)"}`);
+    console.info(`✅ Mini App static server started on port ${PORT}`);
   });
 }
 
-function startNodeBot() {
-  const nodeBotPath = path.join(ROOT_DIR, "node_bot.js");
-  if (!fs.existsSync(nodeBotPath)) {
-    // eslint-disable-next-line no-console
-    console.error("[entry] node_bot.js not found");
-    process.exitCode = 1;
-    return;
-  }
-
-  // eslint-disable-next-line no-console
-  console.info("[entry] starting app.js -> node_bot.js");
-  require("./node_bot.js");
+function shouldStartNodeBot() {
+  const appMode = clean(process.env.APP_MODE).toLowerCase();
+  return appMode === "bot";
 }
 
-if (APP_MODE === "static" || APP_MODE === "miniapp") {
-  startStaticServer();
-} else if (APP_MODE === "both") {
-  startStaticServer();
-  startNodeBot();
+startStaticServer();
+
+if (shouldStartNodeBot() && fs.existsSync(path.join(ROOT, "node_bot.js"))) {
+  console.info("[entry] APP_MODE=bot, starting node_bot.js");
+  try {
+    require("./node_bot.js");
+  } catch (error) {
+    console.error(`[entry] failed to start node_bot.js: ${clean(error?.message || error)}`);
+  }
 } else {
-  // Default: keep existing stable behavior.
-  startNodeBot();
+  console.info("[entry] running static Mini App mode");
 }

@@ -5,6 +5,7 @@ Telegram bot + Mini App for release distribution workflow:
 - moderation statuses
 - cabinet with user releases/statuses
 - static Mini App (`webapp/`)
+- BotHost static Mini App (`public/`)
 
 ## Quick start
 ```bash
@@ -22,23 +23,26 @@ set BOT_TOKEN=123456:token
 node app.js
 ```
 
-Recommended for bothost:
-```bash
-set PUBLIC_BASE_URL=https://<your-bothost-domain>
-set WEBAPP_URL=https://<your-bothost-domain>/index.html
-```
-
 For production deployment on bothost, see `DEPLOY_BOTHOST.md`.
 
-## App Modes (`app.js`)
-By default, `node app.js` starts the Node bot (`node_bot.js`) to keep current behavior.
+## BotHost Mini App mode
+Project now contains BotHost-compatible structure:
 
-- `APP_MODE` empty: bot mode (default)
-- `APP_MODE=miniapp` or `APP_MODE=static`: serves static Mini App from `public/`
-- `APP_MODE=both`: starts both static server and bot process
+- `app.js` - static server entrypoint
+- `public/index.html` - Mini App page
+- `public/styles.css`, `public/app.js` - UI assets
+- `public/assets/*`, `public/data/*` - static files
 
-BotHost static structure is included in `public/`:
-- `public/index.html`
-- `public/styles.css`
-- `public/app.js`
-- `public/assets/*`
+Start command:
+```bash
+node app.js
+```
+
+By default this starts static Mini App server on `PORT` (or `3000`).
+Legacy `/miniapp/*` URLs are also supported and mapped to `public/*`.
+
+If you explicitly need to run Node bot from this entrypoint:
+```bash
+set APP_MODE=bot
+node app.js
+```
