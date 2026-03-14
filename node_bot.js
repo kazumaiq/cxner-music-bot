@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -227,9 +227,11 @@ const SUPABASE_USERS_TABLE_RAW = envStr('SUPABASE_USERS_TABLE', 'cxrner_users') 
 const SUPABASE_PUBLIC_RELEASES_TABLE_RAW = envStr('SUPABASE_PUBLIC_RELEASES_TABLE', 'cxrner_public_releases') || 'cxrner_public_releases';
 const SUPABASE_SYNC_ENABLED = !!SUPABASE_URL && !!SUPABASE_SERVICE_ROLE_KEY;
 const SUPABASE_FETCH_TIMEOUT_MS = envInt('SUPABASE_FETCH_TIMEOUT_MS', 25000);
-const SUPABASE_FETCH_RETRIES = envInt('SUPABASE_FETCH_RETRIES', 2);
-const SUPABASE_FETCH_RETRY_DELAY_MS = envInt('SUPABASE_FETCH_RETRY_DELAY_MS', 900);
+const SUPABASE_FETCH_RETRIES = envInt('SUPABASE_FETCH_RETRIES', 4);
+const SUPABASE_FETCH_RETRY_DELAY_MS = envInt('SUPABASE_FETCH_RETRY_DELAY_MS', 1200);
 const SUPABASE_SYNC_DEBOUNCE_MS = envInt('SUPABASE_SYNC_DEBOUNCE_MS', 1200);
+const SUPABASE_SYNC_CHUNK_SIZE = Math.max(10, envInt('SUPABASE_SYNC_CHUNK_SIZE', 50));
+const SUPABASE_SYNC_CHUNK_DELAY_MS = Math.max(0, envInt('SUPABASE_SYNC_CHUNK_DELAY_MS', 400));
 const IMPORT_RELEASES_BACKUP_FILE = envStr('IMPORT_RELEASES_BACKUP_FILE', '');
 
 const DB_FILE = 'releases.json';
@@ -1339,7 +1341,7 @@ function buildSupabaseApprovedReleaseRows() {
   return rows;
 }
 
-async function supabaseUpsertRows(tableName, rows, chunkSize = 250) {
+async function supabaseUpsertRows(tableName, rows, chunkSize = SUPABASE_SYNC_CHUNK_SIZE) {
   if (!rows.length) return;
   for (let i = 0; i < rows.length; i += chunkSize) {
     const chunk = rows.slice(i, i + chunkSize);
@@ -1348,10 +1350,11 @@ async function supabaseUpsertRows(tableName, rows, chunkSize = 250) {
       headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
       body: chunk
     });
+    if (SUPABASE_SYNC_CHUNK_DELAY_MS > 0 && i + chunkSize < rows.length) await delay(SUPABASE_SYNC_CHUNK_DELAY_MS);
   }
 }
 
-async function supabaseUpsertCabinetRows(tableName, rows, chunkSize = 250) {
+async function supabaseUpsertCabinetRows(tableName, rows, chunkSize = SUPABASE_SYNC_CHUNK_SIZE) {
   if (!rows.length) return;
   for (let i = 0; i < rows.length; i += chunkSize) {
     const chunk = rows.slice(i, i + chunkSize);
@@ -1360,10 +1363,11 @@ async function supabaseUpsertCabinetRows(tableName, rows, chunkSize = 250) {
       headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
       body: chunk
     });
+    if (SUPABASE_SYNC_CHUNK_DELAY_MS > 0 && i + chunkSize < rows.length) await delay(SUPABASE_SYNC_CHUNK_DELAY_MS);
   }
 }
 
-async function supabaseUpsertFormRows(tableName, rows, chunkSize = 250) {
+async function supabaseUpsertFormRows(tableName, rows, chunkSize = SUPABASE_SYNC_CHUNK_SIZE) {
   if (!rows.length) return;
   for (let i = 0; i < rows.length; i += chunkSize) {
     const chunk = rows.slice(i, i + chunkSize);
@@ -1372,10 +1376,11 @@ async function supabaseUpsertFormRows(tableName, rows, chunkSize = 250) {
       headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
       body: chunk
     });
+    if (SUPABASE_SYNC_CHUNK_DELAY_MS > 0 && i + chunkSize < rows.length) await delay(SUPABASE_SYNC_CHUNK_DELAY_MS);
   }
 }
 
-async function supabaseUpsertUserRows(tableName, rows, chunkSize = 250) {
+async function supabaseUpsertUserRows(tableName, rows, chunkSize = SUPABASE_SYNC_CHUNK_SIZE) {
   if (!rows.length) return;
   for (let i = 0; i < rows.length; i += chunkSize) {
     const chunk = rows.slice(i, i + chunkSize);
@@ -1384,10 +1389,11 @@ async function supabaseUpsertUserRows(tableName, rows, chunkSize = 250) {
       headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
       body: chunk
     });
+    if (SUPABASE_SYNC_CHUNK_DELAY_MS > 0 && i + chunkSize < rows.length) await delay(SUPABASE_SYNC_CHUNK_DELAY_MS);
   }
 }
 
-async function supabaseUpsertApprovedRows(tableName, rows, chunkSize = 250) {
+async function supabaseUpsertApprovedRows(tableName, rows, chunkSize = SUPABASE_SYNC_CHUNK_SIZE) {
   if (!rows.length) return;
   for (let i = 0; i < rows.length; i += chunkSize) {
     const chunk = rows.slice(i, i + chunkSize);
@@ -1396,6 +1402,7 @@ async function supabaseUpsertApprovedRows(tableName, rows, chunkSize = 250) {
       headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
       body: chunk
     });
+    if (SUPABASE_SYNC_CHUNK_DELAY_MS > 0 && i + chunkSize < rows.length) await delay(SUPABASE_SYNC_CHUNK_DELAY_MS);
   }
 }
 
@@ -1610,24 +1617,47 @@ function sendTextPlain(chatId, text, extra = {}) {
 
 async function sendDocument(chatId, filePath, caption = '') {
   const abs = path.isAbsolute(filePath) ? filePath : path.resolve(ROOT, filePath);
-  const payload = fs.readFileSync(abs);
-  const form = new FormData();
-  form.append('chat_id', String(chatId));
-  if (caption) form.append('caption', caption);
-  form.append('document', new Blob([payload]), path.basename(abs));
+  const basename = path.basename(abs);
 
-  const response = await fetch(`${API}/sendDocument`, {
-    method: 'POST',
-    body: form
-  }).catch((e) => {
-    throw new Error(`[sendDocument] ${clean(e?.message || e)}`);
-  });
+  const retries = Math.max(0, Number(TG_FETCH_RETRIES) || 0);
+  let lastErr = null;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const payload = fs.readFileSync(abs);
+    const form = new FormData();
+    form.append('chat_id', String(chatId));
+    if (caption) form.append('caption', caption);
+    form.append('document', new Blob([payload]), basename);
 
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok || !result.ok) {
-    throw new Error(`[sendDocument] ${result.description || response.statusText}`);
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    let timeoutRef = null;
+    if (controller) {
+      timeoutRef = setTimeout(() => controller.abort(), Math.max(10000, TG_FETCH_TIMEOUT_MS));
+    }
+    try {
+      const response = await fetch(`${API}/sendDocument`, {
+        method: 'POST',
+        body: form,
+        signal: controller ? controller.signal : undefined
+      });
+      if (timeoutRef) clearTimeout(timeoutRef);
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) {
+        throw new Error(`[sendDocument] ${result.description || response.statusText}`);
+      }
+      return result.result;
+    } catch (err) {
+      if (timeoutRef) clearTimeout(timeoutRef);
+      lastErr = err;
+      const meta = classifyFetchError(err);
+      const canRetry = attempt < retries && (meta.isNetwork || meta.isAbort || meta.isFetchFailed);
+      if (canRetry) {
+        await delay(Math.max(200, TG_FETCH_RETRY_DELAY_MS) * (attempt + 1));
+        continue;
+      }
+      throw new Error(`[sendDocument] ${clean(err?.message || err)}`);
+    }
   }
-  return result.result;
+  throw lastErr || new Error('[sendDocument] unknown error');
 }
 function welcomeText() {
   return 'Добро пожаловать в систему дистрибуции CXRNER MUSIC.\nУправляй релизами. Загружай треки. Масштабируй звук.';
@@ -4654,7 +4684,8 @@ async function loop() {
     );
     console.info(
       `[bot] supabase fetch: timeout=${SUPABASE_FETCH_TIMEOUT_MS}ms` +
-      ` retries=${SUPABASE_FETCH_RETRIES} delay=${SUPABASE_FETCH_RETRY_DELAY_MS}ms`
+      ` retries=${SUPABASE_FETCH_RETRIES} delay=${SUPABASE_FETCH_RETRY_DELAY_MS}ms` +
+      ` chunk=${SUPABASE_SYNC_CHUNK_SIZE} chunkDelay=${SUPABASE_SYNC_CHUNK_DELAY_MS}ms`
     );
   } else {
     console.info('[bot] supabase sync: disabled');

@@ -35,6 +35,12 @@ create index if not exists idx_cxrner_cabinet_updated on public.cxrner_cabinet_u
 
 Важно: нужен именно `SERVICE_ROLE_KEY` (серверный ключ).
 
+Опционально (при нестабильной сети, например BOTHOST — ошибки ECONNRESET / timeout):
+- `SUPABASE_FETCH_RETRIES` — число повторов запроса (по умолчанию 4);
+- `SUPABASE_FETCH_RETRY_DELAY_MS` — пауза между повторами, мс (по умолчанию 1200);
+- `SUPABASE_SYNC_CHUNK_SIZE` — размер чанка при синхронизации (по умолчанию 50, меньше = устойчивее);
+- `SUPABASE_SYNC_CHUNK_DELAY_MS` — пауза между чанками, мс (по умолчанию 400).
+
 ## 3) Перезапустите бота
 
 На старте бот:
