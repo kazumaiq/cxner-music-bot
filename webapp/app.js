@@ -1,4 +1,4 @@
-﻿const appState = {
+const appState = {
   activeTab: "home",
   filterArtist: "all",
   releases: [
@@ -137,18 +137,10 @@ const LABEL_ARTISTS = [
 const HAS_DOM = typeof window !== "undefined" && typeof document !== "undefined";
 let tg = HAS_DOM ? (window.Telegram?.WebApp ?? null) : null;
 const DATE_PATTERN = /^(\d{2})\.(\d{2})\.(\d{4})$/;
-const SUPABASE_CONFIG_URL = "data/supabase-config.json";
+const CABINET_USERS_URL = "data/cabinet-users.json";
+const CABINET_RELEASES_URL = "data/releases-public.json";
+const BOT_API_CONFIG_URL = "data/supabase-config.json";
 const CABINET_REFRESH_MS = 15000;
-const supabaseRuntime = {
-  url: "",
-  anonKey: "",
-  schema: "public",
-  formsTable: "cxrner_forms",
-  usersTable: "cxrner_users",
-  releasesTable: "cxrner_public_releases",
-  botApiBaseUrl: ""
-};
-let supabaseConfigLoaded = false;
 const lazyObserver = typeof IntersectionObserver === "function"
   ? new IntersectionObserver(
     (entries, observer) => {
@@ -181,6 +173,7 @@ const lazyObserver = typeof IntersectionObserver === "function"
     { rootMargin: "220px 0px" }
   )
   : null;
+let runtimeBotApiBaseUrl = "";
 
 function getTelegramWebApp() {
   if (!HAS_DOM) {
@@ -235,236 +228,6 @@ function getTelegramUser() {
   return getLaunchUserFromUrl();
 }
 
-function getTelegramInitData() {
-  const sdk = getTelegramWebApp();
-  if (sdk?.initData) {
-    return String(sdk.initData);
-  }
-  if (!HAS_DOM) {
-    return "";
-  }
-  const sources = [];
-  if (window.location.hash) {
-    sources.push(window.location.hash.replace(/^#/, ""));
-  }
-  if (window.location.search) {
-    sources.push(window.location.search.replace(/^\?/, ""));
-  }
-  for (const rawSource of sources) {
-    try {
-      const params = new URLSearchParams(rawSource);
-      const tgData = params.get("tgWebAppData");
-      if (tgData) {
-        return tgData;
-      }
-    } catch {
-      // ignore malformed params
-    }
-  }
-  return "";
-}
-
-async function ensureSupabaseConfig() {
-  if (supabaseConfigLoaded) {
-    return;
-  }
-  supabaseConfigLoaded = true;
-  try {
-    const res = await fetch(`${SUPABASE_CONFIG_URL}?t=${Date.now()}`, { cache: "no-store" });
-    if (!res.ok) {
-      return;
-    }
-    const cfg = await res.json().catch(() => ({}));
-    if (cfg && typeof cfg === "object") {
-      supabaseRuntime.url = normalizeText(cfg.url || cfg.supabaseUrl || supabaseRuntime.url);
-      supabaseRuntime.anonKey = normalizeText(cfg.anonKey || cfg.supabaseAnonKey || supabaseRuntime.anonKey);
-      supabaseRuntime.schema = normalizeText(cfg.schema || supabaseRuntime.schema) || "public";
-      supabaseRuntime.formsTable = normalizeText(cfg.formsTable || supabaseRuntime.formsTable) || "cxrner_forms";
-      supabaseRuntime.usersTable = normalizeText(cfg.usersTable || supabaseRuntime.usersTable) || "cxrner_users";
-      supabaseRuntime.releasesTable = normalizeText(cfg.releasesTable || supabaseRuntime.releasesTable) || "cxrner_public_releases";
-      supabaseRuntime.botApiBaseUrl = normalizeText(
-        cfg.botApiBaseUrl || cfg.bot_api_base_url || cfg.apiBaseUrl || supabaseRuntime.botApiBaseUrl
-      );
-    }
-  } catch {
-    // ignore runtime config fetch errors
-  }
-}
-
-function hasSupabaseRuntime() {
-  return Boolean(supabaseRuntime.url && supabaseRuntime.anonKey);
-}
-
-function supabaseRestUrl(pathAndQuery) {
-  const base = String(supabaseRuntime.url || "").replace(/\/+$/, "");
-  return `${base}/rest/v1/${pathAndQuery}`;
-}
-
-function miniappApiBaseUrl() {
-  const base = normalizeText(supabaseRuntime.botApiBaseUrl || "");
-  if (base) return base.replace(/\/+$/, "");
-  if (typeof window !== "undefined" && window.location && window.location.origin) {
-    return String(window.location.origin).replace(/\/+$/, "");
-  }
-  return "";
-}
-
-async function postMiniappApi(pathname, payload) {
-  const base = miniappApiBaseUrl();
-  if (!base) {
-    throw new Error("botApiBaseUrl не настроен");
-  }
-  const url = `${base}${pathname.startsWith("/") ? pathname : `/${pathname}`}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload || {})
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data?.ok) {
-    const details = data?.errors?.[0] || data?.reason || data?.error || `${res.status} ${res.statusText}`;
-    throw new Error(String(details));
-  }
-  return data;
-}
-
-async function supabaseSelectRows(tableName, selectExpr, filters = [], orderExpr = "", limit = 0) {
-  if (!hasSupabaseRuntime()) {
-    return [];
-  }
-  const query = [];
-  query.push(`select=${encodeURIComponent(selectExpr)}`);
-  filters.forEach((row) => {
-    const key = normalizeText(row?.key);
-    const op = normalizeText(row?.op || "eq");
-    const value = normalizeText(row?.value);
-    if (!key || !value) {
-      return;
-    }
-    query.push(`${encodeURIComponent(key)}=${encodeURIComponent(`${op}.${value}`)}`);
-  });
-  if (orderExpr) {
-    query.push(`order=${encodeURIComponent(orderExpr)}`);
-  }
-  if (limit > 0) {
-    query.push(`limit=${Number(limit)}`);
-  }
-  const url = supabaseRestUrl(`${tableName}?${query.join("&")}`);
-  const headers = {
-    apikey: supabaseRuntime.anonKey,
-    Authorization: `Bearer ${supabaseRuntime.anonKey}`
-  };
-  if (supabaseRuntime.schema && supabaseRuntime.schema !== "public") {
-    headers["Accept-Profile"] = supabaseRuntime.schema;
-  }
-  const res = await fetch(url, { headers, cache: "no-store" });
-  if (!res.ok) {
-    throw new Error(`supabase ${tableName}: ${res.status}`);
-  }
-  const json = await res.json().catch(() => []);
-  return Array.isArray(json) ? json : [];
-}
-
-function mapFormStatusToCabinetStatus(status) {
-  const normalized = normalizeText(status).toLowerCase();
-  if (normalized === "approved") {
-    return "approved";
-  }
-  if (normalized === "rejected") {
-    return "rejected";
-  }
-  if (normalized === "on_moderation") {
-    return "moderation";
-  }
-  return "on_upload";
-}
-
-function mapSupabaseFormToCabinetRelease(row) {
-  const payload = row?.form_payload && typeof row.form_payload === "object" ? row.form_payload : {};
-  const releaseType = normalizeText(row?.release_type || payload?.release_type || payload?.type).toLowerCase();
-  const typeText = ["album", "альбом"].includes(releaseType) ? "альбом" : "сингл";
-  return {
-    id: normalizeText(row?.id || row?.form_id || payload?.id || `${row?.telegram_id || "u"}_${row?.submission_key || row?.created_at || Date.now()}`),
-    type: typeText,
-    name: normalizeText(payload?.name || row?.track_name),
-    nick: normalizeText(payload?.nick || row?.artist_name),
-    date: normalizeText(payload?.date || row?.release_date || ""),
-    genre: normalizeText(payload?.genre || row?.genre || ""),
-    status: mapFormStatusToCabinetStatus(row?.status),
-    reject_reason: normalizeText(row?.reject_reason || payload?.reject_reason || ""),
-    upc: normalizeText(row?.upc || payload?.upc || ""),
-    submission_time: normalizeText(row?.submission_key || row?.created_at || payload?.submission_time || ""),
-    moderation_time: normalizeText(row?.updated_at || payload?.moderation_time || ""),
-    user_deleted: false
-  };
-}
-
-async function loadCabinetFromSupabase(userId) {
-  await ensureSupabaseConfig();
-  if (!hasSupabaseRuntime()) {
-    return { ok: false, error: "SUPABASE_NOT_CONFIGURED", approved: false, releases: [] };
-  }
-  const [userRows, formRows, approvedRows] = await Promise.all([
-    supabaseSelectRows(
-      supabaseRuntime.usersTable,
-      "telegram_id,username,first_name,cabinet_active,created_at,updated_at",
-      [{ key: "telegram_id", value: userId }],
-      "updated_at.desc",
-      1
-    ).catch(() => []),
-    supabaseSelectRows(
-      supabaseRuntime.formsTable,
-      "id,form_id,telegram_id,artist_name,track_name,genre,release_type,status,reject_reason,upc,submission_key,created_at,updated_at,form_payload",
-      [{ key: "telegram_id", value: userId }],
-      "created_at.desc",
-      300
-    ).catch(() => []),
-    supabaseSelectRows(
-      supabaseRuntime.releasesTable,
-      "form_id,telegram_id,artist_name,track_name,genre,release_type,status,approved_at,updated_at,release_data",
-      [{ key: "telegram_id", value: userId }, { key: "status", value: "approved" }],
-      "approved_at.desc",
-      300
-    ).catch(() => [])
-  ]);
-  const userRow = Array.isArray(userRows) && userRows.length ? userRows[0] : null;
-  const releaseMap = new Map();
-  (Array.isArray(formRows) ? formRows : []).forEach((row) => {
-    const mapped = mapSupabaseFormToCabinetRelease(row);
-    releaseMap.set(mapped.id, mapped);
-  });
-  (Array.isArray(approvedRows) ? approvedRows : []).forEach((row) => {
-    const data = row?.release_data && typeof row.release_data === "object" ? row.release_data : {};
-    const id = normalizeText(row?.form_id || data?.supabase_form_id || `${userId}_${row?.approved_at || Date.now()}`);
-    if (releaseMap.has(id)) {
-      const prev = releaseMap.get(id);
-      releaseMap.set(id, { ...prev, status: "approved" });
-      return;
-    }
-    releaseMap.set(id, {
-      id,
-      type: normalizeText(data?.type || row?.release_type) || "сингл",
-      name: normalizeText(data?.name || row?.track_name),
-      nick: normalizeText(data?.nick || row?.artist_name),
-      date: normalizeText(data?.date || ""),
-      genre: normalizeText(data?.genre || row?.genre || ""),
-      status: "approved",
-      reject_reason: "",
-      upc: normalizeText(data?.upc || ""),
-      submission_time: normalizeText(data?.submission_time || row?.approved_at || ""),
-      moderation_time: normalizeText(data?.moderation_time || row?.updated_at || ""),
-      user_deleted: false
-    });
-  });
-  const releases = Array.from(releaseMap.values());
-  return {
-    ok: true,
-    approved: Boolean(userRow?.cabinet_active),
-    releases,
-    updatedAt: userRow?.updated_at || new Date().toISOString()
-  };
-}
-
 function initTelegramWebApp() {
   const tgApp = getTelegramWebApp();
   if (!tgApp) {
@@ -479,7 +242,7 @@ function initTelegramWebApp() {
   const user = getTelegramUser();
   if (user) {
     const badge = document.getElementById("userBadge");
-    const username = user.username ? `@${user.username}` : user.first_name || "Профиль";
+    const username = user.username ? `@${user.username}` : user.first_name || "РџСЂРѕС„РёР»СЊ";
     badge.textContent = username;
   }
 
@@ -496,20 +259,19 @@ function initTelegramWebApp() {
   }
 }
 
-function logWebAppSendDiagnostics(reason = "submit_form") {
-  const tgApp = getTelegramWebApp();
-  if (!tgApp) {
+function logWebAppSendDiagnostics(reason = "submit") {
+  if (!HAS_DOM || !window.Telegram?.WebApp) {
     console.error("Telegram.WebApp is undefined");
     return null;
   }
+  const tgApp = window.Telegram.WebApp;
   try {
-    // Required diagnostics for Mini App sendData chain.
     console.log("SEND DATA TRIGGERED");
     console.log(Telegram.WebApp.initData);
     console.log(Telegram.WebApp.initDataUnsafe);
-    console.log(`[WEBAPP_DIAG] reason=${reason}`);
+    console.log(`[WEBAPP_DIAG] reason=${reason} href=${window.location.href}`);
   } catch (e) {
-    console.error("[WEBAPP_DIAG] diagnostics log failed", e);
+    console.error("[WEBAPP_DIAG] log error", e);
   }
   return tgApp;
 }
@@ -640,14 +402,144 @@ function setCabinetActiveLocal(userId, active) {
 function getStatusMeta(status) {
   const normalized = String(status || "on_upload");
   const map = {
-    on_upload: { text: "На отгрузке", emoji: "🕓" },
-    moderation: { text: "На модерации", emoji: "🧠" },
-    approved: { text: "Одобрено", emoji: "✅" },
-    rejected: { text: "Отклонено", emoji: "❌" },
-    needs_fix: { text: "На исправлении", emoji: "✏️" },
-    deleted: { text: "Удалено", emoji: "🗑" }
+    on_upload: { text: "РќР° РѕС‚РіСЂСѓР·РєРµ", emoji: "рџ•“" },
+    moderation: { text: "РќР° РјРѕРґРµСЂР°С†РёРё", emoji: "рџ§ " },
+    approved: { text: "РћРґРѕР±СЂРµРЅРѕ", emoji: "вњ…" },
+    rejected: { text: "РћС‚РєР»РѕРЅРµРЅРѕ", emoji: "вќЊ" },
+    needs_fix: { text: "РќР° РёСЃРїСЂР°РІР»РµРЅРёРё", emoji: "вњЏпёЏ" },
+    deleted: { text: "РЈРґР°Р»С‘РЅ", emoji: "рџ—‘" }
   };
-  return map[normalized] || { text: normalized, emoji: "⏳" };
+  return map[normalized] || { text: normalized, emoji: "вЏі" };
+}
+
+async function loadJsonSafe(url) {
+  try {
+    const res = await fetch(`${url}?t=${Date.now()}`, { cache: "no-store" });
+    if (!res.ok) {
+      return null;
+    }
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+function normalizeUrlBase(value) {
+  const raw = normalizeText(value);
+  if (!raw) {
+    return "";
+  }
+  return raw.replace(/\/+$/, "");
+}
+
+function readRuntimeBotApiBaseUrl() {
+  if (runtimeBotApiBaseUrl) {
+    return runtimeBotApiBaseUrl;
+  }
+  try {
+    const direct = normalizeUrlBase(window.CXRNER_BOT_API_BASE || window.__CXRNER_BOT_API_BASE__);
+    if (direct) {
+      runtimeBotApiBaseUrl = direct;
+      return runtimeBotApiBaseUrl;
+    }
+    const params = new URLSearchParams(window.location.search || "");
+    const qp = normalizeUrlBase(params.get("bot_api_base") || params.get("botApiBaseUrl"));
+    if (qp) {
+      runtimeBotApiBaseUrl = qp;
+      return runtimeBotApiBaseUrl;
+    }
+  } catch {
+    // ignore
+  }
+  return "";
+}
+
+function joinUrl(base, part) {
+  return `${base.replace(/\/+$/, "")}/${String(part || "").replace(/^\/+/, "")}`;
+}
+
+async function initRuntimeConfig() {
+  readRuntimeBotApiBaseUrl();
+  if (runtimeBotApiBaseUrl) {
+    console.info(`[WEBAPP_API] base=${runtimeBotApiBaseUrl} (from runtime)`);
+    return;
+  }
+  const cfg = await loadJsonSafe(BOT_API_CONFIG_URL);
+  const fromCfg = normalizeUrlBase(
+    cfg?.botApiBaseUrl ||
+    cfg?.bot_api_base_url ||
+    cfg?.apiBaseUrl ||
+    cfg?.api_base_url ||
+    ""
+  );
+  if (fromCfg) {
+    runtimeBotApiBaseUrl = fromCfg;
+    console.info(`[WEBAPP_API] base=${runtimeBotApiBaseUrl} (from ${BOT_API_CONFIG_URL})`);
+  } else {
+    console.info("[WEBAPP_API] base is not configured (sendData only)");
+  }
+}
+
+async function postToBotApi(endpoint, body) {
+  const base = readRuntimeBotApiBaseUrl();
+  if (!base) {
+    return { ok: false, skipped: true, error: "BOT_API_BASE_URL is empty" };
+  }
+  const url = joinUrl(base, endpoint);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json?.ok) {
+      const msg = normalizeText(json?.error) || `HTTP ${res.status}`;
+      return { ok: false, error: msg, status: res.status, response: json };
+    }
+    return { ok: true, data: json };
+  } catch (error) {
+    return { ok: false, error: normalizeText(error?.message || error || "fetch failed") };
+  }
+}
+
+async function submitViaBotApi(payload, reason = "submit_form") {
+  const tgApp = getTelegramWebApp();
+  const body = {
+    reason,
+    source: "mini_app",
+    submitted_at: new Date().toISOString(),
+    payload,
+    initData: tgApp?.initData || "",
+    initDataUnsafe: tgApp?.initDataUnsafe || null,
+    user: getTelegramUser() || null
+  };
+  const out = await postToBotApi("/api/webapp/submit", body);
+  if (!out.ok) {
+    console.warn("[WEBAPP_API] submit failed:", out.error || "unknown");
+  } else {
+    console.info("[WEBAPP_API] submit ok:", out.data);
+  }
+  return out;
+}
+
+async function runBotApiDiag(text = "test Р°РЅРєРµС‚Р°") {
+  const tgApp = getTelegramWebApp();
+  const body = {
+    text,
+    source: "mini_app",
+    sent_at: new Date().toISOString(),
+    initData: tgApp?.initData || "",
+    initDataUnsafe: tgApp?.initDataUnsafe || null,
+    user: getTelegramUser() || null
+  };
+  const out = await postToBotApi("/api/webapp/test", body);
+  if (!out.ok) {
+    console.warn("[WEBAPP_API] diag failed:", out.error || "unknown");
+  } else {
+    console.info("[WEBAPP_API] diag ok:", out.data);
+  }
+  return out;
 }
 
 function renderCabinetSummary(releases) {
@@ -668,19 +560,19 @@ function renderCabinetSummary(releases) {
   el.innerHTML = `
     <div class="cabinet-metric">
       <span class="cabinet-metric-value">${counts.total}</span>
-      <span class="cabinet-metric-label">Всего релизов</span>
+      <span class="cabinet-metric-label">Р’СЃРµРіРѕ СЂРµР»РёР·РѕРІ</span>
     </div>
     <div class="cabinet-metric">
       <span class="cabinet-metric-value">${counts.pending}</span>
-      <span class="cabinet-metric-label">На отгрузке</span>
+      <span class="cabinet-metric-label">РќР° РѕС‚РіСЂСѓР·РєРµ</span>
     </div>
     <div class="cabinet-metric">
       <span class="cabinet-metric-value">${counts.moderation}</span>
-      <span class="cabinet-metric-label">На модерации</span>
+      <span class="cabinet-metric-label">РќР° РјРѕРґРµСЂР°С†РёРё</span>
     </div>
     <div class="cabinet-metric">
       <span class="cabinet-metric-value">${counts.approved}</span>
-      <span class="cabinet-metric-label">Одобрено</span>
+      <span class="cabinet-metric-label">РћРґРѕР±СЂРµРЅРѕ</span>
     </div>
   `;
   el.classList.remove("hidden");
@@ -691,8 +583,8 @@ function renderCabinetList(releases) {
   if (!releases.length) {
     list.innerHTML = `
       <article class="cabinet-item">
-        <p class="cabinet-item-title">Пока нет релизов</p>
-        <p class="cabinet-item-meta">Отправьте первую анкету во вкладке «Анкета».</p>
+        <p class="cabinet-item-title">РџРѕРєР° РЅРµС‚ СЂРµР»РёР·РѕРІ</p>
+        <p class="cabinet-item-meta">РћС‚РїСЂР°РІСЊС‚Рµ РїРµСЂРІСѓСЋ Р°РЅРєРµС‚Сѓ РІРѕ РІРєР»Р°РґРєРµ В«РђРЅРєРµС‚Р°В».</p>
       </article>
     `;
     return;
@@ -706,10 +598,10 @@ function renderCabinetList(releases) {
 
   list.innerHTML = sorted.map((rel) => {
     const meta = getStatusMeta(rel.status);
-    const typeText = rel.type || "релиз";
-    const dateText = rel.date || "—";
+    const typeText = rel.type || "СЂРµР»РёР·";
+    const dateText = rel.date || "вЂ”";
     const reason = rel.reject_reason
-      ? `<p class="cabinet-item-meta">Причина: ${escapeHtml(rel.reject_reason)}</p>`
+      ? `<p class="cabinet-item-meta">РџСЂРёС‡РёРЅР°: ${escapeHtml(rel.reject_reason)}</p>`
       : "";
     const upc = rel.upc
       ? `<p class="cabinet-item-meta">UPC: ${escapeHtml(rel.upc)}</p>`
@@ -718,13 +610,13 @@ function renderCabinetList(releases) {
     return `
       <article class="cabinet-item">
         <div class="cabinet-item-head">
-          <p class="cabinet-item-title">${escapeHtml(rel.name || "Без названия")}</p>
+          <p class="cabinet-item-title">${escapeHtml(rel.name || "Р‘РµР· РЅР°Р·РІР°РЅРёСЏ")}</p>
           <span class="status-chip status-${escapeHtml(rel.status || "on_upload")}">
             ${meta.emoji} ${escapeHtml(meta.text)}
           </span>
         </div>
-        <p class="cabinet-item-meta">${escapeHtml(typeText)} • ${escapeHtml(dateText)} • ${escapeHtml(rel.genre || "—")}</p>
-        <p class="cabinet-item-meta">Артист: ${escapeHtml(rel.nick || "—")}</p>
+        <p class="cabinet-item-meta">${escapeHtml(typeText)} вЂў ${escapeHtml(dateText)} вЂў ${escapeHtml(rel.genre || "вЂ”")}</p>
+        <p class="cabinet-item-meta">РђСЂС‚РёСЃС‚: ${escapeHtml(rel.nick || "вЂ”")}</p>
         ${upc}
         ${reason}
       </article>
@@ -741,38 +633,27 @@ async function refreshCabinet() {
   if (!userId) {
     bindCard.classList.add("hidden");
     statusCard.classList.remove("hidden");
-    statusText.textContent = "Mini App открыт без авторизации Telegram. Запускайте его через кнопку в боте.";
+    statusText.textContent = "Mini App РѕС‚РєСЂС‹С‚ Р±РµР· Р°РІС‚РѕСЂРёР·Р°С†РёРё Telegram. Р—Р°РїСѓСЃРєР°Р№С‚Рµ РµРіРѕ С‚РѕР»СЊРєРѕ С‡РµСЂРµР· РєРЅРѕРїРєСѓ В«РћС‚РєСЂС‹С‚СЊ РїСЂРёР»РѕР¶РµРЅРёРµВ» РІ С‡Р°С‚Рµ СЃ Р±РѕС‚РѕРј.";
     document.getElementById("cabinetSummary").classList.add("hidden");
     document.getElementById("cabinetList").innerHTML = "";
     return;
   }
 
-  const supabaseResult = await loadCabinetFromSupabase(userId).catch(() => ({
-    ok: false,
-    approved: false,
-    releases: [],
-    updatedAt: ""
-  }));
+  const [cabinetJson, releasesJson] = await Promise.all([
+    loadJsonSafe(CABINET_USERS_URL),
+    loadJsonSafe(CABINET_RELEASES_URL)
+  ]);
 
-  const serverApproved = Boolean(supabaseResult?.approved);
+  const serverApproved = Boolean(cabinetJson?.users?.[userId]?.approved);
   const localApproved = isCabinetActiveLocal(userId);
   const approved = serverApproved || localApproved;
   appState.cabinet.approved = approved;
-  appState.cabinet.updatedAt = supabaseResult?.updatedAt || "";
-
-  if (!supabaseResult?.ok) {
-    bindCard.classList.remove("hidden");
-    statusCard.classList.remove("hidden");
-    statusText.textContent = "Нет подключения к Supabase. Проверьте data/supabase-config.json.";
-    document.getElementById("cabinetSummary").classList.add("hidden");
-    document.getElementById("cabinetList").innerHTML = "";
-    return;
-  }
+  appState.cabinet.updatedAt = releasesJson?.updated_at || "";
 
   if (!approved) {
     bindCard.classList.remove("hidden");
     statusCard.classList.remove("hidden");
-    statusText.textContent = "Кабинет не активирован. Нажмите «Подтвердить вход».";
+    statusText.textContent = "РљР°Р±РёРЅРµС‚ РЅРµ Р°РєС‚РёРІРёСЂРѕРІР°РЅ. РќР°Р¶РјРёС‚Рµ В«РџРѕРґС‚РІРµСЂРґРёС‚СЊ РІС…РѕРґВ».";
     document.getElementById("cabinetSummary").classList.add("hidden");
     document.getElementById("cabinetList").innerHTML = "";
     return;
@@ -780,9 +661,9 @@ async function refreshCabinet() {
 
   bindCard.classList.add("hidden");
   statusCard.classList.remove("hidden");
-  statusText.textContent = "Кабинет активен. Статусы синхронизируются с Supabase и ботом.";
+  statusText.textContent = "РљР°Р±РёРЅРµС‚ Р°РєС‚РёРІРµРЅ. РЎС‚Р°С‚СѓСЃС‹ СЃРёРЅС…СЂРѕРЅРёР·РёСЂСѓСЋС‚СЃСЏ СЃ Р±РѕС‚РѕРј Рё РјРѕРґРµСЂР°С†РёРµР№.";
 
-  const userReleases = Array.isArray(supabaseResult?.releases) ? supabaseResult.releases : [];
+  const userReleases = releasesJson?.users?.[userId] || [];
   const visible = userReleases.filter((rel) => !rel.user_deleted);
   appState.cabinet.releases = visible;
   renderCabinetSummary(visible);
@@ -792,17 +673,13 @@ async function refreshCabinet() {
 function activateCabinet() {
   const userId = getCurrentUserId();
   if (!userId) {
-    showToast("Откройте Mini App из Telegram.");
+    showToast("РћС‚РєСЂРѕР№С‚Рµ Mini App РёР· Telegram.");
     return;
   }
 
   const payload = {
     action: "cabinet_activate",
     source: "mini_app",
-    version: 3,
-    telegram_id: userId,
-    init_data: getTelegramInitData(),
-    request_id: `cab_${Date.now()}`,
     submitted_at: new Date().toISOString(),
     user: getTelegramUser() || null
   };
@@ -811,38 +688,16 @@ function activateCabinet() {
   if (tgApp?.sendData) {
     tgApp.sendData(JSON.stringify(payload));
     setCabinetActiveLocal(userId, true);
-    showToast("Запрос на активацию отправлен. Обновляем кабинет...");
+    showToast("Р—Р°РїСЂРѕСЃ РЅР° Р°РєС‚РёРІР°С†РёСЋ РѕС‚РїСЂР°РІР»РµРЅ. РћР±РЅРѕРІР»СЏРµРј РєР°Р±РёРЅРµС‚...");
     refreshCabinet();
     return;
   }
 
-  showToast("Привязка кабинета доступна только внутри Telegram-бота.");
-}
-
-function requestCabinetSync() {
-  const userId = getCurrentUserId();
-  if (!userId) {
-    return;
-  }
-  const tgApp = getTelegramWebApp();
-  if (!tgApp?.sendData) {
-    return;
-  }
-  const payload = {
-    action: "cabinet_sync_request",
-    source: "mini_app",
-    version: 3,
-    telegram_id: userId,
-    init_data: getTelegramInitData(),
-    request_id: `sync_${Date.now()}`,
-    submitted_at: new Date().toISOString(),
-    user: getTelegramUser() || null
-  };
-  tgApp.sendData(JSON.stringify(payload));
+  showToast("РџСЂРёРІСЏР·РєР° РєР°Р±РёРЅРµС‚Р° РґРѕСЃС‚СѓРїРЅР° С‚РѕР»СЊРєРѕ РІРЅСѓС‚СЂРё Telegram-Р±РѕС‚Р°.");
 }
 
 function buildArtistsCatalog() {
-  // Порядок важен: от большего числа слушателей к меньшему.
+  // РџРѕСЂСЏРґРѕРє РІР°Р¶РµРЅ: РѕС‚ Р±РѕР»СЊС€РµРіРѕ С‡РёСЃР»Р° СЃР»СѓС€Р°С‚РµР»РµР№ Рє РјРµРЅСЊС€РµРјСѓ.
   appState.artists = LABEL_ARTISTS.map((artist) => ({ ...artist }));
 }
 
@@ -856,7 +711,7 @@ function renderArtistFilter() {
   const releaseArtists = [...new Set(appState.releases.map((rel) => rel.artist))]
     .sort((a, b) => a.localeCompare(b));
   const options = [
-    { value: "all", label: "Все артисты" },
+    { value: "all", label: "Р’СЃРµ Р°СЂС‚РёСЃС‚С‹" },
     ...releaseArtists.map((name) => ({ value: name, label: name }))
   ];
   select.innerHTML = options
@@ -879,7 +734,7 @@ function renderReleasesGrid() {
         <p class="release-artist">${escapeHtml(rel.artist)}</p>
         <p class="release-date">${formatDate(rel.date)}</p>
       </div>
-      <button class="btn btn-ghost" data-open-release="${rel.id}" type="button">Открыть релиз</button>
+      <button class="btn btn-ghost" data-open-release="${rel.id}" type="button">РћС‚РєСЂС‹С‚СЊ СЂРµР»РёР·</button>
     </article>
   `).join("");
   observeLazyImages(grid);
@@ -894,10 +749,10 @@ function renderArtists() {
           <img class="artist-avatar lazy" data-src="${artist.avatar}" alt="${escapeHtml(artist.name)}" loading="lazy" decoding="async">
           <div>
             <p class="artist-name">${escapeHtml(artist.name)}</p>
-            <p class="artist-meta">Слушателей в месяц: ${formatNumber(artist.monthlyListeners)}</p>
+            <p class="artist-meta">РЎР»СѓС€Р°С‚РµР»РµР№ РІ РјРµСЃСЏС†: ${formatNumber(artist.monthlyListeners)}</p>
           </div>
         </div>
-        <button class="btn btn-ghost" data-open-artist="${escapeHtml(artist.name)}" data-artist-link="${escapeHtml(artist.profile || "")}" type="button">Открыть профиль</button>
+        <button class="btn btn-ghost" data-open-artist="${escapeHtml(artist.name)}" data-artist-link="${escapeHtml(artist.profile || "")}" type="button">РћС‚РєСЂС‹С‚СЊ РїСЂРѕС„РёР»СЊ</button>
       </article>
     `)
     .join("");
@@ -940,7 +795,6 @@ function switchTab(tabId) {
     item.classList.toggle("active", item.dataset.tab === tabId);
   });
   if (tabId === "cabinet") {
-    requestCabinetSync();
     refreshCabinet();
   }
   syncMainButton();
@@ -983,10 +837,10 @@ function normalizeReleaseTypeValue(value) {
   if (!raw) {
     return "";
   }
-  if (raw === "album" || raw === "альбом") {
+  if (raw === "album" || raw === "Р°Р»СЊР±РѕРј" || raw === "СЂВ°СЂВ»СЃСљСЂВ±СЂС•СЂС") {
     return "album";
   }
-  if (raw === "single" || raw === "singl" || raw === "сингл" || raw === "сингал" || raw === "сингел") {
+  if (raw === "single" || raw === "singl" || raw === "СЃРёРЅРіР»" || raw === "СЃРёРЅРіР°Р»" || raw === "СЃРёРЅРіРµР»" || raw === "СЃСљСЃС“СЂР…СЂС–СЂВ»") {
     return "single";
   }
   return "";
@@ -1007,9 +861,6 @@ function updateTracklistVisibility() {
 function buildSubmitPayload(form) {
   const formData = new FormData(form);
   const normalizedType = normalizeReleaseTypeValue(formData.get("type"));
-  const telegramId = getCurrentUserId();
-  const releaseType = normalizedType === "album" ? "album" : "single";
-
   const values = {
     type: normalizedType,
     name: limitText(formData.get("name"), 160),
@@ -1018,7 +869,7 @@ function buildSubmitPayload(form) {
     nick: limitText(formData.get("nick"), 90),
     fio: limitText(formData.get("fio"), 130),
     date: limitText(formData.get("date"), 20),
-    version: limitText(formData.get("version"), 90) || "Оригинал",
+    version: limitText(formData.get("version"), 90) || "РћСЂРёРіРёРЅР°Р»",
     genre: limitText(formData.get("genre"), 90),
     link: limitText(formData.get("link"), 320),
     yandex: limitText(formData.get("yandex"), 320) || ".",
@@ -1030,92 +881,79 @@ function buildSubmitPayload(form) {
   };
 
   const errors = [];
-  if (!telegramId) {
-    errors.push("Не удалось определить telegram_id. Откройте Mini App через бота.");
-  }
   if (!values.type) {
-    errors.push("Выберите тип релиза.");
+    errors.push("Р’С‹Р±РµСЂРёС‚Рµ С‚РёРї СЂРµР»РёР·Р°.");
   }
   if (!values.name) {
-    errors.push("Введите название релиза.");
+    errors.push("Р’РІРµРґРёС‚Рµ РЅР°Р·РІР°РЅРёРµ СЂРµР»РёР·Р°.");
   }
   if (!values.has_lyrics) {
-    errors.push("Укажите, есть ли слова в релизе.");
+    errors.push("РЈРєР°Р¶РёС‚Рµ, РµСЃС‚СЊ Р»Рё СЃР»РѕРІР° РІ СЂРµР»РёР·Рµ.");
   }
   if (!values.nick) {
-    errors.push("Введите ник исполнителя.");
+    errors.push("Р’РІРµРґРёС‚Рµ РЅРёРє РёСЃРїРѕР»РЅРёС‚РµР»СЏ.");
   }
   if (!values.fio) {
-    errors.push("Введите ФИО исполнителя.");
+    errors.push("Р’РІРµРґРёС‚Рµ Р¤РРћ РёСЃРїРѕР»РЅРёС‚РµР»СЏ.");
   }
   if (!values.date) {
-    errors.push("Укажите дату релиза.");
+    errors.push("РЈРєР°Р¶РёС‚Рµ РґР°С‚Сѓ СЂРµР»РёР·Р°.");
   }
   if (!values.genre) {
-    errors.push("Введите жанр.");
+    errors.push("Р’РІРµРґРёС‚Рµ Р¶Р°РЅСЂ.");
   }
   if (!values.link) {
-    errors.push("Добавьте ссылку на файлы.");
+    errors.push("Р”РѕР±Р°РІСЊС‚Рµ СЃСЃС‹Р»РєСѓ РЅР° С„Р°Р№Р»С‹.");
   }
   if (!values.tg) {
-    errors.push("Укажите Telegram для связи.");
+    errors.push("РЈРєР°Р¶РёС‚Рµ Telegram РґР»СЏ СЃРІСЏР·Рё.");
   }
   if (!values.mat) {
-    errors.push("Выберите, есть ли ненормативная лексика.");
+    errors.push("Р’С‹Р±РµСЂРёС‚Рµ, РµСЃС‚СЊ Р»Рё РЅРµРЅРѕСЂРјР°С‚РёРІРЅР°СЏ Р»РµРєСЃРёРєР°.");
   }
 
   const parsedDate = parseRuDate(values.date);
   if (!parsedDate) {
-    errors.push("Дата должна быть в формате ДД.ММ.ГГГГ.");
+    errors.push("Р”Р°С‚Р° РґРѕР»Р¶РЅР° Р±С‹С‚СЊ РІ С„РѕСЂРјР°С‚Рµ Р”Р”.РњРњ.Р“Р“Р“Р“.");
   } else {
     const minDays = values.type === "album" ? 7 : 3;
     const minDate = new Date();
     minDate.setHours(0, 0, 0, 0);
     minDate.setDate(minDate.getDate() + minDays);
     if (parsedDate < minDate) {
-      errors.push(`Дата релиза должна быть минимум через ${minDays} дней.`);
+      errors.push(`Р”Р°С‚Р° СЂРµР»РёР·Р° РґРѕР»Р¶РЅР° Р±С‹С‚СЊ РјРёРЅРёРјСѓРј С‡РµСЂРµР· ${minDays} РґРЅРµР№.`);
     }
   }
 
   if (values.link && !isHttpUrl(values.link)) {
-    errors.push("Ссылка на файлы должна начинаться с http:// или https://.");
+    errors.push("РЎСЃС‹Р»РєР° РЅР° С„Р°Р№Р»С‹ РґРѕР»Р¶РЅР° РЅР°С‡РёРЅР°С‚СЊСЃСЏ СЃ http:// РёР»Рё https://.");
   }
   if (values.yandex !== "." && !isHttpUrl(values.yandex)) {
-    errors.push("Поле Яндекс Музыка: укажите URL или точку.");
+    errors.push("РџРѕР»Рµ РЇРЅРґРµРєСЃ РњСѓР·С‹РєР°: СѓРєР°Р¶РёС‚Рµ URL РёР»Рё С‚РѕС‡РєСѓ.");
   }
   if (values.type === "album" && values.tracklist === ".") {
-    errors.push("Для альбома обязательно заполните Tracklist.");
+    errors.push("Р”Р»СЏ Р°Р»СЊР±РѕРјР° РѕР±СЏР·Р°С‚РµР»СЊРЅРѕ Р·Р°РїРѕР»РЅРёС‚Рµ Tracklist.");
   }
 
   if (values.type !== "album") {
     values.tracklist = ".";
   }
 
-  const formPayload = {
-    ...values,
-    artist_name: values.nick,
-    track_name: values.name,
-    release_type: releaseType,
-    telegram_id: telegramId,
-    telegram_contact: values.tg
-  };
-
+  const userId = getCurrentUserId();
   const payload = {
     action: "webapp_release_submit",
     source: "mini_app",
-    version: 3,
-    request_id: `rel_${Date.now()}`,
+    version: 2,
     submitted_at: new Date().toISOString(),
-    telegram_id: telegramId,
-    init_data: getTelegramInitData(),
+    telegram_id: userId,
     user: getTelegramUser() || null,
-    form: formPayload
+    form: { ...values, telegram_id: userId }
   };
 
   const payloadJson = JSON.stringify(payload);
   const payloadBytes = getByteLength(payloadJson);
   if (payloadBytes > 3800) {
-    errors.push("Анкета слишком большая. Сократите промо, комментарий и tracklist.");
+    errors.push("РђРЅРєРµС‚Р° СЃР»РёС€РєРѕРј Р±РѕР»СЊС€Р°СЏ. РЎРѕРєСЂР°С‚РёС‚Рµ РїСЂРѕРјРѕ, РєРѕРјРјРµРЅС‚Р°СЂРёР№ Рё tracklist.");
   }
 
   if (errors.length) {
@@ -1137,49 +975,64 @@ async function submitReleaseForm(event) {
     return;
   }
 
-  const afterSuccess = () => {
+  const apiResult = await submitViaBotApi(result.payload, "submit_form");
+  if (apiResult.ok) {
     tgApp?.HapticFeedback?.notificationOccurred?.("success");
-    showToast("Анкета отправлена. Проверьте «Кабинет» и чат с ботом.");
+    if (apiResult.data?.duplicate) {
+      showToast("Дубликат анкеты: уже есть в системе.");
+    } else {
+      showToast("Анкета отправлена в модерацию.");
+    }
     form.reset();
     updateTracklistVisibility();
     syncMainButton();
     switchTab("cabinet");
-  };
+    return;
+  }
 
-  if (!tgApp?.sendData) {
+  if (tgApp?.sendData) {
+    try {
+      tgApp.sendData(result.payloadJson || JSON.stringify(result.payload));
+      tgApp.HapticFeedback?.notificationOccurred?.("success");
+      showToast("Анкета передана в Telegram. Ожидайте ответ бота в чате.");
+      form.reset();
+      updateTracklistVisibility();
+      syncMainButton();
+      switchTab("cabinet");
+      return;
+    } catch (e) {
+      console.error("[WEBAPP_DIAG] sendData failed", e);
+    }
+  } else {
     console.error("Telegram.WebApp.sendData unavailable");
-    showToast("Ошибка: Mini App открыт не через Telegram WebApp.");
-    return;
   }
 
-  try {
-    tgApp.sendData(result.payloadJson || JSON.stringify(result.payload));
-  } catch (e) {
-    console.error("Telegram sendData failed:", e);
-    tgApp?.HapticFeedback?.notificationOccurred?.("error");
-    showToast(`Ошибка отправки: ${normalizeText(e?.message || e) || "попробуйте позже"}`);
-    return;
-  }
-
-  afterSuccess();
+  tgApp?.HapticFeedback?.notificationOccurred?.("error");
+  showToast(`Ошибка отправки: ${apiResult.error || "канал недоступен"}`);
 }
 
-function sendDiagnosticTestPayload() {
+async function sendDiagnosticTestPayload() {
   const tgApp = logWebAppSendDiagnostics("diag_button");
-  if (!tgApp?.sendData) {
-    console.error("Telegram.WebApp.sendData unavailable");
-    showToast("Ошибка: Telegram.WebApp undefined.");
+  const apiResult = await runBotApiDiag("test анкета");
+  if (apiResult.ok) {
+    tgApp?.HapticFeedback?.notificationOccurred?.("success");
+    showToast("Тест API отправлен в модерацию.");
     return;
   }
-  try {
-    tgApp.sendData("test анкета");
-    tgApp.HapticFeedback?.notificationOccurred?.("success");
-    showToast("Тест sendData отправлен.");
-  } catch (e) {
-    console.error("[WEBAPP_DIAG] test sendData failed", e);
-    tgApp.HapticFeedback?.notificationOccurred?.("error");
-    showToast("Ошибка тестовой отправки sendData.");
+  if (tgApp?.sendData) {
+    try {
+      tgApp.sendData("test анкета");
+      tgApp.HapticFeedback?.notificationOccurred?.("success");
+      showToast("Тест sendData отправлен.");
+      return;
+    } catch (e) {
+      console.error("[WEBAPP_DIAG] test sendData failed", e);
+    }
+  } else {
+    console.error("Telegram.WebApp.sendData unavailable");
   }
+  tgApp?.HapticFeedback?.notificationOccurred?.("error");
+  showToast(`Ошибка теста: ${apiResult.error || "канал недоступен"}`);
 }
 
 function syncMainButton() {
@@ -1189,11 +1042,11 @@ function syncMainButton() {
   }
   const canShow = appState.activeTab === "submit";
   tgApp.MainButton.setParams({ color: "#8154ff", text_color: "#ffffff", is_visible: canShow });
-  tgApp.MainButton.setText("Отправить анкету");
+  tgApp.MainButton.setText("РћС‚РїСЂР°РІРёС‚СЊ Р°РЅРєРµС‚Сѓ");
   tgApp.MainButton.offClick(handleMainButtonClick);
   tgApp.MainButton.onClick(handleMainButtonClick);
   if (canShow && !document.getElementById("submitForm").checkValidity()) {
-    tgApp.MainButton.setText("Заполните анкету");
+    tgApp.MainButton.setText("Р—Р°РїРѕР»РЅРёС‚Рµ Р°РЅРєРµС‚Сѓ");
   }
   if (canShow) {
     tgApp.MainButton.show();
@@ -1247,7 +1100,7 @@ function wireEvents() {
       if (directLink) {
         safeOpenLink(directLink);
       } else {
-        showToast(`Профиль ${artistBtn.dataset.openArtist} пока без ссылки.`);
+        showToast(`РџСЂРѕС„РёР»СЊ ${artistBtn.dataset.openArtist} РїРѕРєР° Р±РµР· СЃСЃС‹Р»РєРё.`);
       }
       return;
     }
@@ -1331,8 +1184,9 @@ function hideLoader() {
   document.getElementById("app").classList.remove("hidden");
 }
 
-function bootstrap() {
+async function bootstrap() {
   initTelegramWebApp();
+  await initRuntimeConfig();
   buildArtistsCatalog();
   renderStats();
   renderArtistFilter();
@@ -1354,7 +1208,11 @@ function bootstrap() {
 }
 
 if (HAS_DOM) {
-  window.addEventListener("load", bootstrap);
+  window.addEventListener("load", () => {
+    bootstrap().catch((err) => {
+      console.error("Mini App bootstrap failed:", err);
+    });
+  });
 } else {
   // If hosting starts this file with Node.js, jump directly to the Node bot runtime.
   if (typeof process !== "undefined" && process?.versions?.node) {
@@ -1402,5 +1260,4 @@ if (HAS_DOM) {
     }
   }
 }
-
 

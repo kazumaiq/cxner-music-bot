@@ -2558,6 +2558,7 @@ function createFormSession(uid, user) {
     user,
     step: 'type',
     form: {
+      telegram_id: String(uid),
       type: '',
       name: '',
       subname: '.',
@@ -2871,6 +2872,7 @@ async function handleFormCallback(query, data) {
   }
 
   if (data === 'form_send') {
+    s.form.telegram_id = String(uid);
     const vr = validateForm(s.form);
     if (vr.errors.length) {
       const list = vr.errors.slice(0, 5).map((e) => `• ${esc(e)}`).join('\n');
@@ -3906,6 +3908,8 @@ async function processWebAppData(msg) {
     return;
   }
 
+  if (!parsed.telegram_id) parsed.telegram_id = uid;
+  if (!parsed.form.telegram_id) parsed.form.telegram_id = uid;
   const vr = validateForm(parsed.form, parsed);
   if (vr.errors.length) {
     const list = vr.errors.slice(0, 8).map((e) => `• ${esc(e)}`).join('\n');
@@ -4677,7 +4681,9 @@ async function loop() {
     console.info(`[bot] backup import: added=${imported.added}, merged=${imported.merged}`);
   }
   if (SUPABASE_SYNC_ENABLED) {
+    const keyLen = (SUPABASE_SERVICE_ROLE_KEY || '').length;
     console.info(`[bot] supabase sync: enabled (${SUPABASE_URL})`);
+    console.info(`[bot] supabase key: length=${keyLen}${keyLen < 180 ? ' (возможно anon или обрезка — нужен service_role)' : ''}`);
     console.info(
       `[bot] supabase tables: ${SUPABASE_RELEASES_TABLE}, ${SUPABASE_CABINET_TABLE}, ` +
       `${SUPABASE_FORMS_TABLE}, ${SUPABASE_USERS_TABLE}, ${SUPABASE_PUBLIC_RELEASES_TABLE}`
