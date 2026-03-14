@@ -4265,7 +4265,7 @@ def main():
             CONFIRM: [CallbackQueryHandler(button)],
         },
         fallbacks=[CommandHandler('start', start_cmd), CommandHandler('cancel', cancel_cmd)],
-        per_message=False,
+        per_message=True,
         per_chat=True
     )
     
