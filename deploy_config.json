@@ -7,7 +7,7 @@
   "TG_FETCH_RETRIES": 2,
   "TG_FETCH_RETRY_DELAY_MS": 800,
   "ADMIN_IDS": [881379104],
-  "PUBLIC_BASE_URL": "https://zjwlprncjmtbcdlypdwx.supabase.co",
+  "PUBLIC_BASE_URL": "sb_publishable_7qKz4xGiDsbbL272zSWgaQ_cJhMCtto",
   "WEBAPP_URL": "",
   "ENABLE_WEB_SERVER": false,
   "WEB_SERVER_HOST": "0.0.0.0",
