@@ -4266,7 +4266,7 @@ def main():
         },
         fallbacks=[CommandHandler('start', start_cmd), CommandHandler('cancel', cancel_cmd)],
         per_message=True,
-        per_chat=True
+        per_chat=True,
     )
     
     app.add_handler(conv)
