@@ -1,10 +1,11 @@
-﻿import asyncio
+import asyncio
 import json
 import os
 import re
 import sys
 import tempfile
 import threading
+import warnings
 from datetime import datetime, timedelta
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +45,14 @@ try:
         sys.stderr.reconfigure(encoding="utf-8")
 except Exception:
     pass
+
+# PTB с per_message=False выдаёт предупреждение; с per_message=True все хендлеры должны быть CallbackQueryHandler.
+# У нас форма с MessageHandler, оставляем per_message=False и скрываем предупреждение.
+try:
+    from telegram.warnings import PTBUserWarning
+    warnings.filterwarnings("ignore", message=".*per_message.*", category=PTBUserWarning)
+except ImportError:
+    warnings.filterwarnings("ignore", message=".*per_message.*", category=UserWarning)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -4265,7 +4274,7 @@ def main():
             CONFIRM: [CallbackQueryHandler(button)],
         },
         fallbacks=[CommandHandler('start', start_cmd), CommandHandler('cancel', cancel_cmd)],
-        per_message=True,
+        per_message=False,
         per_chat=True,
     )
     
