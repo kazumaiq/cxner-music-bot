@@ -1,6 +1,14 @@
+# -*- coding: utf-8 -*-
+# На нодах без UTF-8 (например Амстердам) русский текст может уходить в Telegram кракозябрами.
+# Задаём локаль до импортов, чтобы строки в коде и при отправке были в UTF-8.
+import os
+if os.environ.get("LANG", "").strip() in ("", "C", "POSIX"):
+    os.environ["LANG"] = "en_US.UTF-8"
+if os.environ.get("LC_ALL", "").strip() in ("", "C", "POSIX"):
+    os.environ["LC_ALL"] = "en_US.UTF-8"
+
 import asyncio
 import json
-import os
 import re
 import sys
 import tempfile
