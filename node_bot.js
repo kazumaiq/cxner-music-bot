@@ -1683,11 +1683,17 @@ function isHttpUrl(v) {
 }
 function fmtForm(user, uid, r) {
   const u = user?.username ? `@${user.username}` : 'нет';
+  const src = clean(r.source || '');
+  let sourceLine = 'Источник: 🤖 TELEGRAM';
+  if (src === 'web') {
+    sourceLine = 'Источник: 🌐 САЙТ';
+  }
   const yandexText = r.yandex === 'create_new_card' ? 'Создать новую карточку' : (r.yandex || '.');
   const lines = [
     '🎵 <b>НОВАЯ АНКЕТА!</b>',
+    esc(sourceLine),
     `От: ${esc(u)}`,
-    `ID: <code>${esc(uid)}</code>`,
+    `ID: <code>${esc(r.telegram_id || uid || '—')}</code>`,
     `Тип: ${esc(r.type || '—')}`,
     '',
     `🎵 <b>Название:</b> ${esc(r.name || '—')}`,
