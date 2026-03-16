@@ -4576,6 +4576,79 @@ function startStaticServer() {
         res.end();
         return;
       }
+      if (u.pathname === '/api/new-release' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk;
+          if (body.length > WEBAPP_MAX_PAYLOAD_BYTES) req.destroy();
+        });
+        req.on('end', async () => {
+          try {
+            const payload = JSON.parse(body || '{}');
+            const formId = clean(payload.form_id || '');
+            if (!formId) {
+              sendJson(res, 400, { ok: false, error: 'form_id is required' });
+              return;
+            }
+
+            const rows = await supabaseSelectWhere(
+              SUPABASE_FORMS_TABLE,
+              'id,telegram_id,username,artist_name,track_name,genre,release_type,status,reject_reason,upc,submission_key,source,created_at,updated_at,form_payload',
+              [{ key: 'id', value: formId }],
+              '',
+              1
+            );
+            const formRow = Array.isArray(rows) && rows[0] ? rows[0] : null;
+            if (!formRow) {
+              sendJson(res, 404, { ok: false, error: 'form not found' });
+              return;
+            }
+
+            const uid = clean(formRow.telegram_id || '');
+            if (!uid) {
+              sendJson(res, 400, { ok: false, error: 'telegram_id is empty in form' });
+              return;
+            }
+
+            const payloadForm = formRow.form_payload && typeof formRow.form_payload === 'object'
+              ? formRow.form_payload
+              : {};
+
+            const releaseData = normalizeRelease({
+              ...payloadForm,
+              type: normalizeType(payload.release_type || payloadForm.type || formRow.release_type) || 'сингл',
+              name: clean(payload.track_name || payloadForm.name || formRow.track_name || ''),
+              nick: clean(payload.artist_name || payloadForm.nick || formRow.artist_name || ''),
+              genre: clean(payload.genre || payloadForm.genre || formRow.genre || ''),
+              tg: clean(payloadForm.tg || payloadForm.telegram_contact || ''),
+              status: STATUS.ON_UPLOAD,
+              submission_time: clean(formRow.submission_key || formRow.created_at || payloadForm.submission_time || ''),
+              source: clean(formRow.source || payloadForm.source || 'web'),
+              username: clean(formRow.username || payloadForm.username || '')
+            });
+
+            const fakeUser = { id: Number(uid), username: releaseData.username || '' };
+            const out = await submitReleaseToModeration(fakeUser, uid, releaseData, releaseData.source || 'web');
+
+            await supabasePatchFormByRelease(uid, { ...releaseData, supabase_form_id: formId }, {
+              status: FORM_STATUS.ON_MODERATION,
+              moderation_message_id: Number(out?.rel?.moderation_message_id || 0) || null,
+              form_payload: safeJson(out?.rel || releaseData) || {}
+            });
+
+            sendJson(res, 200, {
+              ok: true,
+              user_id: uid,
+              idx: out?.idx ?? null,
+              moderation_message_id: out?.rel?.moderation_message_id ?? null
+            });
+          } catch (e) {
+            console.error('[api/new-release] failed:', clean(e?.message || e));
+            sendJson(res, 500, { ok: false, error: 'internal_error' });
+          }
+        });
+        return;
+      }
       if (u.pathname === '/api/miniapp/ping') {
         sendJson(res, 200, {
           ok: true,
