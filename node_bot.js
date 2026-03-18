@@ -2606,7 +2606,13 @@ async function sendFormStep(chatId, uid) {
     return;
   }
   if (s.step === 'name') { await sendText(chatId, '🎵 Название релиза:'); return; }
-  if (s.step === 'subname') { await sendText(chatId, '✨ Саб-название (если нет, отправьте точку "."):'); return; }
+  if (s.step === 'subname') {
+    await sendText(
+      chatId,
+      '✨ Саб-название (если нет, отправьте точку "."): ℹ️ Саб-название — это дополнительная подпись к названию релиза. Пример: Remix, Slowed, Instrumental, Extended Mix.'
+    );
+    return;
+  }
   if (s.step === 'has_lyrics') {
     await sendText(chatId, '🗣 Есть слова в релизе?', {
       reply_markup: {
@@ -2621,25 +2627,68 @@ async function sendFormStep(chatId, uid) {
     });
     return;
   }
-  if (s.step === 'nick') { await sendText(chatId, '🎤 Ник исполнителя:'); return; }
-  if (s.step === 'fio') { await sendText(chatId, '🪪 ФИО исполнителя:'); return; }
-  if (s.step === 'date') { await sendText(chatId, '📅 Дата релиза в формате ДД.ММ.ГГГГ:'); return; }
-  if (s.step === 'version') { await sendText(chatId, '🧩 Версия релиза (или "Оригинал"):'); return; }
-  if (s.step === 'genre') { await sendText(chatId, '🎚 Жанр:'); return; }
-  if (s.step === 'link') { await sendText(chatId, '🔗 Ссылка на файлы (http/https):'); return; }
+  if (s.step === 'nick') {
+    await sendText(
+      chatId,
+      '🎤 Ник исполнителя: ℹ️ Это сценическое имя артиста, которое будет отображаться на стриминговых сервисах.'
+    );
+    return;
+  }
+  if (s.step === 'fio') {
+    await sendText(
+      chatId,
+      '🪪 ФИО исполнителя: ℹ️ Укажите настоящее имя исполнителя. Это требуется для документов и авторских прав.'
+    );
+    return;
+  }
+  if (s.step === 'date') {
+    await sendText(
+      chatId,
+      '📅 Дата релиза в формате ДД.ММ.ГГГГ: ℹ️ Укажите дату выхода релиза на площадках минимум за 4 дня.'
+    );
+    return;
+  }
+  if (s.step === 'version') {
+    await sendText(
+      chatId,
+      '🧩 Версия релиза (или "Оригинал"): ℹ️ Если это обычная версия трека — напишите "-". Если другая версия: Remix, Slowed, Sped Up, Instrumental.'
+    );
+    return;
+  }
+  if (s.step === 'genre') {
+    await sendText(
+      chatId,
+      '🏷 Жанр: ℹ️ Укажите основной жанр трека. Примеры: Phonk, Brazilian Funk, Hip-Hop, Trap, EDM.'
+    );
+    return;
+  }
+  if (s.step === 'link') {
+    await sendText(
+      chatId,
+      '🔗 Ссылка на файлы (http/https): ℹ️ В ссылке на Яндекс/Google Диск должна быть папка со следующими файлами: 1) обложка релиза JPG 3000x3000; 2) трек WAV 44100Hz 16 или 24 bit; 3) скриншот(ы) проекта как доказательство авторства.'
+    );
+    return;
+  }
   if (s.step === 'yandex') {
-    await sendText(chatId, '🟡 Ссылка на карточку артиста в Яндекс Музыке.\nОтправьте URL, точку "." или нажмите кнопку ниже.', {
+    await sendText(
+      chatId,
+      '🟡 Ссылка на карточку артиста в Яндекс Музыке ℹ️ Отправьте ссылку на существующую карточку артиста. Если карточки нет — нажмите кнопку "Создать новую карточку".\nОтправьте URL, точку "." или нажмите кнопку ниже.',
+      {
       reply_markup: {
         inline_keyboard: [
           [{ text: '➕ Создать новую карточку', callback_data: 'form_yandex_new_card' }],
           [{ text: '✖️ Отмена', callback_data: 'form_cancel' }]
         ]
       }
-    });
+    }
+    );
     return;
   }
   if (s.step === 'mat') {
-    await sendText(chatId, '⚠️ Есть ненормативная лексика?', {
+    await sendText(
+      chatId,
+      '⚠️ Есть ненормативная лексика? ℹ️ Выберите "Да", если в тексте трека присутствует мат. Если трек чистый — выберите "Нет".',
+      {
       reply_markup: {
         inline_keyboard: [
           [
@@ -2649,22 +2698,57 @@ async function sendFormStep(chatId, uid) {
           [{ text: '✖️ Отмена', callback_data: 'form_cancel' }]
         ]
       }
-    });
+    }
+    );
     return;
   }
-  if (s.step === 'promo') { await sendText(chatId, '📢 Промо-текст (или точка "."):'); return; }
-  if (s.step === 'comment') { await sendText(chatId, '💬 Комментарий (или точка "."):'); return; }
+  if (s.step === 'promo') {
+    await sendText(
+      chatId,
+      '📢 Промо-текст (или точка "."): ℹ️ Это описание релиза для редакторов площадок. Кратко опишите стиль трека, атмосферу и для каких плейлистов он подходит.'
+    );
+    return;
+  }
+  if (s.step === 'comment') {
+    await sendText(
+      chatId,
+      '💬 Комментарий (или точка "."): ℹ️ Дополнительная информация для модераторов. Можно оставить пустым.'
+    );
+    return;
+  }
   if (s.step === 'tracklist') { await sendText(chatId, '📋 Tracklist для альбома (обязательно):'); return; }
-  if (s.step === 'tg') { await sendText(chatId, '📱 Контакт Telegram для связи (@username):'); return; }
+  if (s.step === 'tg') {
+    await sendText(
+      chatId,
+      '📱 Контакт Telegram для связи (@username): ℹ️ Укажите ваш Telegram username для связи с менеджером.'
+    );
+    return;
+  }
   if (s.step === 'confirm') {
     const preview = fmtForm(s.user, s.uid, s.form);
     await sendText(chatId, `🧾 <b>Проверьте анкету</b>\n\n${preview}`, {
-      parse_mode: 'HTML',
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '✅ Отправить в модерацию', callback_data: 'form_send' }],
-          [{ text: '✖️ Отмена', callback_data: 'form_cancel' }]
-        ]
+      parse_mode: 'HTML'
+    });
+    await sendText(chatId,
+      '⚠️ Перед отправкой релиза внимательно проверьте анкету. Отправляя релиз в модерацию, вы подтверждаете, что:\n' +
+      '• все данные указаны корректно\n' +
+      '• файлы соответствуют требованиям\n' +
+      '• обложка соответствует правилам площадок\n' +
+      '• у вас есть права на использование всех материалов релиза\n\n' +
+      'Если данные указаны неверно или файлы не соответствуют требованиям:\n' +
+      '• релиз может быть отклонён модерацией\n' +
+      '• релиз может быть снят с отгрузки\n' +
+      '• релиз может не выйти в указанную дату\n' +
+      '• релиз может быть удалён до исправления ошибок\n\n' +
+      'Команда CXRNER MUSIC не несёт ответственности за задержку выхода релиза, если анкета заполнена неверно или файлы не соответствуют требованиям.\n' +
+      'Отправляя релиз, вы подтверждаете согласие с правилами загрузки и пользовательским соглашением.',
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✅ Подтвердить и отправить', callback_data: 'form_confirm_send' }],
+            [{ text: '❌ Отмена', callback_data: 'form_cancel' }]
+          ]
+        }
       }
     });
   }
@@ -2877,7 +2961,7 @@ async function handleFormCallback(query, data) {
     return true;
   }
 
-  if (data === 'form_send') {
+  if (data === 'form_send' || data === 'form_confirm_send') {
     s.form.telegram_id = String(uid);
     const vr = validateForm(s.form);
     if (vr.errors.length) {
