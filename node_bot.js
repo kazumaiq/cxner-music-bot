@@ -2729,7 +2729,7 @@ async function sendFormStep(chatId, uid) {
     await sendText(chatId, `🧾 <b>Проверьте анкету</b>\n\n${preview}`, {
       parse_mode: 'HTML'
     });
-    await sendText(chatId,
+    const warningText =
       '⚠️ Перед отправкой релиза внимательно проверьте анкету. Отправляя релиз в модерацию, вы подтверждаете, что:\n' +
       '• все данные указаны корректно\n' +
       '• файлы соответствуют требованиям\n' +
@@ -2741,14 +2741,14 @@ async function sendFormStep(chatId, uid) {
       '• релиз может не выйти в указанную дату\n' +
       '• релиз может быть удалён до исправления ошибок\n\n' +
       'Команда CXRNER MUSIC не несёт ответственности за задержку выхода релиза, если анкета заполнена неверно или файлы не соответствуют требованиям.\n' +
-      'Отправляя релиз, вы подтверждаете согласие с правилами загрузки и пользовательским соглашением.',
-      {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '✅ Подтвердить и отправить', callback_data: 'form_confirm_send' }],
-            [{ text: '❌ Отмена', callback_data: 'form_cancel' }]
-          ]
-        }
+      'Отправляя релиз, вы подтверждаете согласие с правилами загрузки и пользовательским соглашением.';
+
+    await sendText(chatId, warningText, {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '✅ Подтвердить и отправить', callback_data: 'form_confirm_send' }],
+          [{ text: '❌ Отмена', callback_data: 'form_cancel' }]
+        ]
       }
     });
   }
