@@ -212,6 +212,7 @@ const WEB_HOST = envStr('WEB_SERVER_HOST', '0.0.0.0');
 const WEB_PORT = envInt('PORT', envInt('WEB_SERVER_PORT', 8080));
 const WEB_DIR = envStr('WEB_SERVER_DIR', 'webapp');
 const WEB_ENABLED = envBool('ENABLE_WEB_SERVER', false);
+const WEBHOOK_SECRET = envStr('BOT_BACKEND_SECRET', '');
 const ADMIN_IDS = envIntList('ADMIN_IDS', [881379104]);
 const MODERATION_HEALTH_TTL_MS = envInt('MODERATION_HEALTH_TTL_MS', 180000);
 const TELEGRAM_INITDATA_MAX_AGE_SEC = envInt('TELEGRAM_INITDATA_MAX_AGE_SEC', 86400);
@@ -4667,6 +4668,10 @@ function startStaticServer() {
         return;
       }
       if (u.pathname === '/api/new-release' && req.method === 'POST') {
+        if (!WEBHOOK_SECRET || clean(req.headers['x-cxrner-secret'] || '') !== WEBHOOK_SECRET) {
+          sendJson(res, 401, { ok: false, error: 'unauthorized' });
+          return;
+        }
         let body = '';
         req.on('data', (chunk) => {
           body += chunk;
