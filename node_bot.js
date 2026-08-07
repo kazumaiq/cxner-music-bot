@@ -2057,6 +2057,9 @@ function parseModerationReplyShortcut(text) {
   return null;
 }
 async function notifyArtistAboutRelease(uid, rel, status) {
+  // Web submissions use a Supabase Auth UUID, not a numeric Telegram chat ID.
+  // Their status is synchronized through Supabase; only Telegram users can be DM'd.
+  if (!/^\d{4,20}$/.test(clean(uid))) return;
   try {
     const canon = canonicalStatus(status);
     let note = `${statusEmoji(canon)} <b>${esc(statusText(canon))}</b>\n\n`;
@@ -2246,7 +2249,9 @@ async function handleModerationReplyMessage(msg) {
       reply_to_message_id: Number(rel.moderation_message_id || fallbackMessageId || 0) || undefined
     });
     try {
-      await sendText(Number(uid), `📦 <b>UPC присвоен</b>\n\n🎵 <b>${esc(rel.name || 'Релиз')}</b>\nUPC: <code>${esc(upc)}</code>`);
+      if (/^\d{4,20}$/.test(clean(uid))) {
+        await sendText(Number(uid), `📦 <b>UPC присвоен</b>\n\n🎵 <b>${esc(rel.name || 'Релиз')}</b>\nUPC: <code>${esc(upc)}</code>`);
+      }
     } catch (e) {
       console.error('[MODERATION] upc notify failed:', clean(e?.message || e));
     }
@@ -2443,7 +2448,7 @@ function validateForm(form, envelope = {}) {
   };
 }
 
-async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_app') {
+async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_app', options = {}) {
   await ensureModerationHealth(false);
   db[uid] = Array.isArray(db[uid]) ? db[uid] : [];
   const idx = db[uid].length;
@@ -2457,7 +2462,8 @@ async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_
   };
 
   if (SUPABASE_SYNC_ENABLED) {
-    const formId = await supabaseInsertForm(uid, user, rel, FORM_STATUS.PENDING);
+    const existingFormId = clean(options.existing_form_id || '');
+    const formId = existingFormId || await supabaseInsertForm(uid, user, rel, FORM_STATUS.PENDING);
     if (formId) rel.supabase_form_id = formId;
   }
 
@@ -4597,7 +4603,7 @@ async function onCallback(query) {
     await refreshModerationMessage(uid, idx, rel, Number(query.message?.message_id || 0));
     return;
   }
-  const m = /^m_(upload|moderate|approve|reject|needfix|delete|upc)_(\d+)_(\d+)$/.exec(data);
+  const m = /^m_(upload|moderate|approve|reject|needfix|delete|upc)_([A-Za-z0-9_-]+)_(\d+)$/.exec(data);
   if (m) {
     if (m[1] === 'reject') {
       await startModerationReplyFlow(query, 'reject_reason', m[2], Number.parseInt(m[3], 10));
@@ -4712,7 +4718,9 @@ function startStaticServer() {
             });
 
             const fakeUser = { id: Number(uid), username: releaseData.username || '' };
-            const out = await submitReleaseToModeration(fakeUser, uid, releaseData, releaseData.source || 'web');
+            const out = await submitReleaseToModeration(fakeUser, uid, releaseData, releaseData.source || 'web', {
+              existing_form_id: formId
+            });
 
             await supabasePatchFormByRelease(uid, { ...releaseData, supabase_form_id: formId }, {
               status: FORM_STATUS.ON_MODERATION,
