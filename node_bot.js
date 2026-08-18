@@ -972,6 +972,10 @@ function buildSupabaseFormRow(userId, user, rel, status = FORM_STATUS.PENDING) {
     release_type: type
   }) || {};
   const submissionKey = clean(relSafe.submission_time || now);
+  const parsedSubmissionDate = Date.parse(submissionKey);
+  const createdAt = Number.isFinite(parsedSubmissionDate)
+    ? new Date(parsedSubmissionDate).toISOString()
+    : now;
   return {
     telegram_id: uid,
     username: clean(user?.username || relSafe.username || ''),
@@ -986,7 +990,7 @@ function buildSupabaseFormRow(userId, user, rel, status = FORM_STATUS.PENDING) {
     source: clean(relSafe.source || 'mini_app'),
     submission_key: submissionKey,
     form_payload: payload,
-    created_at: submissionKey,
+    created_at: createdAt,
     updated_at: now
   };
 }
