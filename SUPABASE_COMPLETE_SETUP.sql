@@ -146,3 +146,6 @@ end $$;
 
 insert into storage.buckets (id, name, public) values ('covers', 'covers', true)
 on conflict (id) do update set public = true;
+
+-- Refresh PostgREST schema cache immediately after creating tables.
+notify pgrst, 'reload schema';
