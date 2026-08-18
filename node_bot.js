@@ -4903,6 +4903,18 @@ function startStaticServer() {
     console.info(`[web] static server started: http://${WEB_HOST}:${WEB_PORT} (dir: ${root})`);
     console.info(`[web] diagnostics: /health and /api/miniapp/diagnostics`);
     console.info(`[web] runtime env: PORT=${clean(process.env.PORT || '(unset)')} WEBAPP_URL=${clean(process.env.WEBAPP_URL || '(from deploy_config)')}`);
+    console.info(`[web] BotFather Main App URL: ${WEBAPP_URL || '(not configured)'}`);
+    const checkRoute = (route) => new Promise((resolve) => {
+      const request = http.get({ hostname: '127.0.0.1', port: WEB_PORT, path: route, timeout: 5000 }, (response) => {
+        response.resume();
+        response.on('end', () => resolve(`${route}=${response.statusCode}`));
+      });
+      request.on('error', (error) => resolve(`${route}=ERROR:${clean(error?.code || error?.message || error)}`));
+      request.on('timeout', () => { request.destroy(); resolve(`${route}=TIMEOUT`); });
+    });
+    Promise.all(['/health', '/index.html', '/api/miniapp/ping'].map(checkRoute))
+      .then((checks) => console.info(`[web-check] local routes: ${checks.join(' ')}`))
+      .catch((error) => console.error(`[web-check] failed: ${clean(error?.message || error)}`));
   });
 }
 
