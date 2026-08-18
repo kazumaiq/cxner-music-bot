@@ -5,7 +5,28 @@ create extension if not exists pgcrypto;
 create table if not exists public.featured_release (id text primary key, title text not null, artist text not null, cover text not null, updated_at timestamptz not null default now());
 create table if not exists public.releases_config (id text primary key, items jsonb not null default '[]'::jsonb, updated_at timestamptz not null default now());
 create table if not exists public.artists_config (id text primary key, items jsonb not null default '[]'::jsonb, updated_at timestamptz not null default now());
-create table if not exists public.cxrner_cabinet_users (user_id uuid primary key references auth.users(id) on delete cascade, profile jsonb not null default '{}'::jsonb, updated_at timestamptz not null default now());
+-- Bot-compatible cabinet table: Telegram IDs are strings, not Supabase Auth UUIDs.
+create table if not exists public.cxrner_cabinet_users (user_id text primary key, profile jsonb not null default '{}'::jsonb, updated_at timestamptz not null default now());
+
+create table if not exists public.cxrner_releases (
+  user_id text not null, release_idx integer not null, release_data jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now(), primary key (user_id, release_idx)
+);
+create index if not exists idx_cxrner_releases_user on public.cxrner_releases (user_id);
+create index if not exists idx_cxrner_releases_updated on public.cxrner_releases (updated_at desc);
+
+create table if not exists public.cxrner_users (
+  telegram_id text primary key, username text, first_name text, cabinet_active boolean not null default false,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now()
+);
+create index if not exists idx_cxrner_users_updated on public.cxrner_users (updated_at desc);
+
+create table if not exists public.cxrner_public_releases (
+  form_id text primary key, telegram_id text, username text, artist_name text, track_name text, genre text,
+  release_type text, status text not null default 'approved', approved_at timestamptz,
+  release_data jsonb not null default '{}'::jsonb, updated_at timestamptz not null default now()
+);
+create index if not exists idx_cxrner_public_releases_status on public.cxrner_public_releases (status);
 
 create table if not exists public.cxrner_forms (
   id uuid primary key default gen_random_uuid(), telegram_id text, username text, artist_name text, track_name text,
@@ -13,6 +34,7 @@ create table if not exists public.cxrner_forms (
   source text not null default 'telegram', form_payload jsonb not null default '{}'::jsonb, upc text,
   reject_reason text, moderation_message_id text, created_at timestamptz not null default now(), updated_at timestamptz not null default now()
 );
+create unique index if not exists cxrner_forms_telegram_submission_idx on public.cxrner_forms (telegram_id, submission_key);
 create index if not exists cxrner_forms_telegram_id_idx on public.cxrner_forms (telegram_id);
 create index if not exists cxrner_forms_created_at_idx on public.cxrner_forms (created_at desc);
 
@@ -73,6 +95,9 @@ alter table public.featured_release enable row level security;
 alter table public.releases_config enable row level security;
 alter table public.artists_config enable row level security;
 alter table public.cxrner_cabinet_users enable row level security;
+alter table public.cxrner_releases enable row level security;
+alter table public.cxrner_users enable row level security;
+alter table public.cxrner_public_releases enable row level security;
 alter table public.cxrner_forms enable row level security;
 alter table public.cxrner_telegram_profiles enable row level security;
 alter table public.cxrner_release_engagements enable row level security;
@@ -94,17 +119,10 @@ drop policy if exists "public reads badges" on public.cxrner_badges;
 create policy "public reads badges" on public.cxrner_badges for select to anon, authenticated using (true);
 drop policy if exists "public reads achievements" on public.cxrner_achievements;
 create policy "public reads achievements" on public.cxrner_achievements for select to anon, authenticated using (true);
+drop policy if exists "public reads approved releases" on public.cxrner_public_releases;
+create policy "public reads approved releases" on public.cxrner_public_releases for select to anon, authenticated using (status = 'approved');
 
-drop policy if exists "users can read own profile" on public.cxrner_cabinet_users;
-create policy "users can read own profile" on public.cxrner_cabinet_users for select to authenticated using (user_id = auth.uid());
-drop policy if exists "users can create own profile" on public.cxrner_cabinet_users;
-create policy "users can create own profile" on public.cxrner_cabinet_users for insert to authenticated with check (user_id = auth.uid());
-drop policy if exists "users can update own profile" on public.cxrner_cabinet_users;
-create policy "users can update own profile" on public.cxrner_cabinet_users for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
-drop policy if exists "users can read own forms" on public.cxrner_forms;
-create policy "users can read own forms" on public.cxrner_forms for select to authenticated using (telegram_id = auth.uid()::text);
-drop policy if exists "users can create own forms" on public.cxrner_forms;
-create policy "users can create own forms" on public.cxrner_forms for insert to authenticated with check (telegram_id = auth.uid()::text);
+-- Bot writes use the service role. No client write policies are needed here.
 
 create or replace function public.handle_new_cxrner_user()
 returns trigger language plpgsql security definer set search_path = public as $$
