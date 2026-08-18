@@ -211,7 +211,10 @@ if (/\.vercel\.app\/index\.html$/i.test(WEBAPP_URL)) {
 const WEB_HOST = envStr('WEB_SERVER_HOST', '0.0.0.0');
 const WEB_PORT = envInt('PORT', envInt('WEB_SERVER_PORT', 8080));
 const WEB_DIR = envStr('WEB_SERVER_DIR', 'webapp');
-const WEB_ENABLED = envBool('ENABLE_WEB_SERVER', false);
+// When Bothost provides PORT and a Web App URL, the Mini App server must be
+// available even if the optional Supabase sync is temporarily unavailable.
+const WEB_ENABLED = envBool('ENABLE_WEB_SERVER', false)
+  || (Boolean(clean(process.env.PORT || '')) && Boolean(WEBAPP_URL));
 const WEBHOOK_SECRET = envStr('BOT_BACKEND_SECRET', '');
 const ADMIN_IDS = envIntList('ADMIN_IDS', [881379104]);
 const MODERATION_HEALTH_TTL_MS = envInt('MODERATION_HEALTH_TTL_MS', 180000);
@@ -4619,7 +4622,10 @@ async function onCallback(query) {
 }
 
 function startStaticServer() {
-  if (!WEB_ENABLED) return;
+  if (!WEB_ENABLED) {
+    console.warn('[web] static server disabled: set ENABLE_WEB_SERVER=1 or provide PORT + WEBAPP_URL');
+    return;
+  }
   const root = path.resolve(ROOT, WEB_DIR);
   if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) return;
   const allowedOrigins = new Set(
@@ -4938,6 +4944,9 @@ async function loop() {
 
 (async () => {
   fs.mkdirSync(path.resolve(ROOT, 'webapp/data'), { recursive: true });
+  // Start the Mini App before optional remote hydration so a Supabase DNS
+  // outage cannot prevent the web interface and health checks from opening.
+  startStaticServer();
   const imported = importBackupsIntoDb();
   if (SUPABASE_SYNC_ENABLED) {
     await hydrateFromSupabase();
@@ -4947,7 +4956,6 @@ async function loop() {
   if (SUPABASE_SYNC_ENABLED) {
     await syncSupabaseNow('startup');
   }
-  startStaticServer();
   console.info('[bot] CXRNER Node fallback bot started');
   console.info(`[bot] moderation chat: ${MOD_CHAT}`);
   console.info(`[bot] admin ids: ${ADMIN_IDS.join(', ')}`);
