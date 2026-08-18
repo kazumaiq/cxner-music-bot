@@ -4638,12 +4638,56 @@ function startStaticServer() {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
     }
-    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization');
   }
   function sendJson(res, statusCode, data) {
     res.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(data));
+  }
+  async function buildRuntimeDiagnostics(req) {
+    const webRoot = path.resolve(ROOT, WEB_DIR);
+    const supabaseHost = SUPABASE_URL ? (() => {
+      try { return new URL(SUPABASE_URL).hostname; } catch { return ''; }
+    })() : '';
+    const dnsChecks = {};
+    for (const host of [supabaseHost, 'api.telegram.org'].filter(Boolean)) {
+      try {
+        const rows = await dns.promises.lookup(host, { all: true });
+        dnsChecks[host] = { ok: true, addresses: rows.map((row) => row.address).slice(0, 4) };
+      } catch (error) {
+        dnsChecks[host] = { ok: false, code: clean(error?.code || 'DNS_ERROR') };
+      }
+    }
+    return {
+      ok: true,
+      service: 'cxrner-music-bot',
+      now: new Date().toISOString(),
+      request: {
+        host: clean(req.headers?.host || ''),
+        forwarded_proto: clean(req.headers?.['x-forwarded-proto'] || ''),
+        user_agent: clean(req.headers?.['user-agent'] || '').slice(0, 160)
+      },
+      web: {
+        enabled: WEB_ENABLED,
+        host: WEB_HOST,
+        port: WEB_PORT,
+        directory: WEB_DIR,
+        directory_exists: fs.existsSync(webRoot),
+        webapp_url: WEBAPP_URL || null,
+        runtime_port: clean(process.env.PORT || ''),
+        runtime_webapp_url: clean(process.env.WEBAPP_URL || '') || null
+      },
+      integrations: {
+        telegram_api_configured: Boolean(TOKEN),
+        moderation_chat_configured: Boolean(MOD_CHAT),
+        supabase_configured: SUPABASE_SYNC_ENABLED,
+        supabase_host: supabaseHost || null,
+        supabase_features: { ...supabaseFeatureState }
+      },
+      dns: dnsChecks,
+      admin_ids_count: ADMIN_IDS.length
+    };
   }
   const ct = {
     '.html': 'text/html; charset=utf-8',
@@ -4755,6 +4799,58 @@ function startStaticServer() {
         });
         return;
       }
+      if (u.pathname === '/health' || u.pathname === '/healthz') {
+        sendJson(res, 200, {
+          ok: true,
+          service: 'cxrner-music-bot',
+          webapp: true,
+          port: WEB_PORT,
+          now: new Date().toISOString()
+        });
+        return;
+      }
+      if (u.pathname === '/api/miniapp/diagnostics' && req.method === 'GET') {
+        buildRuntimeDiagnostics(req)
+          .then((data) => sendJson(res, 200, data))
+          .catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/session' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (chunk) => {
+          body += chunk;
+          if (body.length > 20000) req.destroy();
+        });
+        req.on('end', async () => {
+          try {
+            const payload = JSON.parse(body || '{}');
+            const initData = clean(payload.init_data || payload.initData || '');
+            const check = verifyTelegramInitData(initData);
+            if (!check.ok || !check.user?.id) {
+              sendJson(res, 403, { ok: false, error: 'Telegram initData validation failed', reason: check.reason });
+              return;
+            }
+            const uid = String(check.user.id);
+            await supabaseUpsertCabinetUser(uid, check.user, true);
+            const snapshot = await getCabinetSnapshot(uid);
+            sendJson(res, 200, {
+              ok: true,
+              user: {
+                id: check.user.id,
+                username: clean(check.user.username || ''),
+                first_name: clean(check.user.first_name || ''),
+                last_name: clean(check.user.last_name || ''),
+                photo_url: clean(check.user.photo_url || ''),
+                role: isAdmin(uid) ? 'admin' : 'artist'
+              },
+              ...snapshot
+            });
+          } catch (e) {
+            sendJson(res, 400, { ok: false, error: clean(e?.message || e) || 'invalid request' });
+          }
+        });
+        return;
+      }
       if (u.pathname === '/api/miniapp/cabinet') {
         const telegramId = clean(u.searchParams.get('telegram_id') || '');
         const initData = clean(u.searchParams.get('init_data') || '');
@@ -4795,6 +4891,8 @@ function startStaticServer() {
   });
   srv.listen(WEB_PORT, WEB_HOST, () => {
     console.info(`[web] static server started: http://${WEB_HOST}:${WEB_PORT} (dir: ${root})`);
+    console.info(`[web] diagnostics: /health and /api/miniapp/diagnostics`);
+    console.info(`[web] runtime env: PORT=${clean(process.env.PORT || '(unset)')} WEBAPP_URL=${clean(process.env.WEBAPP_URL || '(from deploy_config)')}`);
   });
 }
 

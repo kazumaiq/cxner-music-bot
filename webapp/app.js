@@ -86,7 +86,8 @@ const appState = {
     approved: false,
     releases: [],
     updatedAt: ""
-  }
+  },
+  session: null
 };
 
 const LABEL_ARTISTS = [
@@ -257,6 +258,23 @@ function initTelegramWebApp() {
   if (params.text_color) {
     root.style.setProperty("--text", params.text_color);
   }
+}
+
+async function initTelegramSession() {
+  const tgApp = getTelegramWebApp();
+  if (!tgApp?.initData) return null;
+  const result = await postToBotApi("/api/miniapp/session", { init_data: tgApp.initData });
+  if (!result.ok) {
+    console.info("[WEBAPP_AUTH] session unavailable:", result.error);
+    return null;
+  }
+  appState.session = result.data;
+  const user = result.data.user;
+  if (user?.photo_url) {
+    const badge = document.getElementById("userBadge");
+    badge.title = user.role === "admin" ? "Администратор" : "Профиль артиста";
+  }
+  return result.data;
 }
 
 function logWebAppSendDiagnostics(reason = "submit") {
@@ -476,7 +494,9 @@ async function initRuntimeConfig() {
     runtimeBotApiBaseUrl = fromCfg;
     console.info(`[WEBAPP_API] base=${runtimeBotApiBaseUrl} (from ${BOT_API_CONFIG_URL})`);
   } else {
-    console.info("[WEBAPP_API] base is not configured (sendData only)");
+    // The bot static server exposes the API on the same origin in production.
+    runtimeBotApiBaseUrl = normalizeUrlBase(window.location.origin);
+    console.info(`[WEBAPP_API] base=${runtimeBotApiBaseUrl || "none"} (same origin fallback)`);
   }
 }
 
@@ -636,6 +656,25 @@ async function refreshCabinet() {
     statusText.textContent = "Mini App РѕС‚РєСЂС‹С‚ Р±РµР· Р°РІС‚РѕСЂРёР·Р°С†РёРё Telegram. Р—Р°РїСѓСЃРєР°Р№С‚Рµ РµРіРѕ С‚РѕР»СЊРєРѕ С‡РµСЂРµР· РєРЅРѕРїРєСѓ В«РћС‚РєСЂС‹С‚СЊ РїСЂРёР»РѕР¶РµРЅРёРµВ» РІ С‡Р°С‚Рµ СЃ Р±РѕС‚РѕРј.";
     document.getElementById("cabinetSummary").classList.add("hidden");
     document.getElementById("cabinetList").innerHTML = "";
+    return;
+  }
+
+  const session = appState.session?.user?.id === Number(userId) ? appState.session : null;
+  if (session?.releases) {
+    appState.cabinet.approved = Boolean(session.cabinet_active);
+    appState.cabinet.updatedAt = new Date().toISOString();
+    const visible = session.releases.filter((rel) => !rel.user_deleted);
+    bindCard.classList.toggle("hidden", appState.cabinet.approved);
+    statusCard.classList.remove("hidden");
+    statusText.textContent = appState.cabinet.approved ? "Кабинет синхронизирован с Telegram и модерацией." : "Подтвердите вход через Telegram, чтобы открыть кабинет.";
+    if (!appState.cabinet.approved) {
+      document.getElementById("cabinetSummary").classList.add("hidden");
+      document.getElementById("cabinetList").innerHTML = "";
+      return;
+    }
+    appState.cabinet.releases = visible;
+    renderCabinetSummary(visible);
+    renderCabinetList(visible);
     return;
   }
 
@@ -1187,6 +1226,7 @@ function hideLoader() {
 async function bootstrap() {
   initTelegramWebApp();
   await initRuntimeConfig();
+  await initTelegramSession();
   buildArtistsCatalog();
   renderStats();
   renderArtistFilter();
