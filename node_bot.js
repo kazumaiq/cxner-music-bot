@@ -313,6 +313,8 @@ const SUPABASE_PUBLIC_RELEASES_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_
 const SUPABASE_INTERACTIONS_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_INTERACTIONS_TABLE_RAW)
   ? SUPABASE_INTERACTIONS_TABLE_RAW
   : 'cxrner_interactions';
+const SUPABASE_LINKS_TABLE = 'cxrner_links';
+const SUPABASE_LINK_EVENTS_TABLE = 'cxrner_link_events';
 const FORM_STATUS = {
   PENDING: 'pending',
   ON_MODERATION: 'on_moderation',
@@ -4763,6 +4765,17 @@ function startStaticServer() {
       favorites: Number(counts.favorites || 0)
     };
   }
+  const linkThemes = ['aurora', 'glass', 'minimal', 'cyber', 'neon', 'liquid', 'chrome', 'midnight', 'purple-dream', 'dynamic', 'modern', 'black-edition'];
+  function linkBaseUrl() { return clean(envStr('CXRNER_LINK_BASE_URL', '') || `${WEBAPP_URL || BASE}/link`).replace(/\/+$/, ''); }
+  function normalizeLinkRow(row) {
+    if (!row) return null;
+    return { ...row, public_url: `${linkBaseUrl()}/${encodeURIComponent(clean(row.slug || ''))}`, platforms: row.platforms && typeof row.platforms === 'object' ? row.platforms : {}, extra_links: Array.isArray(row.extra_links) ? row.extra_links : [], settings: row.settings && typeof row.settings === 'object' ? row.settings : {} };
+  }
+  function linkSlug(value, fallback = 'release') { const slug = clean(value).toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 72); return slug || fallback; }
+  function linkSourceFromRelease(formRow) {
+    const payload = formRow?.form_payload && typeof formRow.form_payload === 'object' ? formRow.form_payload : {};
+    return { title: clean(formRow?.track_name || payload.name || 'Без названия'), artist: clean(formRow?.artist_name || payload.nick || 'Артист'), genre: clean(formRow?.genre || payload.genre || ''), release_date: clean(payload.date || ''), cover_url: clean(payload.cover_url || payload.cover || ''), platforms: { spotify: clean(payload.spotify || payload.spotify_url || ''), apple: clean(payload.apple || payload.apple_music || ''), yandex: clean(payload.yandex || ''), vk: clean(payload.vk || payload.vk_music || ''), youtube: clean(payload.youtube || payload.youtube_music || ''), deezer: clean(payload.deezer || ''), zvuk: clean(payload.zvuk || ''), soundcloud: clean(payload.soundcloud || '') } };
+  }
   async function buildRuntimeDiagnostics(req) {
     const webRoot = path.resolve(ROOT, WEB_DIR);
     const supabaseHost = SUPABASE_URL ? (() => {
@@ -4977,6 +4990,120 @@ function startStaticServer() {
             sendJson(res, 200, { ok: true, releases: approved.map(mapRelease), total: approved.length, showcase: approved.slice(0, 10).map(mapRelease) });
           })
           .catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/link' && req.method === 'GET') {
+        const slug = clean(u.searchParams.get('slug') || '');
+        if (u.searchParams.get('mine') === '1') {
+          authorizeMiniApp(req).then(async (auth) => {
+            if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+            const links = await supabaseSelectWhere(SUPABASE_LINKS_TABLE, 'id,telegram_id,release_id,slug,title,artist,genre,release_date,cover_url,platforms,extra_links,theme,settings,status,created_at,updated_at', [{ key: 'telegram_id', value: auth.uid }], 'updated_at.desc', 100);
+            sendJson(res, 200, { ok: true, links: (links || []).map(normalizeLinkRow) });
+          }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+          return;
+        }
+        if (!slug) { sendJson(res, 400, { ok: false, error: 'slug is required' }); return; }
+        supabaseSelectWhere(SUPABASE_LINKS_TABLE, 'id,telegram_id,release_id,slug,title,artist,genre,release_date,cover_url,platforms,extra_links,theme,settings,status,created_at,updated_at', [{ key: 'slug', value: slug }, { key: 'status', value: 'published' }], '', 1)
+          .then((rows) => { if (!rows?.[0]) { sendJson(res, 404, { ok: false, error: 'link not found' }); return; } sendJson(res, 200, { ok: true, link: normalizeLinkRow(rows[0]) }); })
+          .catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/link' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body);
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          const action = clean(body.action || 'create').toLowerCase();
+          const linkId = clean(body.link_id || body.id || '');
+          if (action === 'delete') {
+            if (!linkId) { sendJson(res, 400, { ok: false, error: 'link_id is required' }); return; }
+            await supabaseRequest(`${SUPABASE_LINKS_TABLE}?id=eq.${encodeURIComponent(linkId)}&telegram_id=eq.${encodeURIComponent(auth.uid)}`, { method: 'DELETE' });
+            sendJson(res, 200, { ok: true, deleted: true });
+            return;
+          }
+          let source = { title: clean(body.title || 'Без названия'), artist: clean(body.artist || 'Артист'), genre: clean(body.genre || ''), release_date: clean(body.release_date || ''), cover_url: clean(body.cover_url || ''), platforms: body.platforms && typeof body.platforms === 'object' ? body.platforms : {} };
+          let releaseId = clean(body.release_id || '');
+          let releaseFromPublic = false;
+          if (!releaseId && clean(body.upc || '')) {
+            const publicRows = await supabaseSelectAll(SUPABASE_PUBLIC_RELEASES_TABLE, 'form_id,telegram_id,artist_name,track_name,genre,release_data,status', 'approved_at.desc');
+            const found = (publicRows || []).find((row) => clean(row?.release_data?.upc || row?.release_data?.UPC || '') === clean(body.upc));
+            if (found) {
+              releaseId = clean(found.form_id || '');
+              releaseFromPublic = true;
+              const release = platformRelease(found);
+              source = { title: release.title, artist: release.artist, genre: release.genre, release_date: release.date, cover_url: release.cover, platforms: release.dsp_links || {} };
+            }
+          }
+          if (releaseId && !releaseFromPublic) {
+            const forms = await supabaseSelectWhere(SUPABASE_FORMS_TABLE, 'id,telegram_id,track_name,artist_name,genre,form_payload', [{ key: 'id', value: releaseId }, { key: 'telegram_id', value: auth.uid }], '', 1);
+            if (!forms?.[0]) { sendJson(res, 404, { ok: false, error: 'release not found or access denied' }); return; }
+            source = { ...linkSourceFromRelease(forms[0]), ...source };
+            if (!body.title) source.title = linkSourceFromRelease(forms[0]).title;
+            if (!body.artist) source.artist = linkSourceFromRelease(forms[0]).artist;
+            if (!body.cover_url) source.cover_url = linkSourceFromRelease(forms[0]).cover_url;
+            if (!body.genre) source.genre = linkSourceFromRelease(forms[0]).genre;
+            if (!body.release_date) source.release_date = linkSourceFromRelease(forms[0]).release_date;
+            if (!body.platforms || !Object.keys(body.platforms).length) source.platforms = linkSourceFromRelease(forms[0]).platforms;
+          }
+          if (source.cover_url && (!isHttpUrl(source.cover_url) || source.cover_url.length > 700)) { sendJson(res, 400, { ok: false, error: 'cover_url must be a valid http(s) URL' }); return; }
+          const theme = linkThemes.includes(clean(body.theme)) ? clean(body.theme) : 'aurora';
+          const extraLinks = Array.isArray(body.extra_links) ? body.extra_links.map((item) => ({ label: clean(item?.label || '').slice(0, 60), url: clean(item?.url || '').slice(0, 700) })).filter((item) => item.label && isHttpUrl(item.url)).slice(0, 50) : [];
+          let slug = linkSlug(body.slug || `${source.artist}-${source.title}`, `release-${Date.now().toString(36)}`);
+          if (action === 'update' && linkId) {
+            const current = await supabaseSelectWhere(SUPABASE_LINKS_TABLE, 'id,slug', [{ key: 'id', value: linkId }, { key: 'telegram_id', value: auth.uid }], '', 1);
+            if (!current?.[0]) { sendJson(res, 404, { ok: false, error: 'link not found or access denied' }); return; }
+            slug = linkSlug(body.slug || current[0].slug);
+          }
+          let suffix = 2;
+          while (true) {
+            const conflict = await supabaseSelectWhere(SUPABASE_LINKS_TABLE, 'id', [{ key: 'slug', value: slug }], '', 1);
+            if (!conflict?.[0] || String(conflict[0].id) === linkId) break;
+            slug = `${linkSlug(body.slug || `${source.artist}-${source.title}`)}-${suffix++}`;
+          }
+          const row = { telegram_id: Number(auth.uid), release_id: releaseId || null, slug, title: source.title, artist: source.artist, genre: source.genre, release_date: source.release_date, cover_url: source.cover_url, platforms: source.platforms, extra_links: extraLinks, theme, settings: body.settings && typeof body.settings === 'object' ? body.settings : {}, status: body.status === 'draft' ? 'draft' : 'published', updated_at: new Date().toISOString() };
+          const result = action === 'update' && linkId
+            ? await supabaseRequest(`${SUPABASE_LINKS_TABLE}?id=eq.${encodeURIComponent(linkId)}&telegram_id=eq.${encodeURIComponent(auth.uid)}`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: row })
+            : await supabaseRequest(SUPABASE_LINKS_TABLE, { method: 'POST', headers: { Prefer: 'return=representation' }, body: [{ ...row, created_at: new Date().toISOString() }] });
+          const saved = Array.isArray(result) ? result[0] : result;
+          const publicUrl = `${linkBaseUrl()}/${encodeURIComponent(slug)}`;
+          if (releaseId) {
+            const currentForm = await supabaseSelectWhere(SUPABASE_FORMS_TABLE, 'id,form_payload', [{ key: 'id', value: releaseId }, { key: 'telegram_id', value: auth.uid }], '', 1).catch(() => []);
+            if (currentForm?.[0]) {
+              const formPayload = currentForm[0].form_payload && typeof currentForm[0].form_payload === 'object' ? currentForm[0].form_payload : {};
+              await supabaseRequest(`${SUPABASE_FORMS_TABLE}?id=eq.${encodeURIComponent(releaseId)}&telegram_id=eq.${encodeURIComponent(auth.uid)}`, { method: 'PATCH', body: { form_payload: { ...formPayload, smart_link: publicUrl }, updated_at: new Date().toISOString() } }).catch(() => {});
+            }
+            const publicRows = await supabaseSelectWhere(SUPABASE_PUBLIC_RELEASES_TABLE, 'form_id,release_data', [{ key: 'form_id', value: releaseId }], '', 1).catch(() => []);
+            if (publicRows?.[0]) await supabaseRequest(`${SUPABASE_PUBLIC_RELEASES_TABLE}?form_id=eq.${encodeURIComponent(releaseId)}`, { method: 'PATCH', body: { release_data: { ...(publicRows[0].release_data || {}), smart_link: publicUrl }, updated_at: new Date().toISOString() } }).catch(() => {});
+            const localList = Array.isArray(db?.[auth.uid]) ? db[auth.uid] : [];
+            const localIndex = localList.findIndex((release) => String(release?.supabase_form_id || '') === releaseId);
+            if (localIndex >= 0) { localList[localIndex].smart_link = publicUrl; saveDb(); }
+          }
+          sendJson(res, 200, { ok: true, link: normalizeLinkRow(saved || { ...row, id: linkId }), public_url: publicUrl });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/link/event' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const slug = clean(body.slug || '');
+          const eventType = ['view', 'click'].includes(clean(body.event_type)) ? clean(body.event_type) : 'view';
+          const rows = await supabaseSelectWhere(SUPABASE_LINKS_TABLE, 'id', [{ key: 'slug', value: slug }, { key: 'status', value: 'published' }], '', 1);
+          if (!rows?.[0]) { sendJson(res, 404, { ok: false, error: 'link not found' }); return; }
+          await supabaseRequest(SUPABASE_LINK_EVENTS_TABLE, { method: 'POST', headers: { Prefer: 'return=minimal' }, body: [{ link_id: rows[0].id, event_type: eventType, platform: clean(body.platform || '').slice(0, 80), source: clean(body.source || '').slice(0, 120), country: clean(body.country || '').slice(0, 80), device: clean(body.device || '').slice(0, 80), user_agent: clean(req.headers?.['user-agent'] || '').slice(0, 300) }] });
+          sendJson(res, 200, { ok: true });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/link/analytics' && req.method === 'GET') {
+        authorizeMiniApp(req).then(async (auth) => {
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          const linkId = clean(u.searchParams.get('link_id') || '');
+          const links = await supabaseSelectWhere(SUPABASE_LINKS_TABLE, 'id,slug,title', [{ key: 'id', value: linkId }, { key: 'telegram_id', value: auth.uid }], '', 1);
+          if (!links?.[0]) { sendJson(res, 404, { ok: false, error: 'link not found or access denied' }); return; }
+          const events = await supabaseSelectWhere(SUPABASE_LINK_EVENTS_TABLE, 'event_type,platform,source,country,device,created_at', [{ key: 'link_id', value: linkId }], 'created_at.desc', 5000);
+          const views = (events || []).filter((event) => event.event_type === 'view').length;
+          const clicks = (events || []).filter((event) => event.event_type === 'click').length;
+          const platforms = {}; for (const event of events || []) if (event.event_type === 'click') platforms[event.platform || 'unknown'] = (platforms[event.platform || 'unknown'] || 0) + 1;
+          sendJson(res, 200, { ok: true, link: links[0], analytics: { views, clicks, ctr: views ? Math.round(clicks / views * 1000) / 10 : 0, platforms, recent: (events || []).slice(0, 30) } });
+        }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
         return;
       }
       if (u.pathname === '/api/miniapp/platform/profile' && (req.method === 'GET' || req.method === 'POST')) {
@@ -5329,6 +5456,14 @@ function startStaticServer() {
             sendJson(res, 500, { ok: false, error: clean(err?.message || err) });
           });
         return;
+      }
+      if (/^\/link\/[a-z0-9-]+$/i.test(u.pathname || '')) {
+        const linkFile = path.join(root, 'link.html');
+        if (fs.existsSync(linkFile)) {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+          fs.createReadStream(linkFile).pipe(res);
+          return;
+        }
       }
       let p = decodeURIComponent(u.pathname || '/');
       if (p === '/') p = '/index.html';
