@@ -1594,7 +1594,7 @@ function keyboardCommunity() {
   return { inline_keyboard: [
     [{ text: 'Канал CXRNER MUSIC', url: 'https://t.me/cxrnermusic' }],
     [{ text: 'Чат артистов', url: 'https://t.me/+oVmX3_dkyWJhNjJi' }],
-    [{ text: 'Официальный сайт', url: 'https://cxrnermusic.vercel.app/' }],
+    [{ text: 'Официальный сайт', url: WEBAPP_URL || 'https://bot-1787153410-6782-kazumaiq.bothost.tech/' }],
     [{ text: '⬅️ Главное меню', callback_data: 'main' }]
   ]};
 }
@@ -4636,7 +4636,7 @@ function startStaticServer() {
     [
       BASE,
       envStr('MINIAPP_ORIGIN', ''),
-      'https://cxrnermusic.vercel.app',
+      'https://bot-1787153410-6782-kazumaiq.bothost.tech',
       'https://web.telegram.org'
     ]
       .map((v) => clean(v).replace(/\/+$/, ''))

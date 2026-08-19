@@ -5,5 +5,5 @@
   "formsTable": "cxrner_forms",
   "usersTable": "cxrner_users",
   "releasesTable": "cxrner_public_releases",
-  "botApiBaseUrl": ""
+  "botApiBaseUrl": "https://bot-1787153410-6782-kazumaiq.bothost.tech"
 }

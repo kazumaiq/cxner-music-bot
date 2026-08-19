@@ -686,7 +686,7 @@ def build_community_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("РљР°РЅР°Р» CXRNER MUSIC", url=CHANNEL)],
         [InlineKeyboardButton("Р§Р°С‚ Р°СЂС‚РёСЃС‚РѕРІ", url=ARTISTS_CHAT)],
-        [InlineKeyboardButton("РћС„РёС†РёР°Р»СЊРЅС‹Р№ СЃР°Р№С‚", url="https://cxrnermusic.vercel.app/")],
+        [InlineKeyboardButton("РћС„РёС†РёР°Р»СЊРЅС‹Р№ СЃР°Р№С‚", url="https://bot-1787153410-6782-kazumaiq.bothost.tech/")],
         [InlineKeyboardButton("в¬…пёЏ Р“Р»Р°РІРЅРѕРµ РјРµРЅСЋ", callback_data='main')],
     ])
 

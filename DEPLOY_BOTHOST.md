@@ -50,9 +50,9 @@
 
 **Как заполнить:**
 - Для Vercel:
-  - `https://cxrnermusic.vercel.app/` или `https://cxrnermusic.vercel.app/miniapp/index.html`
+  - `https://bot-1787153410-6782-kazumaiq.bothost.tech/`
 - В BotFather обязательно:
-  - `/setdomain` → домен `https://cxrnermusic.vercel.app`
+  - Main App URL → `https://bot-1787153410-6782-kazumaiq.bothost.tech/`
 
 ## Бот не работает, логи пустые
 
