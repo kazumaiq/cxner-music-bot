@@ -1737,6 +1737,11 @@ function isHttpUrl(v) {
   try { const u = new URL(clean(v)); return u.protocol === 'http:' || u.protocol === 'https:'; }
   catch { return false; }
 }
+function normalizeImageUrl(value) {
+  const url = clean(value);
+  const drive = /drive\.google\.com\/file\/d\/([^/]+)/i.exec(url);
+  return drive ? `https://drive.google.com/uc?export=view&id=${encodeURIComponent(drive[1])}` : url;
+}
 function fmtForm(user, uid, r) {
   const u = user?.username ? `@${user.username}` : 'нет';
   const src = clean(r.source || '');
@@ -2479,7 +2484,7 @@ function validateForm(form, envelope = {}) {
   if (type !== 'альбом') tracklist = '.';
   if (type === 'альбом' && tracklist === '.') errors.push('Для альбома заполните Tracklist.');
   const tgContact = sanitizeText(form?.tg, 180); if (!tgContact) errors.push('Укажите контакт Telegram.');
-  const coverUrl = sanitizeText(form?.cover_url || form?.cover || '', 700);
+  const coverUrl = normalizeImageUrl(sanitizeText(form?.cover_url || form?.cover || '', 700));
   if (coverUrl && !isHttpUrl(coverUrl)) errors.push('Ссылка на обложку должна начинаться с http:// или https://.');
   const smartLink = sanitizeText(form?.smart_link || form?.multilink || form?.beatlink || '', 700);
   if (smartLink && !isHttpUrl(smartLink)) errors.push('Мультиссылка должна начинаться с http:// или https://.');
@@ -5123,7 +5128,7 @@ function startStaticServer() {
               supabaseSelectWhere('cxrner_artist_profiles', 'telegram_id,display_name,bio,avatar_url,socials,theme,updated_at', [{ key: 'telegram_id', value: auth.uid }], '', 1).catch(() => [])
             ]);
             const profile = profiles?.[0] || {};
-            sendJson(res, 200, { ok: true, is_admin: auth.is_admin, user: { ...profile, telegram_id: Number(auth.uid), photo_url: profile.photo_url || auth.user.photo_url || '' }, artist_profile: artistProfile?.[0] || {}, releases: releases || [], release_interactions: interactions || [], engagements: engagements || [], badges: badges || [], achievements: achievements || [], notifications: notifications || [], cabinet: cabinet || {}, stats: { releases: releases?.length || 0, likes: (engagements || []).filter((x) => x.kind === 'like').length, favorites: (engagements || []).filter((x) => x.kind === 'favorite').length, listens: 0 } });
+            sendJson(res, 200, { ok: true, is_admin: auth.is_admin, user: { ...profile, telegram_id: Number(auth.uid), photo_url: profile.photo_url || auth.user.photo_url || '' }, artist_profile: artistProfile?.[0] || profile.metadata?.artist_profile || {}, releases: releases || [], release_interactions: interactions || [], engagements: engagements || [], badges: badges || [], achievements: achievements || [], notifications: notifications || [], cabinet: cabinet || {}, stats: { releases: releases?.length || 0, likes: (engagements || []).filter((x) => x.kind === 'like').length, favorites: (engagements || []).filter((x) => x.kind === 'favorite').length, listens: 0 } });
           })
           .catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
         return;
@@ -5161,13 +5166,13 @@ function startStaticServer() {
             sendJson(res, 200, { ok: true, deleted: true, release_id: releaseId });
             return;
           }
-          const coverUrl = clean(body.cover_url || '');
+          const coverUrl = normalizeImageUrl(body.cover_url || '');
           const smartLink = clean(body.smart_link || body.multilink || '');
           if (coverUrl && (!isHttpUrl(coverUrl) || coverUrl.length > 700)) { sendJson(res, 400, { ok: false, error: 'cover_url must be a valid http(s) URL' }); return; }
           if (smartLink && (!isHttpUrl(smartLink) || smartLink.length > 700)) { sendJson(res, 400, { ok: false, error: 'smart_link must be a valid http(s) URL' }); return; }
           const updatedPayload = { ...payload, cover_url: coverUrl, smart_link: smartLink };
           const now = new Date().toISOString();
-          await supabaseRequest(`${SUPABASE_FORMS_TABLE}?id=eq.${encodeURIComponent(releaseId)}&telegram_id=eq.${encodeURIComponent(auth.uid)}`, { method: 'PATCH', body: { form_payload: updatedPayload, updated_at: now } });
+          try { await supabaseRequest(`${SUPABASE_FORMS_TABLE}?id=eq.${encodeURIComponent(releaseId)}&telegram_id=eq.${encodeURIComponent(auth.uid)}`, { method: 'PATCH', body: { form_payload: updatedPayload, updated_at: now } }); } catch (error) { console.warn(`[PLATFORM] form media update failed form_id=${releaseId}:`, clean(error?.message || error)); }
           const publicRows = await supabaseSelectWhere(SUPABASE_PUBLIC_RELEASES_TABLE, 'form_id,release_data', [{ key: 'form_id', value: releaseId }], '', 1).catch(() => []);
           if (publicRows?.[0]) await supabaseRequest(`${SUPABASE_PUBLIC_RELEASES_TABLE}?form_id=eq.${encodeURIComponent(releaseId)}`, { method: 'PATCH', body: { release_data: { ...(publicRows[0].release_data || {}), ...updatedPayload }, updated_at: now } }).catch(() => {});
           if (localIndex >= 0) {
@@ -5291,13 +5296,15 @@ function startStaticServer() {
         const artistId = clean(u.searchParams.get('telegram_id') || '');
         if (!/^\d{4,20}$/.test(artistId)) { sendJson(res, 400, { ok: false, error: 'telegram_id is required' }); return; }
         Promise.all([
-          supabaseSelectWhere('cxrner_artist_profiles', 'telegram_id,display_name,bio,avatar_url,socials,theme,updated_at', [{ key: 'telegram_id', value: artistId }], '', 1),
+          supabaseSelectWhere('cxrner_artist_profiles', 'telegram_id,display_name,bio,avatar_url,socials,theme,updated_at', [{ key: 'telegram_id', value: artistId }], '', 1).catch(() => []),
           supabaseSelectWhere('cxrner_artist_badges', 'badge_id,assigned_at', [{ key: 'telegram_id', value: artistId }], 'assigned_at.desc', 100),
           supabaseSelectWhere('cxrner_badges', 'id,slug,name,description,image_url', [], 'created_at.desc', 100),
-          supabaseSelectWhere('cxrner_artist_follows', 'follower_id,created_at', [{ key: 'following_id', value: artistId }], 'created_at.desc', 1000)
-        ]).then(([profiles, assigned, badges, followers]) => {
+          supabaseSelectWhere('cxrner_artist_follows', 'follower_id,created_at', [{ key: 'following_id', value: artistId }], 'created_at.desc', 1000),
+          supabaseSelectWhere('cxrner_telegram_profiles', 'metadata', [{ key: 'telegram_id', value: artistId }], '', 1).catch(() => [])
+        ]).then(([profiles, assigned, badges, followers, telegramProfiles]) => {
           const ids = new Set((assigned || []).map((row) => String(row.badge_id)));
-          sendJson(res, 200, { ok: true, artist: profiles?.[0] || { telegram_id: Number(artistId), display_name: '', bio: '', avatar_url: '', socials: {} }, badges: (badges || []).filter((row) => ids.has(String(row.id))), followers: followers?.length || 0, share_url: `${WEBAPP_URL || BASE}?artist=${encodeURIComponent(artistId)}` });
+          const fallback = telegramProfiles?.[0]?.metadata?.artist_profile || {};
+          sendJson(res, 200, { ok: true, artist: profiles?.[0] || { telegram_id: Number(artistId), display_name: fallback.display_name || '', bio: fallback.bio || '', avatar_url: fallback.avatar_url || '', socials: fallback.socials || {} }, badges: (badges || []).filter((row) => ids.has(String(row.id))), followers: followers?.length || 0, share_url: `${WEBAPP_URL || BASE}?artist=${encodeURIComponent(artistId)}` });
         }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
         return;
       }
@@ -5306,8 +5313,18 @@ function startStaticServer() {
           const auth = await authorizeMiniApp(req, body);
           if (!auth.ok) { sendJson(res, auth.status, auth); return; }
           const profile = body.profile && typeof body.profile === 'object' ? body.profile : {};
-          await supabaseRequest('cxrner_artist_profiles?on_conflict=telegram_id', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=representation' }, body: [{ telegram_id: Number(auth.uid), display_name: clean(profile.display_name || auth.user.first_name || '').slice(0, 80), bio: clean(profile.bio || '').slice(0, 1000), avatar_url: clean(profile.avatar_url || auth.user.photo_url || '').slice(0, 500), socials: profile.socials && typeof profile.socials === 'object' ? profile.socials : {}, theme: profile.theme && typeof profile.theme === 'object' ? profile.theme : {}, updated_at: new Date().toISOString() }] });
-          sendJson(res, 200, { ok: true });
+          const displayName = clean(profile.display_name || auth.user.first_name || '').slice(0, 80);
+          const bio = clean(profile.bio || '').slice(0, 1000);
+          const avatarUrl = normalizeImageUrl(profile.avatar_url || auth.user.photo_url || '').slice(0, 700);
+          if (avatarUrl && !isHttpUrl(avatarUrl)) { sendJson(res, 400, { ok: false, error: 'avatar_url must be a valid http(s) URL' }); return; }
+          const profileRow = { telegram_id: Number(auth.uid), display_name: displayName, bio, avatar_url: avatarUrl, socials: profile.socials && typeof profile.socials === 'object' ? profile.socials : {}, theme: profile.theme && typeof profile.theme === 'object' ? profile.theme : {}, updated_at: new Date().toISOString() };
+          try { await supabaseRequest('cxrner_artist_profiles?on_conflict=telegram_id', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=representation' }, body: [profileRow] }); } catch (error) { console.warn('[PLATFORM] artist profile table unavailable, using Telegram profile metadata:', clean(error?.message || error)); }
+          try {
+            const rows = await supabaseSelectWhere('cxrner_telegram_profiles', 'metadata', [{ key: 'telegram_id', value: auth.uid }], '', 1);
+            const metadata = rows?.[0]?.metadata && typeof rows[0].metadata === 'object' ? rows[0].metadata : {};
+            await supabaseRequest(`cxrner_telegram_profiles?telegram_id=eq.${encodeURIComponent(auth.uid)}`, { method: 'PATCH', body: { metadata: { ...metadata, artist_profile: { display_name: displayName, bio, avatar_url: avatarUrl, socials: profileRow.socials, theme: profileRow.theme } }, last_seen_at: new Date().toISOString() } });
+          } catch (error) { console.warn('[PLATFORM] artist metadata fallback failed:', clean(error?.message || error)); }
+          sendJson(res, 200, { ok: true, artist_profile: profileRow });
         }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
         return;
       }
