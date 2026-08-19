@@ -4684,6 +4684,53 @@ function startStaticServer() {
     res.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(data));
   }
+  function readJsonBody(req, maxBytes = 120000) {
+    return new Promise((resolve, reject) => {
+      let body = '';
+      req.on('data', (chunk) => {
+        body += chunk;
+        if (body.length > maxBytes) {
+          reject(new Error('request body is too large'));
+          req.destroy();
+        }
+      });
+      req.on('end', () => {
+        try { resolve(JSON.parse(body || '{}')); } catch { reject(new Error('invalid json')); }
+      });
+      req.on('error', reject);
+    });
+  }
+  async function authorizeMiniApp(req, body = {}) {
+    const initData = clean(body.init_data || body.initData || req.headers?.['x-telegram-init-data'] || '');
+    const check = verifyTelegramInitData(initData);
+    if (!check.ok || !check.user?.id) return { ok: false, status: 403, error: check.reason || 'Telegram authorization failed' };
+    const uid = String(check.user.id);
+    await supabaseRequest('cxrner_telegram_profiles?on_conflict=telegram_id', {
+      method: 'POST',
+      body: [{ telegram_id: Number(uid), username: clean(check.user.username || ''), first_name: clean(check.user.first_name || ''), last_name: clean(check.user.last_name || ''), role: isAdmin(uid) ? 'admin' : 'artist', status: 'active', last_seen_at: new Date().toISOString(), metadata: { photo_url: clean(check.user.photo_url || '') } }]
+    });
+    await supabaseUpsertCabinetUser(uid, check.user, true);
+    return { ok: true, uid, user: check.user, is_admin: isAdmin(uid) };
+  }
+  function platformRelease(row) {
+    const data = row?.release_data && typeof row.release_data === 'object' ? row.release_data : {};
+    return {
+      id: clean(row?.form_id || `${row?.telegram_id || ''}:${data.release_idx || data.idx || 0}`),
+      telegram_id: clean(row?.telegram_id || data.telegram_id || ''),
+      title: clean(row?.track_name || data.name || data.track_name || 'Без названия'),
+      artist: clean(row?.artist_name || data.nick || data.artist_name || 'Неизвестный артист'),
+      genre: clean(row?.genre || data.genre || ''),
+      type: clean(row?.release_type || data.type || 'single'),
+      status: clean(row?.status || data.status || 'approved'),
+      date: clean(data.date || row?.approved_at || row?.created_at || ''),
+      upc: clean(data.upc || row?.upc || ''),
+      description: clean(data.promo || data.comment || data.description || ''),
+      cover: clean(data.cover || data.cover_url || ''),
+      audio_url: clean(data.audio_url || data.preview_url || data.link || ''),
+      dsp_links: data.links || data.dsp_links || { yandex: data.yandex || '' },
+      raw: data
+    };
+  }
   async function buildRuntimeDiagnostics(req) {
     const webRoot = path.resolve(ROOT, WEB_DIR);
     const supabaseHost = SUPABASE_URL ? (() => {
@@ -4836,6 +4883,104 @@ function startStaticServer() {
           supabase_sync: SUPABASE_SYNC_ENABLED,
           features: { ...supabaseFeatureState }
         });
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/catalog' && req.method === 'GET') {
+        supabaseSelectAll(SUPABASE_PUBLIC_RELEASES_TABLE, 'form_id,telegram_id,username,artist_name,track_name,genre,release_type,status,approved_at,release_data,updated_at', 'approved_at.desc')
+          .then((rows) => sendJson(res, 200, { ok: true, releases: (rows || []).map(platformRelease), total: rows?.length || 0 }))
+          .catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/profile' && req.method === 'GET') {
+        authorizeMiniApp(req)
+          .then(async (auth) => {
+            if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+            const [profiles, releases, engagements, badges, achievements, notifications, cabinet] = await Promise.all([
+              supabaseSelectWhere('cxrner_telegram_profiles', 'telegram_id,username,first_name,last_name,photo_url,role,status,registered_at,last_seen_at,metadata', [{ key: 'telegram_id', value: auth.uid }], '', 1),
+              supabaseSelectWhere(SUPABASE_FORMS_TABLE, 'id,telegram_id,artist_name,track_name,genre,release_type,status,reject_reason,upc,created_at,updated_at,form_payload', [{ key: 'telegram_id', value: auth.uid }], 'created_at.desc', 200),
+              supabaseSelectWhere('cxrner_release_engagements', 'release_id,kind,created_at', [{ key: 'telegram_id', value: auth.uid }], 'created_at.desc', 500),
+              supabaseSelectWhere('cxrner_artist_badges', 'badge_id,assigned_at', [{ key: 'telegram_id', value: auth.uid }], 'assigned_at.desc', 100),
+              supabaseSelectWhere('cxrner_user_achievements', 'achievement_id,awarded_at', [{ key: 'telegram_id', value: auth.uid }], 'awarded_at.desc', 100),
+              supabaseSelectWhere('cxrner_notifications', 'id,type,title,body,read_at,created_at', [{ key: 'telegram_id', value: auth.uid }], 'created_at.desc', 50),
+              getCabinetSnapshot(auth.uid)
+            ]);
+            const profile = profiles?.[0] || {};
+            sendJson(res, 200, { ok: true, is_admin: auth.is_admin, user: { ...profile, telegram_id: Number(auth.uid), photo_url: profile.photo_url || auth.user.photo_url || '' }, releases: releases || [], engagements: engagements || [], badges: badges || [], achievements: achievements || [], notifications: notifications || [], cabinet: cabinet || {}, stats: { releases: releases?.length || 0, likes: (engagements || []).filter((x) => x.kind === 'like').length, favorites: (engagements || []).filter((x) => x.kind === 'favorite').length, listens: 0 } });
+          })
+          .catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/engagement' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body);
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          const releaseId = clean(body.release_id || '');
+          const kind = clean(body.kind || '');
+          if (!releaseId || !['like', 'favorite'].includes(kind)) { sendJson(res, 400, { ok: false, error: 'release_id and valid kind are required' }); return; }
+          const query = `release_id=eq.${encodeURIComponent(releaseId)}&telegram_id=eq.${encodeURIComponent(auth.uid)}&kind=eq.${encodeURIComponent(kind)}`;
+          if (body.active === false) await supabaseRequest(`cxrner_release_engagements?${query}`, { method: 'DELETE' });
+          else await supabaseRequest('cxrner_release_engagements', { method: 'POST', body: [{ release_id: releaseId, telegram_id: Number(auth.uid), kind }] });
+          sendJson(res, 200, { ok: true, active: body.active !== false, release_id: releaseId, kind });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/comments' && req.method === 'GET') {
+        const releaseId = clean(u.searchParams.get('release_id') || '');
+        if (!releaseId) { sendJson(res, 400, { ok: false, error: 'release_id is required' }); return; }
+        supabaseSelectWhere('cxrner_comments', 'id,release_id,telegram_id,parent_id,body,is_pinned,created_at,updated_at', [{ key: 'release_id', value: releaseId }], 'created_at.asc', 100)
+          .then((rows) => sendJson(res, 200, { ok: true, comments: rows || [] }))
+          .catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/comments' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body);
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          const releaseId = clean(body.release_id || ''), comment = clean(body.body || '');
+          if (!releaseId || !comment || comment.length > 2000) { sendJson(res, 400, { ok: false, error: 'release_id and comment are required' }); return; }
+          const rows = await supabaseRequest('cxrner_comments', { method: 'POST', headers: { Prefer: 'return=representation' }, body: [{ release_id: releaseId, telegram_id: Number(auth.uid), parent_id: body.parent_id || null, body: comment }] });
+          sendJson(res, 200, { ok: true, comment: rows?.[0] || null });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/listen' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body);
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          const releaseId = clean(body.release_id || '');
+          if (!releaseId) { sendJson(res, 400, { ok: false, error: 'release_id is required' }); return; }
+          await supabaseRequest('cxrner_listen_events', { method: 'POST', body: [{ release_id: releaseId, telegram_id: Number(auth.uid), seconds_played: Math.max(0, Number(body.seconds_played) || 0), source: 'mini_app', country: clean(body.country || '') || null }] });
+          sendJson(res, 200, { ok: true });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/analytics' && req.method === 'GET') {
+        authorizeMiniApp(req).then(async (auth) => {
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          const [revenue, payouts, listens] = await Promise.all([
+            supabaseSelectWhere('cxrner_revenue_events', 'platform,country,source,amount,currency,event_date,release_id', [{ key: 'telegram_id', value: auth.uid }], 'event_date.desc', 500),
+            supabaseSelectWhere('cxrner_payouts', 'id,amount,currency,status,period,created_at,paid_at', [{ key: 'telegram_id', value: auth.uid }], 'created_at.desc', 200),
+            supabaseSelectWhere('cxrner_listen_events', 'release_id,seconds_played,country,created_at', [{ key: 'telegram_id', value: auth.uid }], 'created_at.desc', 500)
+          ]);
+          const total = (revenue || []).reduce((sum, row) => sum + Number(row.amount || 0), 0);
+          sendJson(res, 200, { ok: true, revenue: revenue || [], payouts: payouts || [], listens: listens || [], totals: { revenue: total, streams: (listens || []).length, seconds: (listens || []).reduce((sum, row) => sum + Number(row.seconds_played || 0), 0) } });
+        }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/admin' && req.method === 'GET') {
+        authorizeMiniApp(req).then(async (auth) => {
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          if (!auth.is_admin) { sendJson(res, 403, { ok: false, error: 'admin access required' }); return; }
+          const [users, forms, releases, comments, engagements, payouts] = await Promise.all([
+            supabaseSelectAll('cxrner_telegram_profiles', 'telegram_id,username,first_name,role,status,registered_at,last_seen_at', 'last_seen_at.desc'),
+            supabaseSelectAll(SUPABASE_FORMS_TABLE, 'id,telegram_id,artist_name,track_name,status,created_at,updated_at,reject_reason', 'updated_at.desc'),
+            supabaseSelectAll(SUPABASE_PUBLIC_RELEASES_TABLE, 'form_id,telegram_id,artist_name,track_name,status,approved_at', 'approved_at.desc'),
+            supabaseSelectAll('cxrner_comments', 'id,release_id,telegram_id,body,is_pinned,created_at', 'created_at.desc'),
+            supabaseSelectAll('cxrner_release_engagements', 'release_id,telegram_id,kind,created_at', 'created_at.desc'),
+            supabaseSelectAll('cxrner_payouts', 'id,telegram_id,amount,currency,status,period,created_at,paid_at', 'created_at.desc')
+          ]);
+          sendJson(res, 200, { ok: true, stats: { users: users?.length || 0, releases: releases?.length || 0, forms: forms?.length || 0, comments: comments?.length || 0, likes: (engagements || []).filter((x) => x.kind === 'like').length, favorites: (engagements || []).filter((x) => x.kind === 'favorite').length, payouts: payouts?.length || 0 }, users: users || [], forms: forms || [], releases: releases || [], comments: comments || [], engagements: engagements || [], payouts: payouts || [] });
+        }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
         return;
       }
       if (u.pathname === '/health' || u.pathname === '/healthz') {

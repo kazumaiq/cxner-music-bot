@@ -41,3 +41,5 @@ WEBAPP_URL=https://ваш-домен/index.html
 - отправляет анкету в модерацию;
 - добавляет релиз в `releases.json` (раздел «Мои релизы» у артиста);
 - использует тот же функционал статусов/отклонения/UPC, что и у анкеты из бота.
+- Platform UI is available from the `Платформа` tab. It authenticates through Telegram WebApp `initData` and uses the bot API on the same origin.
+- Run `SUPABASE_PLATFORM_UPGRADE.sql` once in the current Supabase project to enable listening events, payouts, revenue and news tables.
