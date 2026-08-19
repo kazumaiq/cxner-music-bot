@@ -4942,7 +4942,10 @@ function startStaticServer() {
       }
       if (u.pathname === '/api/miniapp/platform/catalog' && req.method === 'GET') {
         supabaseSelectAll(SUPABASE_PUBLIC_RELEASES_TABLE, 'form_id,telegram_id,username,artist_name,track_name,genre,release_type,status,approved_at,release_data,updated_at', 'approved_at.desc')
-          .then((rows) => sendJson(res, 200, { ok: true, releases: (rows || []).map(platformRelease), total: rows?.length || 0 }))
+          .then((rows) => {
+            const approved = (rows || []).filter((row) => ['approved', 'published'].includes(clean(row?.status || '').toLowerCase())).slice(0, 100);
+            sendJson(res, 200, { ok: true, releases: approved.map(platformRelease), total: approved.length, showcase: approved.slice(0, 10).map(platformRelease) });
+          })
           .catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
         return;
       }
@@ -4973,9 +4976,10 @@ function startStaticServer() {
           const releaseId = clean(body.release_id || '');
           const kind = clean(body.kind || '');
           if (!releaseId || !['like', 'favorite'].includes(kind)) { sendJson(res, 400, { ok: false, error: 'release_id and valid kind are required' }); return; }
+          console.info(`[PLATFORM] engagement: user_id=${auth.uid} release_id=${releaseId} kind=${kind} active=${body.active !== false}`);
           const query = `release_id=eq.${encodeURIComponent(releaseId)}&telegram_id=eq.${encodeURIComponent(auth.uid)}&kind=eq.${encodeURIComponent(kind)}`;
           if (body.active === false) await supabaseRequest(`cxrner_release_engagements?${query}`, { method: 'DELETE' });
-          else await supabaseRequest('cxrner_release_engagements', { method: 'POST', body: [{ release_id: releaseId, telegram_id: Number(auth.uid), kind }] });
+          else await supabaseRequest('cxrner_release_engagements?on_conflict=release_id,telegram_id,kind', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: [{ release_id: releaseId, telegram_id: Number(auth.uid), kind }] });
           sendJson(res, 200, { ok: true, active: body.active !== false, release_id: releaseId, kind });
         }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
         return;
