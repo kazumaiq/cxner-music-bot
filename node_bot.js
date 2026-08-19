@@ -336,6 +336,7 @@ const webappSubmitAntiSpam = new Map();
 const supabaseFeatureState = {
   forms: true,
   users: true,
+  cabinet: true,
   public_releases: true,
   interactions: true
 };
@@ -939,6 +940,7 @@ async function supabaseUpsertCabinetUser(userId, user, cabinetActive = true) {
     }
   }
 
+  if (!supabaseFeatureState.cabinet) return ok;
   try {
     await supabaseRequest(`${SUPABASE_CABINET_TABLE}?on_conflict=user_id`, {
       method: 'POST',
@@ -956,7 +958,11 @@ async function supabaseUpsertCabinetUser(userId, user, cabinetActive = true) {
     });
     ok = true;
   } catch (e) {
-    console.error('[supabase] cabinet upsert failed:', clean(e?.message || e));
+    const errText = clean(e?.message || e);
+    console.error('[supabase] cabinet upsert failed:', errText);
+    if (/22P02|uuid/i.test(errText)) {
+      disableSupabaseFeature('cabinet', 'legacy cxrner_cabinet_users.user_id is uuid; Telegram IDs are stored in cxrner_users');
+    }
   }
 
   return ok;
@@ -1448,7 +1454,15 @@ async function syncSupabaseNow(reason = '') {
     const interactionRows = supabaseFeatureState.interactions ? buildSupabaseInteractionRows() : [];
 
     await supabaseUpsertRows(SUPABASE_RELEASES_TABLE, relRows);
-    await supabaseUpsertCabinetRows(SUPABASE_CABINET_TABLE, cabRows);
+    if (supabaseFeatureState.cabinet) {
+      try {
+        await supabaseUpsertCabinetRows(SUPABASE_CABINET_TABLE, cabRows);
+      } catch (e) {
+        const errText = clean(e?.message || e);
+        console.error('[supabase] cabinet sync failed:', errText);
+        if (/22P02|uuid/i.test(errText)) disableSupabaseFeature('cabinet', 'legacy cabinet table uses uuid user_id');
+      }
+    }
     if (supabaseFeatureState.interactions) {
       try {
         await supabaseUpsertInteractionRows(SUPABASE_INTERACTIONS_TABLE, interactionRows);
