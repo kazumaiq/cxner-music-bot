@@ -4724,6 +4724,7 @@ function startStaticServer() {
     try {
       await supabaseRequest('cxrner_telegram_profiles?on_conflict=telegram_id', {
         method: 'POST',
+        headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
         body: [{ telegram_id: Number(uid), username: clean(check.user.username || ''), first_name: clean(check.user.first_name || ''), last_name: clean(check.user.last_name || ''), role: isAdmin(uid) ? 'admin' : 'artist', status: 'active', last_seen_at: new Date().toISOString(), metadata: { photo_url: clean(check.user.photo_url || '') } }]
       });
     } catch (error) {
