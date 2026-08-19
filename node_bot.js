@@ -5027,6 +5027,63 @@ function startStaticServer() {
         }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
         return;
       }
+      if (u.pathname === '/api/miniapp/platform/artist' && req.method === 'GET') {
+        const artistId = clean(u.searchParams.get('telegram_id') || '');
+        if (!/^\d{4,20}$/.test(artistId)) { sendJson(res, 400, { ok: false, error: 'telegram_id is required' }); return; }
+        Promise.all([
+          supabaseSelectWhere('cxrner_artist_profiles', 'telegram_id,display_name,bio,avatar_url,socials,theme,updated_at', [{ key: 'telegram_id', value: artistId }], '', 1),
+          supabaseSelectWhere('cxrner_artist_badges', 'badge_id,assigned_at', [{ key: 'telegram_id', value: artistId }], 'assigned_at.desc', 100),
+          supabaseSelectWhere('cxrner_badges', 'id,slug,name,description,image_url', [], 'created_at.desc', 100),
+          supabaseSelectWhere('cxrner_artist_follows', 'follower_id,created_at', [{ key: 'following_id', value: artistId }], 'created_at.desc', 1000)
+        ]).then(([profiles, assigned, badges, followers]) => {
+          const ids = new Set((assigned || []).map((row) => String(row.badge_id)));
+          sendJson(res, 200, { ok: true, artist: profiles?.[0] || { telegram_id: Number(artistId), display_name: '', bio: '', avatar_url: '', socials: {} }, badges: (badges || []).filter((row) => ids.has(String(row.id))), followers: followers?.length || 0 });
+        }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/artist/profile' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body);
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          const profile = body.profile && typeof body.profile === 'object' ? body.profile : {};
+          await supabaseRequest('cxrner_artist_profiles?on_conflict=telegram_id', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=representation' }, body: [{ telegram_id: Number(auth.uid), display_name: clean(profile.display_name || auth.user.first_name || '').slice(0, 80), bio: clean(profile.bio || '').slice(0, 1000), avatar_url: clean(profile.avatar_url || auth.user.photo_url || '').slice(0, 500), socials: profile.socials && typeof profile.socials === 'object' ? profile.socials : {}, theme: profile.theme && typeof profile.theme === 'object' ? profile.theme : {}, updated_at: new Date().toISOString() }] });
+          sendJson(res, 200, { ok: true });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/follow' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body), followingId = clean(body.following_id || '');
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          if (!/^\d{4,20}$/.test(followingId) || followingId === auth.uid) { sendJson(res, 400, { ok: false, error: 'valid following_id is required' }); return; }
+          await supabaseRequest('cxrner_telegram_profiles?on_conflict=telegram_id', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: [{ telegram_id: Number(followingId), role: 'artist', status: 'active' }] });
+          const query = `follower_id=eq.${encodeURIComponent(auth.uid)}&following_id=eq.${encodeURIComponent(followingId)}`;
+          if (body.active === false) await supabaseRequest(`cxrner_artist_follows?${query}`, { method: 'DELETE' });
+          else await supabaseRequest('cxrner_artist_follows?on_conflict=follower_id,following_id', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: [{ follower_id: Number(auth.uid), following_id: Number(followingId) }] });
+          sendJson(res, 200, { ok: true, following: body.active !== false });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/admin/badge' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body);
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          if (!auth.is_admin) { sendJson(res, 403, { ok: false, error: 'admin access required' }); return; }
+          let badgeId = clean(body.badge_id || '');
+          if (body.action === 'create') {
+            const name = clean(body.name || ''), imageUrl = clean(body.image_url || '');
+            if (!name || !imageUrl.toLowerCase().match(/\.png(?:$|[?#])/)) { sendJson(res, 400, { ok: false, error: 'name and PNG image_url are required' }); return; }
+            const rows = await supabaseRequest('cxrner_badges', { method: 'POST', headers: { Prefer: 'return=representation' }, body: [{ slug: clean(body.slug || name.toLowerCase().replace(/[^a-z0-9]+/g, '-')).slice(0, 80), name, description: clean(body.description || ''), image_url: imageUrl }] });
+            badgeId = String(rows?.[0]?.id || '');
+          }
+          const artistId = clean(body.telegram_id || '');
+          if (!badgeId || !/^\d{4,20}$/.test(artistId)) { sendJson(res, 400, { ok: false, error: 'badge_id and artist telegram_id are required' }); return; }
+          await supabaseRequest('cxrner_telegram_profiles?on_conflict=telegram_id', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: [{ telegram_id: Number(artistId), role: 'artist', status: 'active' }] });
+          await supabaseRequest('cxrner_artist_badges?on_conflict=badge_id,telegram_id', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: [{ badge_id: badgeId, telegram_id: Number(artistId) }] });
+          sendJson(res, 200, { ok: true, badge_id: badgeId, telegram_id: artistId });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
       if (u.pathname === '/api/miniapp/platform/admin' && req.method === 'GET') {
         authorizeMiniApp(req).then(async (auth) => {
           if (!auth.ok) { sendJson(res, auth.status, auth); return; }

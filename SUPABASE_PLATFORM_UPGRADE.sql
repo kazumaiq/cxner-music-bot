@@ -47,10 +47,29 @@ create table if not exists public.cxrner_news (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.cxrner_artist_profiles (
+  telegram_id bigint primary key references public.cxrner_telegram_profiles(telegram_id) on delete cascade,
+  display_name text not null default '',
+  bio text not null default '',
+  avatar_url text not null default '',
+  socials jsonb not null default '{}'::jsonb,
+  theme jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.cxrner_artist_follows (
+  follower_id bigint not null references public.cxrner_telegram_profiles(telegram_id) on delete cascade,
+  following_id bigint not null references public.cxrner_telegram_profiles(telegram_id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (follower_id, following_id),
+  check (follower_id <> following_id)
+);
+
 create index if not exists cxrner_listens_release_idx on public.cxrner_listen_events (release_id, created_at desc);
 create index if not exists cxrner_payouts_user_idx on public.cxrner_payouts (telegram_id, created_at desc);
 create index if not exists cxrner_revenue_user_idx on public.cxrner_revenue_events (telegram_id, event_date desc);
 create index if not exists cxrner_news_published_idx on public.cxrner_news (published, published_at desc);
+create index if not exists cxrner_artist_follows_following_idx on public.cxrner_artist_follows (following_id, created_at desc);
 
 alter table public.cxrner_listen_events enable row level security;
 alter table public.cxrner_payouts enable row level security;
