@@ -4741,7 +4741,7 @@ function startStaticServer() {
       type: clean(row?.release_type || data.type || 'single'),
       status: clean(row?.status || data.status || 'approved'),
       date: clean(data.date || row?.approved_at || row?.created_at || ''),
-      upc: clean(data.upc || row?.upc || ''),
+      upc: clean(data.upc || data.UPC || row?.upc || ''),
       description: clean(data.promo || data.comment || data.description || ''),
       cover: clean(data.cover || data.cover_url || ''),
       audio_url: clean(data.audio_url || data.preview_url || data.link || ''),
@@ -4992,7 +4992,14 @@ function startStaticServer() {
         const releaseId = clean(u.searchParams.get('release_id') || '');
         if (!releaseId) { sendJson(res, 400, { ok: false, error: 'release_id is required' }); return; }
         supabaseSelectWhere('cxrner_comments', 'id,release_id,telegram_id,parent_id,body,is_pinned,created_at,updated_at', [{ key: 'release_id', value: releaseId }], 'created_at.asc', 100)
-          .then((rows) => sendJson(res, 200, { ok: true, comments: rows || [] }))
+          .then(async (rows) => {
+            const ids = [...new Set((rows || []).map((row) => String(row.telegram_id || '')).filter(Boolean))];
+            const profiles = ids.length
+              ? await supabaseSelectAll('cxrner_telegram_profiles', 'telegram_id,username,first_name,last_name,photo_url', 'last_seen_at.desc')
+              : [];
+            const byId = new Map((profiles || []).map((profile) => [String(profile.telegram_id), profile]));
+            sendJson(res, 200, { ok: true, comments: (rows || []).map((row) => ({ ...row, author: byId.get(String(row.telegram_id)) || null })) });
+          })
           .catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
         return;
       }
@@ -5083,7 +5090,7 @@ function startStaticServer() {
           supabaseSelectWhere('cxrner_artist_follows', 'follower_id,created_at', [{ key: 'following_id', value: artistId }], 'created_at.desc', 1000)
         ]).then(([profiles, assigned, badges, followers]) => {
           const ids = new Set((assigned || []).map((row) => String(row.badge_id)));
-          sendJson(res, 200, { ok: true, artist: profiles?.[0] || { telegram_id: Number(artistId), display_name: '', bio: '', avatar_url: '', socials: {} }, badges: (badges || []).filter((row) => ids.has(String(row.id))), followers: followers?.length || 0 });
+          sendJson(res, 200, { ok: true, artist: profiles?.[0] || { telegram_id: Number(artistId), display_name: '', bio: '', avatar_url: '', socials: {} }, badges: (badges || []).filter((row) => ids.has(String(row.id))), followers: followers?.length || 0, share_url: `${WEBAPP_URL || BASE}?artist=${encodeURIComponent(artistId)}` });
         }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
         return;
       }
