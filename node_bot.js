@@ -5111,6 +5111,83 @@ function startStaticServer() {
         }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
         return;
       }
+      // Aggregated dashboard feed. It intentionally composes existing tables so the
+      // current profile/catalog endpoints and Telegram moderation flow stay intact.
+      if (u.pathname === '/api/miniapp/platform/home' && req.method === 'GET') {
+        authorizeMiniApp(req).then(async (auth) => {
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          const [profileRows, forms, publicRows, engagements, listens, follows, notifications, news] = await Promise.all([
+            supabaseSelectWhere('cxrner_telegram_profiles', 'telegram_id,username,first_name,last_name,photo_url,role,status,registered_at,last_seen_at,metadata', [{ key: 'telegram_id', value: auth.uid }], '', 1).catch(() => []),
+            supabaseSelectWhere(SUPABASE_FORMS_TABLE, 'id,telegram_id,artist_name,track_name,genre,release_type,status,reject_reason,upc,created_at,updated_at,form_payload', [{ key: 'telegram_id', value: auth.uid }], 'created_at.desc', 200).catch(() => []),
+            supabaseSelectAll(SUPABASE_PUBLIC_RELEASES_TABLE, 'form_id,telegram_id,username,artist_name,track_name,genre,release_type,status,approved_at,release_data,updated_at', 'approved_at.desc').catch(() => []),
+            supabaseSelectAll('cxrner_release_engagements', 'release_id,telegram_id,kind,created_at', 'created_at.desc').catch(() => []),
+            supabaseSelectAll('cxrner_listen_events', 'release_id,telegram_id,seconds_played,created_at', 'created_at.desc').catch(() => []),
+            supabaseSelectAll('cxrner_artist_follows', 'follower_id,following_id,created_at', 'created_at.desc').catch(() => []),
+            supabaseSelectWhere('cxrner_notifications', 'id,type,title,body,read_at,created_at', [{ key: 'telegram_id', value: auth.uid }], 'created_at.desc', 12).catch(() => []),
+            supabaseSelectAll('cxrner_news', 'id,title,body,cover_url,published,published_at,created_at', 'published_at.desc').catch(() => [])
+          ]);
+          const countMap = new Map();
+          for (const row of engagements || []) {
+            const id = clean(row.release_id || ''); if (!id) continue;
+            const value = countMap.get(id) || { likes: 0, favorites: 0 };
+            if (row.kind === 'like') value.likes += 1;
+            if (row.kind === 'favorite') value.favorites += 1;
+            countMap.set(id, value);
+          }
+          const listenMap = new Map();
+          for (const row of listens || []) listenMap.set(clean(row.release_id || ''), (listenMap.get(clean(row.release_id || '')) || 0) + 1);
+          const releases = (publicRows || []).filter((row) => ['approved', 'published'].includes(clean(row.status || '').toLowerCase())).map((row) => ({ ...platformRelease(row, countMap.get(clean(row.form_id || '')) || {}), listens: listenMap.get(clean(row.form_id || '')) || 0 }));
+          const latest = releases.slice(0, 10);
+          const popular = [...releases].sort((a, b) => ((b.likes || 0) + (b.favorites || 0) * 0.5 + (b.listens || 0)) - ((a.likes || 0) + (a.favorites || 0) * 0.5 + (a.listens || 0))).slice(0, 10);
+          const profile = profileRows?.[0] || {};
+          const approvedOwn = (forms || []).filter((row) => ['approved', 'published'].includes(clean(row.status || '').toLowerCase())).length;
+          const moderationOwn = (forms || []).filter((row) => ['moderation', 'on_moderation', 'pending'].includes(clean(row.status || '').toLowerCase())).length;
+          const followers = (follows || []).filter((row) => Number(row.following_id) === Number(auth.uid)).length;
+          const following = (follows || []).filter((row) => Number(row.follower_id) === Number(auth.uid)).length;
+          const ownReleaseIds = new Set((forms || []).map((row) => String(row.id)));
+          const ownLikes = (engagements || []).filter((row) => ownReleaseIds.has(String(row.release_id)) && row.kind === 'like').length;
+          const ownListens = (listens || []).filter((row) => ownReleaseIds.has(String(row.release_id))).length;
+          sendJson(res, 200, { ok: true, user: { ...profile, telegram_id: Number(auth.uid), photo_url: profile.photo_url || auth.user.photo_url || '' }, stats: { releases: forms?.length || 0, approved: approvedOwn, moderation: moderationOwn, views: 0, listens: ownListens, likes: ownLikes, comments: 0, followers, following }, latest, popular, recommended: latest.slice(0, 6), news: (news || []).filter((row) => row.published !== false).slice(0, 8), notifications: notifications || [], forms: forms || [], is_admin: auth.is_admin });
+        }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/activity' && req.method === 'GET') {
+        authorizeMiniApp(req).then(async (auth) => {
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          const [notifications, forms] = await Promise.all([
+            supabaseSelectWhere('cxrner_notifications', 'id,type,title,body,read_at,created_at', [{ key: 'telegram_id', value: auth.uid }], 'created_at.desc', 100).catch(() => []),
+            supabaseSelectWhere(SUPABASE_FORMS_TABLE, 'id,track_name,artist_name,status,created_at,updated_at,reject_reason', [{ key: 'telegram_id', value: auth.uid }], 'updated_at.desc', 50).catch(() => [])
+          ]);
+          sendJson(res, 200, { ok: true, items: [...(notifications || []).map((x) => ({ ...x, kind: 'notification' })), ...(forms || []).map((x) => ({ id: 'form-' + x.id, kind: 'release', title: x.track_name || 'Релиз', body: x.reject_reason || x.status, created_at: x.updated_at || x.created_at }))].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)).slice(0, 100) });
+        }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/calendar' && req.method === 'GET') {
+        supabaseSelectAll(SUPABASE_PUBLIC_RELEASES_TABLE, 'form_id,telegram_id,artist_name,track_name,genre,status,approved_at,release_data,updated_at', 'approved_at.desc').then((rows) => {
+          const items = (rows || []).filter((row) => ['approved', 'published'].includes(clean(row.status || '').toLowerCase())).map((row) => platformRelease(row)).filter((row) => row.date || row.release_date);
+          sendJson(res, 200, { ok: true, releases: items.sort((a, b) => new Date(a.date || a.release_date || 0) - new Date(b.date || b.release_date || 0)) });
+        }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/rankings' && req.method === 'GET') {
+        Promise.all([
+          supabaseSelectAll(SUPABASE_PUBLIC_RELEASES_TABLE, 'form_id,telegram_id,artist_name,track_name,genre,status,approved_at,release_data,updated_at', 'approved_at.desc'),
+          supabaseSelectAll('cxrner_release_engagements', 'release_id,kind,created_at', 'created_at.desc').catch(() => []),
+          supabaseSelectAll('cxrner_listen_events', 'release_id,created_at', 'created_at.desc').catch(() => [])
+        ]).then(([rows, engagements, listens]) => {
+          const artists = new Map();
+          for (const row of rows || []) {
+            if (!['approved', 'published'].includes(clean(row.status || '').toLowerCase())) continue;
+            const id = String(row.telegram_id || 'unknown'); const item = artists.get(id) || { telegram_id: row.telegram_id, artist: row.artist_name || 'Артист', releases: 0, likes: 0, listens: 0 };
+            item.releases += 1; artists.set(id, item);
+          }
+          const releaseArtist = new Map((rows || []).map((row) => [String(row.form_id), String(row.telegram_id || 'unknown')]));
+          for (const row of engagements || []) { const item = artists.get(releaseArtist.get(String(row.release_id))); if (item && row.kind === 'like') item.likes += 1; }
+          for (const row of listens || []) { const item = artists.get(releaseArtist.get(String(row.release_id))); if (item) item.listens += 1; }
+          const sort = clean(u.searchParams.get('sort') || 'likes'); const result = [...artists.values()].sort((a, b) => (b[sort] || 0) - (a[sort] || 0)).slice(0, 50); sendJson(res, 200, { ok: true, rankings: result });
+        }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
       if (u.pathname === '/api/miniapp/platform/profile' && (req.method === 'GET' || req.method === 'POST')) {
         const profileRequest = req.method === 'POST' ? readJsonBody(req).catch(() => ({})) : Promise.resolve({});
         profileRequest.then((profileBody) => authorizeMiniApp(req, profileBody))
