@@ -4811,6 +4811,47 @@ function startStaticServer() {
         res.end();
         return;
       }
+      if (u.pathname === '/api/webapp/submit' && req.method === 'POST') {
+        readJsonBody(req, WEBAPP_MAX_PAYLOAD_BYTES).then(async (body) => {
+          const initData = clean(body.initData || body.init_data || '');
+          const check = verifyTelegramInitData(initData);
+          if (!check.ok || !check.user?.id) {
+            sendJson(res, 403, { ok: false, error: 'Telegram initData validation failed', reason: check.reason });
+            return;
+          }
+          const payload = body.payload && typeof body.payload === 'object' ? body.payload : body;
+          const parsed = parseWebappPayload(payload);
+          const uid = String(check.user.id);
+          if (clean(parsed.telegram_id || '') && clean(parsed.telegram_id) !== uid) {
+            sendJson(res, 403, { ok: false, error: 'Telegram ID does not match initData user' });
+            return;
+          }
+          if (!parsed.form || typeof parsed.form !== 'object') {
+            sendJson(res, 400, { ok: false, error: 'form is required' });
+            return;
+          }
+          parsed.telegram_id = uid;
+          parsed.form.telegram_id = uid;
+          const antiSpam = verifyWebappAntiSpam(uid, JSON.stringify(payload));
+          if (!antiSpam.ok) {
+            sendJson(res, 429, { ok: false, duplicate: true, error: 'Анкета уже отправлена. Подожди несколько секунд.' });
+            return;
+          }
+          const validation = validateForm(parsed.form, parsed);
+          if (validation.errors.length) {
+            sendJson(res, 422, { ok: false, error: validation.errors.slice(0, 8).join('; '), errors: validation.errors });
+            return;
+          }
+          const out = await submitReleaseToModeration(check.user, uid, validation.data, 'mini_app');
+          await supabaseUpsertCabinetUser(uid, check.user, true);
+          console.info(`[WEBAPP_API] release stored: user_id=${uid} idx=${out?.idx ?? '-'} name=${sanitizeText(validation.data.name || '', 80)}`);
+          sendJson(res, 200, { ok: true, user_id: uid, idx: out?.idx ?? null, duplicate: Boolean(out?.duplicate), moderation_message_id: out?.rel?.moderation_message_id ?? null });
+        }).catch((error) => {
+          console.error('[WEBAPP_API] submit failed:', clean(error?.message || error));
+          sendJson(res, 500, { ok: false, error: 'internal_error', detail: clean(error?.message || error) });
+        });
+        return;
+      }
       if (u.pathname === '/api/new-release' && req.method === 'POST') {
         if (!WEBHOOK_SECRET || clean(req.headers['x-cxrner-secret'] || '') !== WEBHOOK_SECRET) {
           sendJson(res, 401, { ok: false, error: 'unauthorized' });
