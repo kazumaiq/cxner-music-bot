@@ -5013,6 +5013,21 @@ function startStaticServer() {
           .catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
         return;
       }
+      if (u.pathname === '/api/miniapp/link/lookup' && req.method === 'GET') {
+        const upc = clean(u.searchParams.get('upc') || '').replace(/[^0-9A-Za-z-]/g, '').slice(0, 80);
+        if (!upc) { sendJson(res, 400, { ok: false, error: 'UPC is required' }); return; }
+        supabaseSelectAll(SUPABASE_PUBLIC_RELEASES_TABLE, 'form_id,telegram_id,username,artist_name,track_name,genre,release_type,status,approved_at,release_data,updated_at', 'approved_at.desc')
+          .then((rows) => {
+            const found = (rows || []).find((row) => ['approved', 'published'].includes(clean(row.status || '').toLowerCase()) && clean(row.release_data?.upc || row.release_data?.UPC || '') === upc);
+            if (!found) { sendJson(res, 404, { ok: false, error: 'Релиз с таким UPC не найден среди опубликованных' }); return; }
+            const release = platformRelease(found);
+            const payload = found.release_data && typeof found.release_data === 'object' ? found.release_data : {};
+            const platforms = Object.fromEntries(Object.entries(release.dsp_links || {}).filter(([, value]) => isHttpUrl(String(value || ''))));
+            sendJson(res, 200, { ok: true, release: { ...release, upc, platforms, release_id: found.form_id, owner_id: found.telegram_id } });
+          })
+          .catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
       if (u.pathname === '/api/miniapp/link' && req.method === 'POST') {
         readJsonBody(req).then(async (body) => {
           const auth = await authorizeMiniApp(req, body);
