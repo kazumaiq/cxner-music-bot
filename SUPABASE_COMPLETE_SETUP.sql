@@ -28,6 +28,17 @@ create table if not exists public.cxrner_public_releases (
 );
 create index if not exists idx_cxrner_public_releases_status on public.cxrner_public_releases (status);
 
+create table if not exists public.cxrner_interactions (
+  user_id text not null,
+  release_idx integer not null,
+  interaction_idx integer not null,
+  interaction jsonb not null default '{}'::jsonb,
+  occurred_at timestamptz,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, release_idx, interaction_idx)
+);
+create index if not exists idx_cxrner_interactions_release on public.cxrner_interactions (user_id, release_idx);
+
 create table if not exists public.cxrner_forms (
   id uuid primary key default gen_random_uuid(), telegram_id text, username text, artist_name text, track_name text,
   genre text, release_type text, submission_key text not null unique, status text not null default 'pending',
@@ -98,6 +109,7 @@ alter table public.cxrner_cabinet_users enable row level security;
 alter table public.cxrner_releases enable row level security;
 alter table public.cxrner_users enable row level security;
 alter table public.cxrner_public_releases enable row level security;
+alter table public.cxrner_interactions enable row level security;
 alter table public.cxrner_forms enable row level security;
 alter table public.cxrner_telegram_profiles enable row level security;
 alter table public.cxrner_release_engagements enable row level security;

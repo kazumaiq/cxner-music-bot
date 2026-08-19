@@ -229,6 +229,7 @@ const SUPABASE_CABINET_TABLE_RAW = envStr('SUPABASE_CABINET_TABLE', 'cxrner_cabi
 const SUPABASE_FORMS_TABLE_RAW = envStr('SUPABASE_FORMS_TABLE', 'cxrner_forms') || 'cxrner_forms';
 const SUPABASE_USERS_TABLE_RAW = envStr('SUPABASE_USERS_TABLE', 'cxrner_users') || 'cxrner_users';
 const SUPABASE_PUBLIC_RELEASES_TABLE_RAW = envStr('SUPABASE_PUBLIC_RELEASES_TABLE', 'cxrner_public_releases') || 'cxrner_public_releases';
+const SUPABASE_INTERACTIONS_TABLE_RAW = envStr('SUPABASE_INTERACTIONS_TABLE', 'cxrner_interactions') || 'cxrner_interactions';
 const SUPABASE_SYNC_ENABLED = !!SUPABASE_URL && !!SUPABASE_SERVICE_ROLE_KEY;
 const SUPABASE_FETCH_TIMEOUT_MS = envInt('SUPABASE_FETCH_TIMEOUT_MS', 25000);
 const SUPABASE_FETCH_RETRIES = envInt('SUPABASE_FETCH_RETRIES', 4);
@@ -309,6 +310,9 @@ const SUPABASE_USERS_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_USERS_TABL
 const SUPABASE_PUBLIC_RELEASES_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_PUBLIC_RELEASES_TABLE_RAW)
   ? SUPABASE_PUBLIC_RELEASES_TABLE_RAW
   : 'cxrner_public_releases';
+const SUPABASE_INTERACTIONS_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_INTERACTIONS_TABLE_RAW)
+  ? SUPABASE_INTERACTIONS_TABLE_RAW
+  : 'cxrner_interactions';
 const FORM_STATUS = {
   PENDING: 'pending',
   ON_MODERATION: 'on_moderation',
@@ -332,7 +336,8 @@ const webappSubmitAntiSpam = new Map();
 const supabaseFeatureState = {
   forms: true,
   users: true,
-  public_releases: true
+  public_releases: true,
+  interactions: true
 };
 ensureModDbShape();
 
@@ -1414,6 +1419,19 @@ async function supabaseUpsertApprovedRows(tableName, rows, chunkSize = SUPABASE_
   }
 }
 
+async function supabaseUpsertInteractionRows(tableName, rows, chunkSize = SUPABASE_SYNC_CHUNK_SIZE) {
+  if (!rows.length) return;
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    await supabaseRequest(`${tableName}?on_conflict=user_id,release_idx,interaction_idx`, {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: chunk
+    });
+    if (SUPABASE_SYNC_CHUNK_DELAY_MS > 0 && i + chunkSize < rows.length) await delay(SUPABASE_SYNC_CHUNK_DELAY_MS);
+  }
+}
+
 async function syncSupabaseNow(reason = '') {
   if (!SUPABASE_SYNC_ENABLED) return;
   if (supabaseSyncInProgress) {
@@ -1427,9 +1445,19 @@ async function syncSupabaseNow(reason = '') {
     const formRows = supabaseFeatureState.forms ? buildSupabaseFormRows() : [];
     const userRows = supabaseFeatureState.users ? buildSupabaseUserRows() : [];
     const approvedRows = supabaseFeatureState.public_releases ? buildSupabaseApprovedReleaseRows() : [];
+    const interactionRows = supabaseFeatureState.interactions ? buildSupabaseInteractionRows() : [];
 
     await supabaseUpsertRows(SUPABASE_RELEASES_TABLE, relRows);
     await supabaseUpsertCabinetRows(SUPABASE_CABINET_TABLE, cabRows);
+    if (supabaseFeatureState.interactions) {
+      try {
+        await supabaseUpsertInteractionRows(SUPABASE_INTERACTIONS_TABLE, interactionRows);
+      } catch (e) {
+        const errText = clean(e?.message || e);
+        console.error('[supabase] interactions sync failed:', errText);
+        if (isSupabaseSchemaError(e)) disableSupabaseFeature('interactions', errText);
+      }
+    }
 
     if (supabaseFeatureState.forms) {
       try {
@@ -1461,7 +1489,8 @@ async function syncSupabaseNow(reason = '') {
 
     console.info(
       `[supabase] synced (${reason || 'manual'}): releases=${relRows.length}, cabinet=${cabRows.length}` +
-      ` forms=${formRows.length} users=${userRows.length} approved=${approvedRows.length}`
+      ` forms=${formRows.length} users=${userRows.length} approved=${approvedRows.length}` +
+      ` interactions=${interactionRows.length}`
     );
   } catch (e) {
     console.error('[supabase] sync failed:', clean(e?.message || e));
@@ -4916,6 +4945,29 @@ function startStaticServer() {
       .then((checks) => console.info(`[web-check] local routes: ${checks.join(' ')}`))
       .catch((error) => console.error(`[web-check] failed: ${clean(error?.message || error)}`));
   });
+}
+
+function buildSupabaseInteractionRows() {
+  const rows = [];
+  for (const [uid, listRaw] of Object.entries(db || {})) {
+    const list = Array.isArray(listRaw) ? listRaw : [];
+    for (let releaseIdx = 0; releaseIdx < list.length; releaseIdx += 1) {
+      const interactions = Array.isArray(list[releaseIdx]?.interactions) ? list[releaseIdx].interactions : [];
+      interactions.forEach((interaction, interactionIdx) => {
+        if (!interaction || typeof interaction !== 'object') return;
+        const at = Date.parse(String(interaction.at || ''));
+        rows.push({
+          user_id: String(uid),
+          release_idx: releaseIdx,
+          interaction_idx: interactionIdx,
+          interaction: safeJson(interaction) || {},
+          occurred_at: Number.isFinite(at) ? new Date(at).toISOString() : null,
+          updated_at: new Date().toISOString()
+        });
+      });
+    }
+  }
+  return rows;
 }
 
 let offset = 0;
