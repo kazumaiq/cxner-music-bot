@@ -1306,6 +1306,7 @@ function buildSupabaseFormRows() {
     const list = Array.isArray(listRaw) ? listRaw : [];
     for (let idx = 0; idx < list.length; idx += 1) {
       const rel = normalizeRelease(list[idx] || {});
+      rel.release_idx = idx;
       const row = buildSupabaseFormRow(uid, { username: rel.username || '' }, rel, mapReleaseStatusToFormStatus(rel.status));
       row.form_payload = safeJson(rel) || {};
       row.moderation_message_id = Number(rel.moderation_message_id || 0) || null;
@@ -2506,6 +2507,7 @@ async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_
   const submissionTime = new Date().toISOString();
   const rel = {
     ...releaseData,
+    release_idx: idx,
     status: STATUS.ON_UPLOAD,
     source,
     submission_time: submissionTime,
@@ -4958,17 +4960,18 @@ function startStaticServer() {
         profileRequest.then((profileBody) => authorizeMiniApp(req, profileBody))
           .then(async (auth) => {
             if (!auth.ok) { sendJson(res, auth.status, auth); return; }
-            const [profiles, releases, engagements, badges, achievements, notifications, cabinet] = await Promise.all([
+            const [profiles, releases, engagements, badges, achievements, notifications, cabinet, interactions] = await Promise.all([
               supabaseSelectWhere('cxrner_telegram_profiles', 'telegram_id,username,first_name,last_name,photo_url,role,status,registered_at,last_seen_at,metadata', [{ key: 'telegram_id', value: auth.uid }], '', 1),
-              supabaseSelectWhere(SUPABASE_FORMS_TABLE, 'id,telegram_id,artist_name,track_name,genre,release_type,status,reject_reason,upc,created_at,updated_at,form_payload', [{ key: 'telegram_id', value: auth.uid }], 'created_at.desc', 200),
+              supabaseSelectWhere(SUPABASE_FORMS_TABLE, 'id,telegram_id,username,artist_name,track_name,genre,release_type,status,reject_reason,upc,moderation_message_id,submission_key,source,created_at,updated_at,form_payload', [{ key: 'telegram_id', value: auth.uid }], 'created_at.desc', 200),
               supabaseSelectWhere('cxrner_release_engagements', 'release_id,kind,created_at', [{ key: 'telegram_id', value: auth.uid }], 'created_at.desc', 500),
               supabaseSelectWhere('cxrner_artist_badges', 'badge_id,assigned_at', [{ key: 'telegram_id', value: auth.uid }], 'assigned_at.desc', 100),
               supabaseSelectWhere('cxrner_user_achievements', 'achievement_id,awarded_at', [{ key: 'telegram_id', value: auth.uid }], 'awarded_at.desc', 100),
               supabaseSelectWhere('cxrner_notifications', 'id,type,title,body,read_at,created_at', [{ key: 'telegram_id', value: auth.uid }], 'created_at.desc', 50),
-              getCabinetSnapshot(auth.uid)
+              getCabinetSnapshot(auth.uid),
+              supabaseSelectWhere(SUPABASE_INTERACTIONS_TABLE, 'user_id,release_idx,interaction_idx,interaction,occurred_at,updated_at', [{ key: 'user_id', value: auth.uid }], 'occurred_at.asc', 1000).catch((error) => { console.warn('[PLATFORM] interaction history unavailable:', clean(error?.message || error)); return []; })
             ]);
             const profile = profiles?.[0] || {};
-            sendJson(res, 200, { ok: true, is_admin: auth.is_admin, user: { ...profile, telegram_id: Number(auth.uid), photo_url: profile.photo_url || auth.user.photo_url || '' }, releases: releases || [], engagements: engagements || [], badges: badges || [], achievements: achievements || [], notifications: notifications || [], cabinet: cabinet || {}, stats: { releases: releases?.length || 0, likes: (engagements || []).filter((x) => x.kind === 'like').length, favorites: (engagements || []).filter((x) => x.kind === 'favorite').length, listens: 0 } });
+            sendJson(res, 200, { ok: true, is_admin: auth.is_admin, user: { ...profile, telegram_id: Number(auth.uid), photo_url: profile.photo_url || auth.user.photo_url || '' }, releases: releases || [], release_interactions: interactions || [], engagements: engagements || [], badges: badges || [], achievements: achievements || [], notifications: notifications || [], cabinet: cabinet || {}, stats: { releases: releases?.length || 0, likes: (engagements || []).filter((x) => x.kind === 'like').length, favorites: (engagements || []).filter((x) => x.kind === 'favorite').length, listens: 0 } });
           })
           .catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
         return;
