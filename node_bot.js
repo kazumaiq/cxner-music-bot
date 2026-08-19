@@ -4905,8 +4905,9 @@ function startStaticServer() {
           .catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
         return;
       }
-      if (u.pathname === '/api/miniapp/platform/profile' && req.method === 'GET') {
-        authorizeMiniApp(req)
+      if (u.pathname === '/api/miniapp/platform/profile' && (req.method === 'GET' || req.method === 'POST')) {
+        const profileRequest = req.method === 'POST' ? readJsonBody(req).catch(() => ({})) : Promise.resolve({});
+        profileRequest.then((profileBody) => authorizeMiniApp(req, profileBody))
           .then(async (auth) => {
             if (!auth.ok) { sendJson(res, auth.status, auth); return; }
             const [profiles, releases, engagements, badges, achievements, notifications, cabinet] = await Promise.all([
