@@ -4719,11 +4719,15 @@ function startStaticServer() {
     const check = verifyTelegramInitData(initData);
     if (!check.ok || !check.user?.id) return { ok: false, status: 403, error: check.reason || 'Telegram authorization failed' };
     const uid = String(check.user.id);
-    await supabaseRequest('cxrner_telegram_profiles?on_conflict=telegram_id', {
-      method: 'POST',
-      body: [{ telegram_id: Number(uid), username: clean(check.user.username || ''), first_name: clean(check.user.first_name || ''), last_name: clean(check.user.last_name || ''), role: isAdmin(uid) ? 'admin' : 'artist', status: 'active', last_seen_at: new Date().toISOString(), metadata: { photo_url: clean(check.user.photo_url || '') } }]
-    });
-    await supabaseUpsertCabinetUser(uid, check.user, true);
+    try {
+      await supabaseRequest('cxrner_telegram_profiles?on_conflict=telegram_id', {
+        method: 'POST',
+        body: [{ telegram_id: Number(uid), username: clean(check.user.username || ''), first_name: clean(check.user.first_name || ''), last_name: clean(check.user.last_name || ''), role: isAdmin(uid) ? 'admin' : 'artist', status: 'active', last_seen_at: new Date().toISOString(), metadata: { photo_url: clean(check.user.photo_url || '') } }]
+      });
+    } catch (error) {
+      console.error(`[PLATFORM_AUTH] profile sync failed user_id=${uid}:`, clean(error?.message || error));
+    }
+    try { await supabaseUpsertCabinetUser(uid, check.user, true); } catch (error) { console.error(`[PLATFORM_AUTH] cabinet sync failed user_id=${uid}:`, clean(error?.message || error)); }
     return { ok: true, uid, user: check.user, is_admin: isAdmin(uid) };
   }
   function platformRelease(row) {
@@ -5003,6 +5007,48 @@ function startStaticServer() {
         }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
         return;
       }
+      if (u.pathname === '/api/miniapp/platform/comments' && (req.method === 'PATCH' || req.method === 'DELETE')) {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body), commentId = clean(body.id || u.searchParams.get('id') || '');
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          if (!commentId) { sendJson(res, 400, { ok: false, error: 'comment id is required' }); return; }
+          if (req.method === 'DELETE') {
+            await supabaseRequest(`cxrner_comments?id=eq.${encodeURIComponent(commentId)}&telegram_id=eq.${encodeURIComponent(auth.uid)}`, { method: 'DELETE' });
+          } else {
+            if (!auth.is_admin || body.action !== 'pin') { sendJson(res, 403, { ok: false, error: 'only admin can pin comments' }); return; }
+            await supabaseRequest(`cxrner_comments?id=eq.${encodeURIComponent(commentId)}`, { method: 'PATCH', body: { is_pinned: Boolean(body.pinned), updated_at: new Date().toISOString() } });
+          }
+          sendJson(res, 200, { ok: true });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/comment-like' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body), commentId = clean(body.comment_id || '');
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          if (!commentId) { sendJson(res, 400, { ok: false, error: 'comment_id is required' }); return; }
+          const query = `comment_id=eq.${encodeURIComponent(commentId)}&telegram_id=eq.${encodeURIComponent(auth.uid)}`;
+          if (body.active === false) await supabaseRequest(`cxrner_comment_likes?${query}`, { method: 'DELETE' });
+          else await supabaseRequest('cxrner_comment_likes?on_conflict=comment_id,telegram_id', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: [{ comment_id: commentId, telegram_id: Number(auth.uid) }] });
+          sendJson(res, 200, { ok: true });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/referrals' && (req.method === 'GET' || req.method === 'POST')) {
+        const referralBody = req.method === 'POST' ? readJsonBody(req).catch(() => ({})) : Promise.resolve({});
+        referralBody.then(async (body) => {
+          const auth = await authorizeMiniApp(req, body);
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          if (req.method === 'POST' && body.invited_id) {
+            const invitedId = clean(body.invited_id);
+            await supabaseRequest('cxrner_referral_events?on_conflict=referrer_id,invited_id', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: [{ referrer_id: Number(auth.uid), invited_id: Number(invitedId), event_type: 'signup', bonus: Number(body.bonus || 0) }] });
+          }
+          const rows = await supabaseSelectWhere('cxrner_referrals', 'telegram_id,code,invited_by,bonus_balance,created_at', [{ key: 'telegram_id', value: auth.uid }], '', 1);
+          const events = await supabaseSelectWhere('cxrner_referral_events', 'invited_id,event_type,bonus,created_at', [{ key: 'referrer_id', value: auth.uid }], 'created_at.desc', 500);
+          sendJson(res, 200, { ok: true, referral: rows?.[0] || null, invited: events || [], total: events?.length || 0 });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
       if (u.pathname === '/api/miniapp/platform/listen' && req.method === 'POST') {
         readJsonBody(req).then(async (body) => {
           const auth = await authorizeMiniApp(req, body);
@@ -5098,6 +5144,28 @@ function startStaticServer() {
           ]);
           sendJson(res, 200, { ok: true, stats: { users: users?.length || 0, releases: releases?.length || 0, forms: forms?.length || 0, comments: comments?.length || 0, likes: (engagements || []).filter((x) => x.kind === 'like').length, favorites: (engagements || []).filter((x) => x.kind === 'favorite').length, payouts: payouts?.length || 0 }, users: users || [], forms: forms || [], releases: releases || [], comments: comments || [], engagements: engagements || [], payouts: payouts || [] });
         }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/admin/action' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body);
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          if (!auth.is_admin) { sendJson(res, 403, { ok: false, error: 'admin access required' }); return; }
+          const entity = clean(body.entity || ''), action = clean(body.action || ''), id = clean(body.id || '');
+          const allowed = {
+            user: 'cxrner_telegram_profiles', form: SUPABASE_FORMS_TABLE, news: 'cxrner_news', payout: 'cxrner_payouts', revenue: 'cxrner_revenue_events', achievement: 'cxrner_achievements', settings: 'cxrner_platform_settings'
+          };
+          const table = allowed[entity];
+          if (!table || !['create', 'update', 'delete'].includes(action)) { sendJson(res, 400, { ok: false, error: 'unsupported admin action' }); return; }
+          const values = body.values && typeof body.values === 'object' ? { ...body.values } : {};
+          delete values.id;
+          let result;
+          if (action === 'create') result = await supabaseRequest(table, { method: 'POST', headers: { Prefer: 'return=representation' }, body: [values] });
+          else if (action === 'update') result = await supabaseRequest(`${table}?${entity === 'user' ? 'telegram_id' : 'id'}=eq.${encodeURIComponent(id)}`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: { ...values, updated_at: new Date().toISOString() } });
+          else result = await supabaseRequest(`${table}?${entity === 'user' ? 'telegram_id' : 'id'}=eq.${encodeURIComponent(id)}`, { method: 'DELETE' });
+          await supabaseRequest('cxrner_admin_logs', { method: 'POST', body: [{ admin_id: Number(auth.uid), action, entity, entity_id: id || null, payload: values }] }).catch(() => null);
+          sendJson(res, 200, { ok: true, result: result || null });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
         return;
       }
       if (u.pathname === '/health' || u.pathname === '/healthz') {

@@ -65,11 +65,46 @@ create table if not exists public.cxrner_artist_follows (
   check (follower_id <> following_id)
 );
 
+create table if not exists public.cxrner_comment_likes (
+  comment_id uuid not null references public.cxrner_comments(id) on delete cascade,
+  telegram_id bigint not null references public.cxrner_telegram_profiles(telegram_id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (comment_id, telegram_id)
+);
+
+create table if not exists public.cxrner_referral_events (
+  id uuid primary key default gen_random_uuid(),
+  referrer_id bigint not null references public.cxrner_telegram_profiles(telegram_id) on delete cascade,
+  invited_id bigint not null references public.cxrner_telegram_profiles(telegram_id) on delete cascade,
+  event_type text not null default 'signup',
+  bonus numeric(12,2) not null default 0,
+  created_at timestamptz not null default now(),
+  unique (referrer_id, invited_id)
+);
+
+create table if not exists public.cxrner_platform_settings (
+  key text primary key,
+  value jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.cxrner_admin_logs (
+  id uuid primary key default gen_random_uuid(),
+  admin_id bigint not null,
+  action text not null,
+  entity text not null,
+  entity_id text,
+  payload jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
 create index if not exists cxrner_listens_release_idx on public.cxrner_listen_events (release_id, created_at desc);
 create index if not exists cxrner_payouts_user_idx on public.cxrner_payouts (telegram_id, created_at desc);
 create index if not exists cxrner_revenue_user_idx on public.cxrner_revenue_events (telegram_id, event_date desc);
 create index if not exists cxrner_news_published_idx on public.cxrner_news (published, published_at desc);
 create index if not exists cxrner_artist_follows_following_idx on public.cxrner_artist_follows (following_id, created_at desc);
+create index if not exists cxrner_comment_likes_comment_idx on public.cxrner_comment_likes (comment_id, created_at desc);
+create index if not exists cxrner_referral_events_referrer_idx on public.cxrner_referral_events (referrer_id, created_at desc);
 
 alter table public.cxrner_listen_events enable row level security;
 alter table public.cxrner_payouts enable row level security;
