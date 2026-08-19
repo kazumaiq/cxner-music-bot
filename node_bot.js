@@ -5438,6 +5438,59 @@ function startStaticServer() {
         }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
         return;
       }
+      if (u.pathname === '/api/miniapp/platform/admin/overview' && req.method === 'GET') {
+        authorizeMiniApp(req).then(async (auth) => {
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          if (!auth.is_admin) { sendJson(res, 403, { ok: false, error: 'admin access required' }); return; }
+          const [users, forms, releases, comments, engagements, payouts, links, news, logs, listens] = await Promise.all([
+            supabaseSelectAll('cxrner_telegram_profiles', 'telegram_id,username,first_name,last_name,photo_url,role,status,registered_at,last_seen_at,metadata', 'last_seen_at.desc').catch(() => []),
+            supabaseSelectAll(SUPABASE_FORMS_TABLE, 'id,telegram_id,artist_name,track_name,status,upc,created_at,updated_at,reject_reason', 'updated_at.desc').catch(() => []),
+            supabaseSelectAll(SUPABASE_PUBLIC_RELEASES_TABLE, 'form_id,telegram_id,artist_name,track_name,status,approved_at,updated_at', 'approved_at.desc').catch(() => []),
+            supabaseSelectAll('cxrner_comments', 'id,release_id,telegram_id,body,is_pinned,created_at', 'created_at.desc').catch(() => []),
+            supabaseSelectAll('cxrner_release_engagements', 'release_id,telegram_id,kind,created_at', 'created_at.desc').catch(() => []),
+            supabaseSelectAll('cxrner_payouts', 'id,telegram_id,amount,currency,status,period,created_at,paid_at', 'created_at.desc').catch(() => []),
+            supabaseSelectAll(SUPABASE_LINKS_TABLE, 'id,telegram_id,release_id,slug,title,artist,status,created_at,updated_at', 'updated_at.desc').catch(() => []),
+            supabaseSelectAll('cxrner_news', 'id,title,body,cover_url,published,published_at,created_at,updated_at', 'created_at.desc').catch(() => []),
+            supabaseSelectAll('cxrner_admin_logs', 'id,admin_id,action,entity,entity_id,payload,created_at', 'created_at.desc').catch(() => []),
+            supabaseSelectAll('cxrner_listen_events', 'release_id,telegram_id,created_at', 'created_at.desc').catch(() => [])
+          ]);
+          const today = new Date(); today.setHours(0, 0, 0, 0);
+          sendJson(res, 200, { ok: true, stats: { artists: (users || []).filter((x) => x.role === 'artist').length, users: users?.length || 0, releases: releases?.length || 0, moderation: (forms || []).filter((x) => ['moderation', 'on_moderation'].includes(x.status)).length, links: links?.length || 0, views: listens?.length || 0, comments: comments?.length || 0, likes: (engagements || []).filter((x) => x.kind === 'like').length, payouts: payouts?.length || 0, new_today: (users || []).filter((x) => new Date(x.registered_at || 0) >= today).length }, users: users || [], forms: forms || [], releases: releases || [], comments: comments || [], engagements: engagements || [], payouts: payouts || [], links: links || [], news: news || [], logs: logs || [] });
+        }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/admin/search' && req.method === 'GET') {
+        authorizeMiniApp(req).then(async (auth) => {
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          if (!auth.is_admin) { sendJson(res, 403, { ok: false, error: 'admin access required' }); return; }
+          const q = clean(u.searchParams.get('q') || '').toLowerCase();
+          if (q.length < 2) { sendJson(res, 200, { ok: true, results: [] }); return; }
+          const [users, forms, releases, comments, links] = await Promise.all([
+            supabaseSelectAll('cxrner_telegram_profiles', 'telegram_id,username,first_name,last_name,role,status,registered_at', 'last_seen_at.desc').catch(() => []),
+            supabaseSelectAll(SUPABASE_FORMS_TABLE, 'id,telegram_id,artist_name,track_name,status,upc,created_at', 'updated_at.desc').catch(() => []),
+            supabaseSelectAll(SUPABASE_PUBLIC_RELEASES_TABLE, 'form_id,telegram_id,artist_name,track_name,status,release_data,approved_at', 'approved_at.desc').catch(() => []),
+            supabaseSelectAll('cxrner_comments', 'id,release_id,telegram_id,body,created_at', 'created_at.desc').catch(() => []),
+            supabaseSelectAll(SUPABASE_LINKS_TABLE, 'id,telegram_id,slug,title,artist,status,created_at', 'updated_at.desc').catch(() => [])
+          ]);
+          const match = (row) => JSON.stringify(row).toLowerCase().includes(q);
+          sendJson(res, 200, { ok: true, results: [{ type: 'users', items: (users || []).filter(match).slice(0, 30) }, { type: 'forms', items: (forms || []).filter(match).slice(0, 30) }, { type: 'releases', items: (releases || []).filter(match).slice(0, 30) }, { type: 'comments', items: (comments || []).filter(match).slice(0, 30) }, { type: 'links', items: (links || []).filter(match).slice(0, 30) }] });
+        }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/admin/broadcast' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body);
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          if (!auth.is_admin) { sendJson(res, 403, { ok: false, error: 'admin access required' }); return; }
+          const title = clean(body.title || '').slice(0, 160), message = clean(body.body || '').slice(0, 2000), audience = clean(body.audience || 'all');
+          if (!title || !message) { sendJson(res, 400, { ok: false, error: 'title and body are required' }); return; }
+          const users = await supabaseSelectAll('cxrner_telegram_profiles', 'telegram_id,role,status,last_seen_at,metadata', 'last_seen_at.desc').catch(() => []);
+          const selected = (users || []).filter((user) => audience === 'all' || (audience === 'artists' && user.role === 'artist') || (audience === 'active' && user.status === 'active') || (audience === 'new' && (Date.now() - new Date(user.registered_at || 0).getTime()) < 30 * 86400000));
+          if (selected.length) await supabaseRequest('cxrner_notifications', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: selected.map((user) => ({ telegram_id: Number(user.telegram_id), type: body.type || 'announcement', title, body: message })) });
+          sendJson(res, 200, { ok: true, delivered: selected.length });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
       if (u.pathname === '/api/miniapp/platform/admin' && req.method === 'GET') {
         authorizeMiniApp(req).then(async (auth) => {
           if (!auth.ok) { sendJson(res, auth.status, auth); return; }
@@ -5461,7 +5514,7 @@ function startStaticServer() {
           if (!auth.is_admin) { sendJson(res, 403, { ok: false, error: 'admin access required' }); return; }
           const entity = clean(body.entity || ''), action = clean(body.action || ''), id = clean(body.id || '');
           const allowed = {
-            user: 'cxrner_telegram_profiles', form: SUPABASE_FORMS_TABLE, news: 'cxrner_news', payout: 'cxrner_payouts', revenue: 'cxrner_revenue_events', achievement: 'cxrner_achievements', settings: 'cxrner_platform_settings'
+            user: 'cxrner_telegram_profiles', form: SUPABASE_FORMS_TABLE, news: 'cxrner_news', payout: 'cxrner_payouts', revenue: 'cxrner_revenue_events', achievement: 'cxrner_achievements', settings: 'cxrner_platform_settings', comment: 'cxrner_comments', link: SUPABASE_LINKS_TABLE, artist: 'cxrner_artist_profiles', notification: 'cxrner_notifications'
           };
           const table = allowed[entity];
           if (!table || !['create', 'update', 'delete'].includes(action)) { sendJson(res, 400, { ok: false, error: 'unsupported admin action' }); return; }

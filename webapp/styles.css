@@ -257,6 +257,36 @@ h1, h2, h3, p { margin-top: 0; }
 .submission-manage input { min-height: 43px; padding: 0 11px; border: 1px solid var(--line); border-radius: 12px; outline: 0; color: var(--text); background: rgba(255,255,255,.045); }
 .submission-manage input:focus { border-color: rgba(173,146,255,.72); box-shadow: 0 0 24px rgba(109,78,218,.14); }
 .button-danger { margin-top: 9px; border-color: rgba(255,142,154,.35); color: #ffb4c1; background: rgba(255,83,109,.08); }
+.admin-shell { display: grid; gap: 13px; }
+.admin-topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 18px; border: 1px solid rgba(184,157,255,.25); border-radius: 22px; background: radial-gradient(circle at 100% 0, rgba(148,101,255,.3), transparent 48%), rgba(255,255,255,.045); box-shadow: var(--shadow), inset 0 1px rgba(255,255,255,.08); }
+.admin-topbar h2 { margin: 5px 0; font-size: 24px; letter-spacing: -.04em; }
+.admin-topbar p { margin: 0; color: var(--muted); font-size: 11px; }
+.admin-stat-grid { display: grid; grid-template-columns: repeat(2,1fr); gap: 8px; }
+.admin-stat { padding: 13px; border: 1px solid var(--line); border-radius: 16px; background: rgba(255,255,255,.045); box-shadow: inset 0 1px rgba(255,255,255,.06); }
+.admin-stat small, .admin-stat b { display: block; }
+.admin-stat small { color: var(--muted); font-size: 10px; }
+.admin-stat b { margin-top: 5px; color: #eee9ff; font-size: 25px; }
+.admin-search { display: flex; align-items: center; gap: 8px; padding: 7px; border: 1px solid var(--line); border-radius: 15px; background: rgba(255,255,255,.045); }
+.admin-search input { min-width: 0; flex: 1; min-height: 38px; border: 0; outline: 0; color: var(--text); background: transparent; }
+.admin-search .button { min-height: 38px; padding: 0 13px; }
+.admin-actions-grid { display: grid; grid-template-columns: repeat(2,1fr); gap: 8px; }
+.admin-actions-grid button { min-height: 48px; padding: 9px; border: 1px solid var(--line); border-radius: 14px; color: #dcd5f0; background: rgba(255,255,255,.045); font-weight: 700; text-align: left; transition: transform .2s var(--ease), border-color .2s; }
+.admin-actions-grid button:active { transform: scale(.97); }
+.admin-panel { display: none; padding: 15px; border: 1px solid var(--line); border-radius: 19px; background: rgba(255,255,255,.04); }
+.admin-panel.is-active { display: block; animation: rise-in .35s var(--ease) both; }
+.admin-form { display: grid; gap: 9px; margin: 10px 0 15px; }
+.admin-form input, .admin-form textarea, .admin-form select { min-height: 42px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 11px; outline: 0; color: var(--text); background: rgba(255,255,255,.05); }
+.admin-row { display: flex; align-items: center; gap: 9px; padding: 10px 0; border-top: 1px solid var(--line-soft); font-size: 11px; }
+.admin-row > img { width: 32px; height: 32px; border-radius: 11px; object-fit: cover; }
+.admin-row > div { min-width: 0; flex: 1; }
+.admin-row b, .admin-row small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.admin-row small { margin-top: 3px; color: var(--muted); font-size: 9px; }
+.admin-row button, .admin-row-actions button { padding: 6px 8px; border: 1px solid var(--line-soft); border-radius: 9px; color: #c7b8ff; background: rgba(127,95,255,.09); font-size: 9px; font-weight: 700; }
+.admin-row-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.admin-search-result { display: grid; grid-template-columns: 70px 1fr; gap: 4px 8px; padding: 9px; border-bottom: 1px solid var(--line-soft); font-size: 11px; }
+.admin-search-result b { color: #b9a5ff; font-size: 9px; text-transform: uppercase; }
+.admin-search-result small { grid-column: 2; color: var(--muted); font-size: 9px; }
+@media (min-width: 700px) { .admin-stat-grid { grid-template-columns: repeat(4,1fr); } .admin-actions-grid { grid-template-columns: repeat(4,1fr); } }
 .dashboard-hero { display: grid; gap: 16px; margin: 14px 0; padding: 18px; border: 1px solid rgba(184,157,255,.25); border-radius: 22px; background: radial-gradient(circle at 100% 0, rgba(148,101,255,.28), transparent 50%), rgba(255,255,255,.045); box-shadow: var(--shadow), inset 0 1px rgba(255,255,255,.08); animation: rise-in .5s var(--ease) both; }
 .dashboard-hero h2 { margin: 6px 0; font-size: clamp(20px, 6vw, 28px); letter-spacing: -.04em; }
 .dashboard-hero p { margin: 0; color: var(--muted); }
