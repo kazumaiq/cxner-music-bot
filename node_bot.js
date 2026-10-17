@@ -1632,9 +1632,128 @@ function keyboardServices() {
     [{ text: '⬅️ Главное меню', callback_data: 'main' }]
   ]};
 }
+async function linkTelegramToWebCabinet(chatId, uid, from, codeOrToken) {
+  const raw = clean(codeOrToken).trim();
+  if (!raw) {
+    await sendText(
+      chatId,
+      '⚠️ <b>Укажите код привязки</b>\n\n' +
+      'Пример: <code>/link CX-849201</code>\n\n' +
+      'Скопируйте 6-значный код на сайте в разделе «Синхронизация с Telegram»:\n' +
+      'https://cxrnermusic.vercel.app/dashboard'
+    );
+    return;
+  }
+
+  try {
+    let allCabinet = [];
+    if (SUPABASE_SYNC_ENABLED) {
+      allCabinet = await supabaseSelectAll(SUPABASE_CABINET_TABLE, 'user_id,profile,updated_at', 'updated_at.desc').catch(() => []);
+    }
+
+    const matchedUser = (allCabinet || []).find((u) => {
+      const p = (u && typeof u.profile === 'object') ? u.profile : {};
+      const matchesCode = p.link_code && String(p.link_code).trim().toUpperCase() === raw.toUpperCase();
+      const matchesToken = p.link_token && String(p.link_token).trim().toLowerCase() === raw.toLowerCase();
+      return matchesCode || matchesToken;
+    });
+
+    if (!matchedUser) {
+      await sendText(
+        chatId,
+        '❌ <b>Код привязки не найден или срок действия истёк</b>\n\n' +
+        'Срок жизни кода — 15 минут. Откройте личный кабинет на сайте и сгенерируйте актуальный код:\n' +
+        'https://cxrnermusic.vercel.app/dashboard',
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }],
+              [{ text: '⬅️ Главное меню', callback_data: 'main' }]
+            ]
+          }
+        }
+      );
+      return;
+    }
+
+    const currentProfile = (matchedUser.profile && typeof matchedUser.profile === 'object') ? matchedUser.profile : {};
+    const now = new Date().toISOString();
+
+    if (currentProfile.link_created_at) {
+      const createdAt = new Date(currentProfile.link_created_at).getTime();
+      const diffMinutes = (Date.now() - createdAt) / (1000 * 60);
+      if (diffMinutes > 15) {
+        await sendText(
+          chatId,
+          '⌛ <b>Срок действия кода истёк</b>\n\n' +
+          'Пожалуйста, обновите страницу кабинета на сайте и нажмите «Связать с ботом» заново:\n' +
+          'https://cxrnermusic.vercel.app/dashboard',
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }]
+              ]
+            }
+          }
+        );
+        return;
+      }
+    }
+
+    const updatedProfile = {
+      ...currentProfile,
+      telegram_id: String(uid),
+      telegram_username: clean(from?.username || ''),
+      telegram_first_name: clean(from?.first_name || ''),
+      telegram_linked_at: now,
+      link_code: null,
+      link_token: null,
+      link_created_at: null
+    };
+
+    if (SUPABASE_SYNC_ENABLED) {
+      await supabaseRequest(
+        `${SUPABASE_CABINET_TABLE}?user_id=eq.${encodeURIComponent(matchedUser.user_id)}`,
+        {
+          method: 'PATCH',
+          headers: { Prefer: 'return=representation' },
+          body: {
+            profile: updatedProfile,
+            updated_at: now
+          }
+        }
+      );
+    }
+
+    await sendText(
+      chatId,
+      '🎉 <b>Аккаунты успешно синхронизированы!</b>\n\n' +
+      'Ваш профиль Telegram и аккаунт на сайте CXRNER MUSIC теперь объединены в единую систему.\n\n' +
+      '• Все релизы, отправленные через Telegram или Mini App, теперь доступны на сайте.\n' +
+      '• Все релизы, загруженные на сайте, синхронизированы с вашим профилем.\n' +
+      '• Статусы модерации и официальные коды UPC обновляются синхронно.',
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }],
+            ...(hasValidWebAppUrl() ? [[{ text: '📱 Открыть Mini App', web_app: { url: WEBAPP_URL } }]] : []),
+            [{ text: '📁 Мои релизы в боте', callback_data: 'my_releases' }],
+            [{ text: '⬅️ Главное меню', callback_data: 'main' }]
+          ]
+        }
+      }
+    );
+  } catch (err) {
+    console.error('[bot] link account error:', err);
+    await sendText(chatId, `⚠️ Ошибка связывания: ${esc(err?.message || err)}`);
+  }
+}
+
 function keyboardCabinet() {
   return { inline_keyboard: [
-    [{ text: 'Мои релизы', callback_data: 'my_releases' }],
+    [{ text: '📁 Мои релизы', callback_data: 'my_releases' }],
+    [{ text: '🔗 Привязать аккаунт сайта', callback_data: 'cabinet_sync_site' }],
+    ...(hasValidWebAppUrl() ? [[{ text: '📱 Открыть Mini App', web_app: { url: WEBAPP_URL } }]] : []),
     [{ text: '⬅️ Главное меню', callback_data: 'main' }]
   ]};
 }
@@ -4284,9 +4403,19 @@ async function onMessage(msg) {
     return;
   }
 
+  if (text.startsWith('/start link_') || text.startsWith('/start CX-') || text.startsWith('/start cx-')) {
+    const token = text.slice('/start '.length).trim();
+    await linkTelegramToWebCabinet(chatId, uid, msg.from, token);
+    return;
+  }
   if (text === '/start' || text.startsWith('/start ')) {
     resetAllSessions(uid);
     await sendText(chatId, welcomeText(), { reply_markup: keyboardMain() });
+    return;
+  }
+  if (text === '/link' || text.startsWith('/link ') || text.startsWith('/link_')) {
+    const code = text.replace(/^\/link[_\s]*/i, '').trim();
+    await linkTelegramToWebCabinet(chatId, uid, msg.from, code);
     return;
   }
   if (/^\/admin(?:@\w+)?$/i.test(text)) {
@@ -4649,6 +4778,30 @@ async function onCallback(query) {
   if (data === 'menu_distribution') { await edit('<b>Дистрибуция</b>\n\nВыберите действие:', keyboardDist()); return; }
   if (data === 'menu_services') { await edit('<b>Сервисы</b>\n\nВыберите действие:', keyboardServices()); return; }
   if (data === 'menu_cabinet') { await edit('<b>Кабинет</b>\n\nВыберите действие:', keyboardCabinet()); return; }
+  if (data === 'cabinet_sync_site') {
+    const text =
+      '🔗 <b>Синхронизация с сайтом CXRNER MUSIC</b>\n\n' +
+      'Объедините Telegram и сайт в <b>единый личный кабинет</b>:\n\n' +
+      '• Все треки и анкеты, отправленные через бота или Mini App, автоматически отобразятся на сайте со всей информацией.\n' +
+      '• Все релизы, отправленные через сайт, будут доступны для отслеживания в Telegram.\n' +
+      '• Статусы модерации и официальные коды UPC обновляются синхронно.\n\n' +
+      '<b>Инструкция по привязке:</b>\n' +
+      '1. Перейдите в кабинет на сайте:\n' +
+      '   <code>https://cxrnermusic.vercel.app/dashboard</code>\n' +
+      '2. В блоке <b>«Синхронизация с Telegram»</b> нажмите кнопку <b>«Связать с ботом»</b> (бот привяжет аккаунт в 1 клик!).\n' +
+      '3. Либо скопируйте 6-значный код (например: <code>CX-849201</code>) и отправьте боту:\n' +
+      '   <code>/link ВАШ_КОД</code>\n\n' +
+      'После привязки вы сможете в один клик возвращаться в бот или Mini App.';
+    const kb = {
+      inline_keyboard: [
+        [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }],
+        ...(hasValidWebAppUrl() ? [[{ text: '📱 Открыть Mini App', web_app: { url: WEBAPP_URL } }]] : []),
+        [{ text: '⬅️ Назад в кабинет', callback_data: 'menu_cabinet' }]
+      ]
+    };
+    await edit(text, kb);
+    return;
+  }
   if (data === 'menu_community') { await edit('<b>Комьюнити</b>\n\nОфициальные площадки CXRNER MUSIC:', keyboardCommunity()); return; }
   if (data === 'open_app' || data === 'report_app') {
     await sendText(chatId, 'Mini App открывается через кнопку «Приложение» внизу чата.');
