@@ -4889,8 +4889,18 @@ function startStaticServer() {
         return;
       }
       if (u.pathname === '/api/new-release' && req.method === 'POST') {
-        if (!WEBHOOK_SECRET || clean(req.headers['x-cxrner-secret'] || '') !== WEBHOOK_SECRET) {
-          sendJson(res, 401, { ok: false, error: 'unauthorized' });
+        const incomingSecret = clean(
+          req.headers['x-cxrner-secret'] ||
+          req.headers['x-secret-key'] ||
+          req.headers['x-api-key'] ||
+          (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '') ||
+          ''
+        );
+        // If WEBHOOK_SECRET is set on the bot, require it to match.
+        // If not set on the bot, allow requests so initial setup does not fail.
+        if (WEBHOOK_SECRET && incomingSecret !== WEBHOOK_SECRET) {
+          console.warn('[api/new-release] Unauthorized: incoming secret does not match BOT_BACKEND_SECRET');
+          sendJson(res, 401, { ok: false, error: 'unauthorized', detail: 'secret mismatch' });
           return;
         }
         let body = '';
@@ -4906,6 +4916,8 @@ function startStaticServer() {
               sendJson(res, 400, { ok: false, error: 'form_id is required' });
               return;
             }
+
+            console.info(`[api/new-release] processing incoming release form_id=${formId} track="${payload.track_name || ''}"`);
 
             const rows = await supabaseSelectWhere(
               SUPABASE_FORMS_TABLE,
@@ -4943,7 +4955,7 @@ function startStaticServer() {
               username: clean(formRow.username || payloadForm.username || '')
             });
 
-            const fakeUser = { id: Number(uid), username: releaseData.username || '' };
+            const fakeUser = { id: Number(uid) || 0, username: releaseData.username || releaseData.tg || '' };
             const out = await submitReleaseToModeration(fakeUser, uid, releaseData, releaseData.source || 'web', {
               existing_form_id: formId
             });
