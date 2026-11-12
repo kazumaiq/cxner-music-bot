@@ -1633,105 +1633,171 @@ function keyboardServices() {
   ]};
 }
 async function linkTelegramToWebCabinet(chatId, uid, from, codeOrToken) {
-  const raw = clean(codeOrToken).trim();
+  let raw = clean(codeOrToken).trim();
+  raw = raw.replace(/^\/(?:start|link)[_\s]*/i, '').trim();
+
   if (!raw) {
     await sendText(
       chatId,
       '⚠️ <b>Укажите код привязки</b>\n\n' +
-      'Пример: <code>/link CX-849201</code>\n\n' +
+      'Пример: <code>CX-849201</code> или <code>/link CX-849201</code>\n\n' +
       'Скопируйте 6-значный код на сайте в разделе «Синхронизация с Telegram»:\n' +
-      'https://cxrnermusic.vercel.app/dashboard'
+      'https://cxrnermusic.vercel.app/dashboard',
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }],
+            [{ text: '⬅️ Главное меню', callback_data: 'main' }]
+          ]
+        }
+      }
     );
     return;
   }
 
+  // Normalization
+  let cleanToken = raw.replace(/^link_/i, '').trim();
+  let cleanCode = raw.toUpperCase();
+  if (/^[0-9]{6}$/.test(raw)) {
+    cleanCode = 'CX-' + raw;
+  }
+
+  console.info(`[bot] linking telegram uid=${uid} username=${from?.username || ''} with code=${cleanCode} token=${cleanToken}`);
+
+  const websiteApiUrl = envStr('WEBSITE_API_URL', 'https://cxrnermusic.vercel.app').replace(/\/+$/, '');
+  let apiSuccess = false;
+  let apiData = null;
+
+  // Step 1: Call website verify API
   try {
-    let allCabinet = [];
-    if (SUPABASE_SYNC_ENABLED) {
-      allCabinet = await supabaseSelectAll(SUPABASE_CABINET_TABLE, 'user_id,profile,updated_at', 'updated_at.desc').catch(() => []);
-    }
-
-    const matchedUser = (allCabinet || []).find((u) => {
-      const p = (u && typeof u.profile === 'object') ? u.profile : {};
-      const matchesCode = p.link_code && String(p.link_code).trim().toUpperCase() === raw.toUpperCase();
-      const matchesToken = p.link_token && String(p.link_token).trim().toLowerCase() === raw.toLowerCase();
-      return matchesCode || matchesToken;
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const timeoutId = controller ? setTimeout(() => controller.abort(), 9000) : null;
+    const res = await fetch(`${websiteApiUrl}/api/cabinet/verify-link`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'user-agent': 'cxner-music-bot/1.0'
+      },
+      body: JSON.stringify({
+        code: cleanCode,
+        token: cleanToken,
+        telegram_id: String(uid),
+        username: clean(from?.username || ''),
+        first_name: clean(from?.first_name || '')
+      }),
+      signal: controller ? controller.signal : undefined
     });
+    if (timeoutId) clearTimeout(timeoutId);
 
-    if (!matchedUser) {
-      await sendText(
-        chatId,
-        '❌ <b>Код привязки не найден или срок действия истёк</b>\n\n' +
-        'Срок жизни кода — 15 минут. Откройте личный кабинет на сайте и сгенерируйте актуальный код:\n' +
-        'https://cxrnermusic.vercel.app/dashboard',
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }],
-              [{ text: '⬅️ Главное меню', callback_data: 'main' }]
-            ]
+    apiData = await res.json().catch(() => null);
+    if (res.ok && apiData && apiData.ok) {
+      apiSuccess = true;
+      console.info(`[bot] verify-link API success for user_id=${apiData.user_id}`);
+    } else {
+      console.warn(`[bot] verify-link API response: status=${res.status}`, apiData);
+    }
+  } catch (apiErr) {
+    console.warn('[bot] verify-link API call failed, falling back to direct Supabase:', apiErr?.message || apiErr);
+  }
+
+  // Step 2: Fallback to direct Supabase if website API did not succeed
+  let dbSuccess = false;
+  let dbArtistName = '';
+  if (!apiSuccess && SUPABASE_SYNC_ENABLED) {
+    try {
+      const allCabinet = await supabaseSelectAll(SUPABASE_CABINET_TABLE, 'user_id,profile,updated_at', 'updated_at.desc').catch(() => []);
+      const matchedUser = (allCabinet || []).find((u) => {
+        const p = (u && typeof u.profile === 'object') ? u.profile : {};
+        const matchesCode = p.link_code && (
+          String(p.link_code).trim().toUpperCase() === cleanCode ||
+          String(p.link_code).trim().toUpperCase() === raw.toUpperCase()
+        );
+        const matchesToken = p.link_token && (
+          String(p.link_token).trim().toLowerCase() === cleanToken.toLowerCase() ||
+          String(p.link_token).trim().toLowerCase() === raw.toLowerCase()
+        );
+        return matchesCode || matchesToken;
+      });
+
+      if (matchedUser) {
+        const currentProfile = (matchedUser.profile && typeof matchedUser.profile === 'object') ? matchedUser.profile : {};
+        const now = new Date().toISOString();
+
+        if (currentProfile.link_created_at) {
+          const createdAt = new Date(currentProfile.link_created_at).getTime();
+          const diffMinutes = (Date.now() - createdAt) / (1000 * 60);
+          if (diffMinutes > 15) {
+            await sendText(
+              chatId,
+              '⌛ <b>Срок действия кода истёк (15 минут)</b>\n\n' +
+              'Пожалуйста, откройте страницу кабинета на сайте и нажмите «Связать с ботом» заново:\n' +
+              'https://cxrnermusic.vercel.app/dashboard',
+              {
+                reply_markup: {
+                  inline_keyboard: [
+                    [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }],
+                    [{ text: '⬅️ Главное меню', callback_data: 'main' }]
+                  ]
+                }
+              }
+            );
+            return;
           }
         }
-      );
-      return;
-    }
 
-    const currentProfile = (matchedUser.profile && typeof matchedUser.profile === 'object') ? matchedUser.profile : {};
-    const now = new Date().toISOString();
+        const updatedProfile = {
+          ...currentProfile,
+          telegram_id: String(uid),
+          telegram_username: clean(from?.username || ''),
+          telegram_first_name: clean(from?.first_name || ''),
+          telegram_linked_at: now,
+          link_code: null,
+          link_token: null,
+          link_created_at: null
+        };
+        dbArtistName = clean(currentProfile.artist_name || '');
 
-    if (currentProfile.link_created_at) {
-      const createdAt = new Date(currentProfile.link_created_at).getTime();
-      const diffMinutes = (Date.now() - createdAt) / (1000 * 60);
-      if (diffMinutes > 15) {
-        await sendText(
-          chatId,
-          '⌛ <b>Срок действия кода истёк</b>\n\n' +
-          'Пожалуйста, обновите страницу кабинета на сайте и нажмите «Связать с ботом» заново:\n' +
-          'https://cxrnermusic.vercel.app/dashboard',
+        await supabaseRequest(
+          `${SUPABASE_CABINET_TABLE}?user_id=eq.${encodeURIComponent(matchedUser.user_id)}`,
           {
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }]
-              ]
+            method: 'PATCH',
+            headers: { Prefer: 'return=representation' },
+            body: {
+              profile: updatedProfile,
+              updated_at: now
             }
           }
         );
-        return;
-      }
-    }
 
-    const updatedProfile = {
-      ...currentProfile,
-      telegram_id: String(uid),
-      telegram_username: clean(from?.username || ''),
-      telegram_first_name: clean(from?.first_name || ''),
-      telegram_linked_at: now,
-      link_code: null,
-      link_token: null,
-      link_created_at: null
-    };
-
-    if (SUPABASE_SYNC_ENABLED) {
-      await supabaseRequest(
-        `${SUPABASE_CABINET_TABLE}?user_id=eq.${encodeURIComponent(matchedUser.user_id)}`,
-        {
-          method: 'PATCH',
-          headers: { Prefer: 'return=representation' },
-          body: {
-            profile: updatedProfile,
-            updated_at: now
+        await supabaseRequest(
+          `${SUPABASE_TABLE}?telegram_id=eq.${encodeURIComponent(String(uid))}`,
+          {
+            method: 'PATCH',
+            body: { telegram_id: matchedUser.user_id }
           }
-        }
-      );
+        ).catch(() => {});
+
+        dbSuccess = true;
+      }
+    } catch (dbErr) {
+      console.error('[bot] direct Supabase link failed:', dbErr);
     }
+  }
+
+  // Step 3: Handle Result
+  if (apiSuccess || dbSuccess) {
+    const artistName = apiData?.artist_name || dbArtistName;
+    const nameLabel = artistName ? ` (<b>${esc(artistName)}</b>)` : '';
+    const syncedCount = apiData?.synced_releases_count ?? '';
 
     await sendText(
       chatId,
       '🎉 <b>Аккаунты успешно синхронизированы!</b>\n\n' +
-      'Ваш профиль Telegram и аккаунт на сайте CXRNER MUSIC теперь объединены в единую систему.\n\n' +
-      '• Все релизы, отправленные через Telegram или Mini App, теперь доступны на сайте.\n' +
-      '• Все релизы, загруженные на сайте, синхронизированы с вашим профилем.\n' +
-      '• Статусы модерации и официальные коды UPC обновляются синхронно.',
+      `Ваш профиль Telegram и личный кабинет на сайте CXRNER MUSIC${nameLabel} теперь объединены в единую систему.\n\n` +
+      '• Все релизы, отправленные через Telegram или Mini App, синхронизированы с сайтом.\n' +
+      '• Все релизы, загруженные на сайте (включая CXRNER LINK), доступны из вашего аккаунта.\n' +
+      '• Статусы модерации и официальные коды UPC обновляются синхронно.\n' +
+      (syncedCount ? `\n📦 <i>Синхронизировано релизов: <b>${syncedCount}</b></i>\n` : ''),
       {
         reply_markup: {
           inline_keyboard: [
@@ -1743,10 +1809,26 @@ async function linkTelegramToWebCabinet(chatId, uid, from, codeOrToken) {
         }
       }
     );
-  } catch (err) {
-    console.error('[bot] link account error:', err);
-    await sendText(chatId, `⚠️ Ошибка связывания: ${esc(err?.message || err)}`);
+    return;
   }
+
+  const errMsg = apiData?.error || 'Код привязки не найден или срок его действия истёк (15 минут).';
+  await sendText(
+    chatId,
+    `❌ <b>Не удалось привязать аккаунт</b>\n\n` +
+    `${esc(errMsg)}\n\n` +
+    'Перейдите в личный кабинет на сайте, нажмите «Привязать Telegram» и отправьте свежий 6-значный код:\n' +
+    'https://cxrnermusic.vercel.app/dashboard',
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }],
+          [{ text: '🔄 Попробовать снова', callback_data: 'cabinet_sync_site' }],
+          [{ text: '⬅️ Главное меню', callback_data: 'main' }]
+        ]
+      }
+    }
+  );
 }
 
 function keyboardCabinet() {
@@ -4408,6 +4490,11 @@ async function onMessage(msg) {
     await linkTelegramToWebCabinet(chatId, uid, msg.from, token);
     return;
   }
+  if (text.startsWith('/start ') && (text.includes('link_') || text.includes('cx-') || text.includes('CX-'))) {
+    const token = text.slice('/start '.length).trim();
+    await linkTelegramToWebCabinet(chatId, uid, msg.from, token);
+    return;
+  }
   if (text === '/start' || text.startsWith('/start ')) {
     resetAllSessions(uid);
     await sendText(chatId, welcomeText(), { reply_markup: keyboardMain() });
@@ -4416,6 +4503,17 @@ async function onMessage(msg) {
   if (text === '/link' || text.startsWith('/link ') || text.startsWith('/link_')) {
     const code = text.replace(/^\/link[_\s]*/i, '').trim();
     await linkTelegramToWebCabinet(chatId, uid, msg.from, code);
+    return;
+  }
+  // Raw sync codes pasted directly in chat (e.g. "CX-849201", "cx-849201", "849201", "link_...", or 32-hex tokens)
+  const trimmedText = text.trim();
+  if (
+    /^cx-[0-9]{4,8}$/i.test(trimmedText) ||
+    /^[0-9]{6}$/.test(trimmedText) ||
+    /^link_[0-9a-f]{16,64}$/i.test(trimmedText) ||
+    /^[0-9a-f]{32}$/i.test(trimmedText)
+  ) {
+    await linkTelegramToWebCabinet(chatId, uid, msg.from, trimmedText);
     return;
   }
   if (/^\/admin(?:@\w+)?$/i.test(text)) {
