@@ -1790,45 +1790,66 @@ async function linkTelegramToWebCabinet(chatId, uid, from, codeOrToken) {
     const nameLabel = artistName ? ` (<b>${esc(artistName)}</b>)` : '';
     const syncedCount = apiData?.synced_releases_count ?? '';
 
-    await sendText(
-      chatId,
+    // Clear any pending form session so user is in a fresh synchronized state
+    try { resetFormSession(uid); } catch {}
+
+    const confirmationText =
       '🎉 <b>Аккаунты успешно синхронизированы!</b>\n\n' +
       `Ваш профиль Telegram и личный кабинет на сайте CXRNER MUSIC${nameLabel} теперь объединены в единую систему.\n\n` +
       '• Все релизы, отправленные через Telegram или Mini App, синхронизированы с сайтом.\n' +
       '• Все релизы, загруженные на сайте (включая CXRNER LINK), доступны из вашего аккаунта.\n' +
       '• Статусы модерации и официальные коды UPC обновляются синхронно.\n' +
-      (syncedCount ? `\n📦 <i>Синхронизировано релизов: <b>${syncedCount}</b></i>\n` : ''),
+      (syncedCount ? `\n📦 <i>Синхронизировано релизов: <b>${syncedCount}</b></i>\n` : '');
+
+    try {
+      await sendText(
+        chatId,
+        confirmationText,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }],
+              [{ text: '📁 Мои релизы в боте', callback_data: 'my_releases' }],
+              [{ text: '⬅️ Главное меню', callback_data: 'main' }]
+            ]
+          }
+        }
+      );
+      console.info(`[bot] sync confirmation delivered to chatId=${chatId}`);
+    } catch (sendErr) {
+      console.warn(`[bot] rich sync message failed, sending plain fallback:`, sendErr?.message || sendErr);
+      await sendTextPlain(
+        chatId,
+        '🎉 Аккаунты успешно синхронизированы!\n\nВаш профиль Telegram и личный кабинет на сайте CXRNER MUSIC теперь объединены.'
+      ).catch(() => {});
+    }
+    return;
+  }
+
+  const errMsg = apiData?.error || 'Код привязки не найден или срок его действия истёк (15 минут).';
+  try {
+    await sendText(
+      chatId,
+      `❌ <b>Не удалось привязать аккаунт</b>\n\n` +
+      `${esc(errMsg)}\n\n` +
+      'Перейдите в личный кабинет на сайте, нажмите «Привязать Telegram» и отправьте свежий 6-значный код:\n' +
+      'https://cxrnermusic.vercel.app/dashboard',
       {
         reply_markup: {
           inline_keyboard: [
             [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }],
-            ...(hasValidWebAppUrl() ? [[{ text: '📱 Открыть Mini App', web_app: { url: WEBAPP_URL } }]] : []),
-            [{ text: '📁 Мои релизы в боте', callback_data: 'my_releases' }],
+            [{ text: '🔄 Попробовать снова', callback_data: 'cabinet_sync_site' }],
             [{ text: '⬅️ Главное меню', callback_data: 'main' }]
           ]
         }
       }
     );
-    return;
+  } catch (err) {
+    await sendTextPlain(
+      chatId,
+      `❌ Не удалось привязать аккаунт: ${errMsg}\n\nПолучите новый код на сайте: https://cxrnermusic.vercel.app/dashboard`
+    ).catch(() => {});
   }
-
-  const errMsg = apiData?.error || 'Код привязки не найден или срок его действия истёк (15 минут).';
-  await sendText(
-    chatId,
-    `❌ <b>Не удалось привязать аккаунт</b>\n\n` +
-    `${esc(errMsg)}\n\n` +
-    'Перейдите в личный кабинет на сайте, нажмите «Привязать Telegram» и отправьте свежий 6-значный код:\n' +
-    'https://cxrnermusic.vercel.app/dashboard',
-    {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }],
-          [{ text: '🔄 Попробовать снова', callback_data: 'cabinet_sync_site' }],
-          [{ text: '⬅️ Главное меню', callback_data: 'main' }]
-        ]
-      }
-    }
-  );
 }
 
 function keyboardCabinet() {
@@ -4437,9 +4458,40 @@ async function onMessage(msg) {
   if (await handleModerationReplyMessage(msg)) return;
   if (await handleCoverMessage(msg)) return;
   if (await handlePromoMessage(msg)) return;
-  if (await handleFormTextMessage(msg)) return;
 
   if (!text) return;
+
+  // PRIORITY 1: Account synchronization commands and codes
+  // Must run BEFORE handleFormTextMessage so stale form sessions never eat link codes!
+  const trimmedText = text.trim();
+  if (text.startsWith('/start link_') || text.startsWith('/start CX-') || text.startsWith('/start cx-')) {
+    const token = text.slice('/start '.length).trim();
+    await linkTelegramToWebCabinet(chatId, uid, msg.from, token);
+    return;
+  }
+  if (text.startsWith('/start ') && (text.includes('link_') || text.includes('cx-') || text.includes('CX-'))) {
+    const token = text.slice('/start '.length).trim();
+    await linkTelegramToWebCabinet(chatId, uid, msg.from, token);
+    return;
+  }
+  if (text === '/link' || text.startsWith('/link ') || text.startsWith('/link_')) {
+    const code = text.replace(/^\/link[_\s]*/i, '').trim();
+    await linkTelegramToWebCabinet(chatId, uid, msg.from, code);
+    return;
+  }
+  // Raw sync codes pasted directly in chat (e.g. "CX-360449", "cx-360449", "360449", "link_...", or 32-hex tokens)
+  if (
+    /^cx-[0-9]{4,8}$/i.test(trimmedText) ||
+    /^[0-9]{6}$/.test(trimmedText) ||
+    /^link_[0-9a-f]{16,64}$/i.test(trimmedText) ||
+    /^[0-9a-f]{32}$/i.test(trimmedText)
+  ) {
+    await linkTelegramToWebCabinet(chatId, uid, msg.from, trimmedText);
+    return;
+  }
+
+  // Active form session for distributing tracks
+  if (await handleFormTextMessage(msg)) return;
 
   if (/^\/new(?:@\w+)?$/i.test(text)) {
     if (Number(chatId) !== Number(MOD_CHAT)) {
@@ -4485,35 +4537,9 @@ async function onMessage(msg) {
     return;
   }
 
-  if (text.startsWith('/start link_') || text.startsWith('/start CX-') || text.startsWith('/start cx-')) {
-    const token = text.slice('/start '.length).trim();
-    await linkTelegramToWebCabinet(chatId, uid, msg.from, token);
-    return;
-  }
-  if (text.startsWith('/start ') && (text.includes('link_') || text.includes('cx-') || text.includes('CX-'))) {
-    const token = text.slice('/start '.length).trim();
-    await linkTelegramToWebCabinet(chatId, uid, msg.from, token);
-    return;
-  }
   if (text === '/start' || text.startsWith('/start ')) {
     resetAllSessions(uid);
     await sendText(chatId, welcomeText(), { reply_markup: keyboardMain() });
-    return;
-  }
-  if (text === '/link' || text.startsWith('/link ') || text.startsWith('/link_')) {
-    const code = text.replace(/^\/link[_\s]*/i, '').trim();
-    await linkTelegramToWebCabinet(chatId, uid, msg.from, code);
-    return;
-  }
-  // Raw sync codes pasted directly in chat (e.g. "CX-849201", "cx-849201", "849201", "link_...", or 32-hex tokens)
-  const trimmedText = text.trim();
-  if (
-    /^cx-[0-9]{4,8}$/i.test(trimmedText) ||
-    /^[0-9]{6}$/.test(trimmedText) ||
-    /^link_[0-9a-f]{16,64}$/i.test(trimmedText) ||
-    /^[0-9a-f]{32}$/i.test(trimmedText)
-  ) {
-    await linkTelegramToWebCabinet(chatId, uid, msg.from, trimmedText);
     return;
   }
   if (/^\/admin(?:@\w+)?$/i.test(text)) {
