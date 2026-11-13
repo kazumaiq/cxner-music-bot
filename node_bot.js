@@ -1070,6 +1070,12 @@ async function supabasePatchFormByRelease(userId, rel, patch = {}) {
   if (Object.prototype.hasOwnProperty.call(body, 'upc')) {
     body.upc = clean(body.upc || '');
   }
+  if (Object.prototype.hasOwnProperty.call(body, 'moderator_comment')) {
+    body.moderator_comment = clean(body.moderator_comment || '');
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'user_deleted')) {
+    body.user_deleted = Boolean(body.user_deleted);
+  }
 
   try {
     if (formId) {
@@ -2407,6 +2413,8 @@ async function applyReleaseStatus(uid, idx, status, moderator, opts = {}) {
   await supabasePatchFormByRelease(uid, rel, {
     status: formStatus,
     reject_reason: canonStatus === STATUS.REJECTED ? clean(rel.reject_reason || '') : '',
+    moderator_comment: canonStatus === STATUS.NEEDS_FIX ? clean(rel.moderator_comment || '') : '',
+    user_deleted: canonStatus === STATUS.DELETED,
     upc: clean(rel.upc || ''),
     moderation_message_id: Number(rel.moderation_message_id || 0) || null,
     form_payload: safeJson(rel) || {}
