@@ -5841,7 +5841,207 @@ function startStaticServer() {
         }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
         return;
       }
-      if (u.pathname === '/health' || u.pathname === '/healthz') {
+            if (u.pathname === '/api/moderation/action' && req.method === 'POST') {
+        const incomingSecret = clean(
+          req.headers['x-cxrner-secret'] ||
+          req.headers['x-secret-key'] ||
+          req.headers['x-api-key'] ||
+          (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '') ||
+          ''
+        );
+        if (WEBHOOK_SECRET && incomingSecret && incomingSecret !== WEBHOOK_SECRET) {
+          sendJson(res, 401, { ok: false, error: 'unauthorized' });
+          return;
+        }
+
+        readJsonBody(req).then(async (body) => {
+          const formId = clean(body.id || body.form_id || '');
+          const status = clean(body.status || '');
+          const action = clean(body.action || status);
+          const upc = clean(body.upc || '');
+          const rejectReason = clean(body.reject_reason || '');
+          const moderatorComment = clean(body.moderator_comment || '');
+          const moderatorName = clean(body.moderator_name || 'cxrner.label@gmail.com');
+          const telegramId = clean(body.telegram_id || '');
+
+          console.info(`[api/moderation/action] processing: form_id=${formId} status=${status} action=${action} upc=${upc}`);
+
+          const map = {
+            upload: STATUS.ON_UPLOAD,
+            on_upload: STATUS.ON_UPLOAD,
+            pending: STATUS.ON_UPLOAD,
+            moderate: STATUS.MODERATION,
+            moderation: STATUS.MODERATION,
+            on_moderation: STATUS.MODERATION,
+            approve: STATUS.APPROVED,
+            approved: STATUS.APPROVED,
+            needfix: STATUS.NEEDS_FIX,
+            fix_required: STATUS.NEEDS_FIX,
+            reject: STATUS.REJECTED,
+            rejected: STATUS.REJECTED,
+            delete: STATUS.DELETED,
+            deleted: STATUS.DELETED
+          };
+          const targetStatus = map[status] || map[action] || STATUS.ON_UPLOAD;
+
+          let matched = false;
+          let updatedRel = null;
+
+          // Case 1: Composite ID from Telegram bot (uid:time:idx)
+          if (formId.includes(':')) {
+            const parts = formId.split(':');
+            const uid = parts[0];
+            const idx = Number.parseInt(parts[parts.length - 1], 10);
+            if (Number.isFinite(idx)) {
+              const out = await applyReleaseStatus(
+                uid,
+                idx,
+                targetStatus,
+                { id: 0, first_name: moderatorName, username: moderatorName },
+                {
+                  upc,
+                  rejectReason,
+                  moderatorComment,
+                  clearRejectReason: targetStatus !== STATUS.REJECTED,
+                  restoreFromDelete: targetStatus !== STATUS.DELETED,
+                  note: `Изменено через Web CMS (${moderatorName})`
+                }
+              );
+              if (out.ok) {
+                matched = true;
+                updatedRel = out.rel;
+              }
+            }
+          }
+
+          // Case 2: Match by formId or telegram_id in bot memory db
+          if (!matched) {
+            for (const [uid, list] of Object.entries(db || {})) {
+              if (!Array.isArray(list)) continue;
+              for (let idx = 0; idx < list.length; idx += 1) {
+                const r = list[idx];
+                if (r && (r.supabase_form_id === formId || (telegramId && String(uid) === String(telegramId) && r.name === body.track_name))) {
+                  const out = await applyReleaseStatus(
+                    uid,
+                    idx,
+                    targetStatus,
+                    { id: 0, first_name: moderatorName, username: moderatorName },
+                    {
+                      upc,
+                      rejectReason,
+                      moderatorComment,
+                      clearRejectReason: targetStatus !== STATUS.REJECTED,
+                      restoreFromDelete: targetStatus !== STATUS.DELETED,
+                      note: `Изменено через Web CMS (${moderatorName})`
+                    }
+                  );
+                  if (out.ok) {
+                    matched = true;
+                    updatedRel = out.rel;
+                    break;
+                  }
+                }
+              }
+              if (matched) break;
+            }
+          }
+
+          // Case 3: Web-submitted release in Supabase
+          if (!matched && formId) {
+            try {
+              const rows = await supabaseSelectWhere(SUPABASE_FORMS_TABLE, '*', [{ key: 'id', value: formId }], '', 1);
+              const formRow = Array.isArray(rows) && rows[0] ? rows[0] : null;
+              if (formRow) {
+                const uid = clean(formRow.telegram_id || telegramId || '');
+                const p = formRow.form_payload && typeof formRow.form_payload === 'object' ? formRow.form_payload : {};
+                const msgId = Number(formRow.moderation_message_id || p.moderation_message_id || 0);
+
+                const relData = {
+                  ...p,
+                  name: clean(formRow.track_name || p.name || ''),
+                  nick: clean(formRow.artist_name || p.nick || ''),
+                  status: targetStatus,
+                  upc: upc || formRow.upc || p.upc || '',
+                  reject_reason: rejectReason || formRow.reject_reason || '',
+                  moderator_comment: moderatorComment || formRow.moderator_comment || '',
+                  moderation_message_id: msgId || 0
+                };
+
+                // Edit or send Telegram message in moderation group
+                if (msgId) {
+                  try {
+                    await tg('editMessageText', {
+                      chat_id: MOD_CHAT,
+                      message_id: msgId,
+                      text: buildModerationText(uid || 'web', relData),
+                      parse_mode: 'HTML',
+                      disable_web_page_preview: true,
+                      reply_markup: moderationKeyboard(uid || 'web', 0)
+                    });
+                  } catch (err) {
+                    console.warn('[api/moderation/action] editMessageText notice:', err?.message || err);
+                  }
+                } else {
+                  try {
+                    const sent = await tg('sendMessage', moderationPayload({
+                      text: buildModerationText(uid || 'web', relData),
+                      parse_mode: 'HTML',
+                      disable_web_page_preview: true,
+                      reply_markup: moderationKeyboard(uid || 'web', 0)
+                    }));
+                    if (sent?.message_id) {
+                      relData.moderation_message_id = sent.message_id;
+                      await supabasePatchFormByRelease(uid, { ...relData, supabase_form_id: formId }, {
+                        moderation_message_id: sent.message_id
+                      });
+                    }
+                  } catch (err) {
+                    console.warn('[api/moderation/action] sendMessage notice:', err?.message || err);
+                  }
+                }
+
+                // Notify artist via Telegram DM if telegram_id is numeric
+                if (/^\d{4,20}$/.test(clean(uid))) {
+                  await notifyArtistAboutRelease(uid, relData, targetStatus);
+                }
+
+                // Sync Supabase form
+                await supabasePatchFormByRelease(uid, { ...relData, supabase_form_id: formId }, {
+                  status: mapReleaseStatusToFormStatus(targetStatus),
+                  upc: clean(relData.upc || ''),
+                  reject_reason: clean(relData.reject_reason || ''),
+                  moderator_comment: clean(relData.moderator_comment || '')
+                });
+
+                // Upsert or delete public releases
+                if (targetStatus === STATUS.APPROVED || targetStatus === STATUS.PUBLISHED) {
+                  await supabaseUpsertApprovedRelease(uid, { ...relData, supabase_form_id: formId });
+                } else if ([STATUS.REJECTED, STATUS.DELETED].includes(targetStatus)) {
+                  await supabaseDeleteApprovedRelease(uid, { ...relData, supabase_form_id: formId });
+                }
+
+                matched = true;
+                updatedRel = relData;
+              }
+            } catch (dbErr) {
+              console.error('[api/moderation/action] Supabase lookup error:', dbErr?.message || dbErr);
+            }
+          }
+
+          sendJson(res, 200, {
+            ok: true,
+            matched,
+            target_status: targetStatus,
+            form_id: formId,
+            rel: updatedRel
+          });
+        }).catch((err) => {
+          console.error('[api/moderation/action] Error:', err);
+          sendJson(res, 500, { ok: false, error: clean(err?.message || err) });
+        });
+        return;
+      }
+if (u.pathname === '/health' || u.pathname === '/healthz') {
         sendJson(res, 200, {
           ok: true,
           service: 'cxrner-music-bot',
