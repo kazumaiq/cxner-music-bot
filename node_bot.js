@@ -5916,6 +5916,28 @@ function startStaticServer() {
               if (out.ok) {
                 matched = true;
                 updatedRel = out.rel;
+                const msgId = Number(out.rel?.moderation_message_id || 0);
+                if (upc) {
+                  await sendText(MOD_CHAT, `✅ UPC присвоен: <code>${esc(upc)}</code>`, {
+                    reply_to_message_id: msgId || undefined
+                  }).catch(() => null);
+                  if (/^\d{4,20}$/.test(clean(uid))) {
+                    await sendText(Number(uid), `📦 <b>UPC присвоен</b>\n\n🎵 <b>${esc(out.rel?.name || 'Релиз')}</b>\nUPC: <code>${esc(upc)}</code>`).catch(() => null);
+                  }
+                }
+                if (action === 'approve' || status === 'approved') {
+                  await sendText(MOD_CHAT, `✅ <b>Релиз одобрен модератором</b> (${esc(moderatorName)})`, {
+                    reply_to_message_id: msgId || undefined
+                  }).catch(() => null);
+                } else if (action === 'reject' || status === 'rejected') {
+                  await sendText(MOD_CHAT, `❌ <b>Релиз отклонен:</b> ${esc(rejectReason || 'Без указания причины')}`, {
+                    reply_to_message_id: msgId || undefined
+                  }).catch(() => null);
+                } else if (action === 'needfix' || status === 'needfix') {
+                  await sendText(MOD_CHAT, `✏️ <b>Отправлено на исправления:</b> ${esc(moderatorComment || 'Требуются правки')}`, {
+                    reply_to_message_id: msgId || undefined
+                  }).catch(() => null);
+                }
               }
             }
           }
@@ -5926,7 +5948,7 @@ function startStaticServer() {
               if (!Array.isArray(list)) continue;
               for (let idx = 0; idx < list.length; idx += 1) {
                 const r = list[idx];
-                if (r && (r.supabase_form_id === formId || (telegramId && String(uid) === String(telegramId) && r.name === body.track_name))) {
+                if (r && (r.supabase_form_id === formId || String(r.supabase_form_id || '').startsWith(formId) || (telegramId && String(uid) === String(telegramId) && r.name === body.track_name))) {
                   const out = await applyReleaseStatus(
                     uid,
                     idx,
@@ -5944,6 +5966,28 @@ function startStaticServer() {
                   if (out.ok) {
                     matched = true;
                     updatedRel = out.rel;
+                    const msgId = Number(out.rel?.moderation_message_id || 0);
+                    if (upc) {
+                      await sendText(MOD_CHAT, `✅ UPC присвоен: <code>${esc(upc)}</code>`, {
+                        reply_to_message_id: msgId || undefined
+                      }).catch(() => null);
+                      if (/^\d{4,20}$/.test(clean(uid))) {
+                        await sendText(Number(uid), `📦 <b>UPC присвоен</b>\n\n🎵 <b>${esc(out.rel?.name || 'Релиз')}</b>\nUPC: <code>${esc(upc)}</code>`).catch(() => null);
+                      }
+                    }
+                    if (action === 'approve' || status === 'approved') {
+                      await sendText(MOD_CHAT, `✅ <b>Релиз одобрен модератором</b> (${esc(moderatorName)})`, {
+                        reply_to_message_id: msgId || undefined
+                      }).catch(() => null);
+                    } else if (action === 'reject' || status === 'rejected') {
+                      await sendText(MOD_CHAT, `❌ <b>Релиз отклонен:</b> ${esc(rejectReason || 'Без указания причины')}`, {
+                        reply_to_message_id: msgId || undefined
+                      }).catch(() => null);
+                    } else if (action === 'needfix' || status === 'needfix') {
+                      await sendText(MOD_CHAT, `✏️ <b>Отправлено на исправления:</b> ${esc(moderatorComment || 'Требуются правки')}`, {
+                        reply_to_message_id: msgId || undefined
+                      }).catch(() => null);
+                    }
                     break;
                   }
                 }
@@ -5952,28 +5996,36 @@ function startStaticServer() {
             }
           }
 
-          // Case 3: Web-submitted release in Supabase
+          // Case 3: Web-submitted release in Supabase cxrner_forms
           if (!matched && formId) {
             try {
-              const rows = await supabaseSelectWhere(SUPABASE_FORMS_TABLE, '*', [{ key: 'id', value: formId }], '', 1);
-              const formRow = Array.isArray(rows) && rows[0] ? rows[0] : null;
+              let rows = await supabaseSelectWhere(SUPABASE_FORMS_TABLE, '*', [{ key: 'id', value: formId }], '', 1);
+              let formRow = Array.isArray(rows) && rows[0] ? rows[0] : null;
+
+              if (!formRow) {
+                // Try prefix match (e.g. 3cf5c1c0)
+                const allRecent = await supabaseSelectAll(SUPABASE_FORMS_TABLE, '*', 'created_at.desc');
+                formRow = (allRecent || []).find((r) => String(r.id || '').startsWith(formId) || String(r.submission_key || '') === formId) || null;
+              }
+
               if (formRow) {
                 const uid = clean(formRow.telegram_id || telegramId || '');
                 const p = formRow.form_payload && typeof formRow.form_payload === 'object' ? formRow.form_payload : {};
                 const msgId = Number(formRow.moderation_message_id || p.moderation_message_id || 0);
 
+                const finalUpc = upc || formRow.upc || p.upc || '';
                 const relData = {
                   ...p,
                   name: clean(formRow.track_name || p.name || ''),
                   nick: clean(formRow.artist_name || p.nick || ''),
                   status: targetStatus,
-                  upc: upc || formRow.upc || p.upc || '',
+                  upc: finalUpc,
                   reject_reason: rejectReason || formRow.reject_reason || '',
                   moderator_comment: moderatorComment || formRow.moderator_comment || '',
                   moderation_message_id: msgId || 0
                 };
 
-                // Edit or send Telegram message in moderation group
+                // 1. Edit Telegram card in moderation group
                 if (msgId) {
                   try {
                     await tg('editMessageText', {
@@ -5997,33 +6049,59 @@ function startStaticServer() {
                     }));
                     if (sent?.message_id) {
                       relData.moderation_message_id = sent.message_id;
-                      await supabasePatchFormByRelease(uid, { ...relData, supabase_form_id: formId }, {
-                        moderation_message_id: sent.message_id
-                      });
                     }
                   } catch (err) {
                     console.warn('[api/moderation/action] sendMessage notice:', err?.message || err);
                   }
                 }
 
-                // Notify artist via Telegram DM if telegram_id is numeric
-                if (/^\d{4,20}$/.test(clean(uid))) {
-                  await notifyArtistAboutRelease(uid, relData, targetStatus);
+                const activeMsgId = Number(msgId || relData.moderation_message_id || 0);
+
+                // 2. Post action confirmation message in the moderation group
+                if (upc) {
+                  await sendText(MOD_CHAT, `✅ UPC присвоен: <code>${esc(upc)}</code>`, {
+                    reply_to_message_id: activeMsgId || undefined
+                  }).catch(() => null);
+                }
+                if (action === 'approve' || status === 'approved') {
+                  await sendText(MOD_CHAT, `✅ <b>Релиз одобрен модератором</b> (${esc(moderatorName)})`, {
+                    reply_to_message_id: activeMsgId || undefined
+                  }).catch(() => null);
+                } else if (action === 'reject' || status === 'rejected') {
+                  await sendText(MOD_CHAT, `❌ <b>Релиз отклонен:</b> ${esc(rejectReason || 'Без указания причины')}`, {
+                    reply_to_message_id: activeMsgId || undefined
+                  }).catch(() => null);
+                } else if (action === 'needfix' || status === 'needfix') {
+                  await sendText(MOD_CHAT, `✏️ <b>Отправлено на исправления:</b> ${esc(moderatorComment || 'Требуются правки')}`, {
+                    reply_to_message_id: activeMsgId || undefined
+                  }).catch(() => null);
                 }
 
-                // Sync Supabase form
-                await supabasePatchFormByRelease(uid, { ...relData, supabase_form_id: formId }, {
+                // 3. Notify artist via Telegram DM if telegram_id is numeric
+                if (/^\d{4,20}$/.test(clean(uid))) {
+                  if (upc) {
+                    await sendText(Number(uid), `📦 <b>UPC присвоен</b>\n\n🎵 <b>${esc(relData.name || 'Релиз')}</b>\nUPC: <code>${esc(upc)}</code>`).catch(() => null);
+                  }
+                  if (action === 'approve' || status === 'approved' || action === 'reject' || status === 'rejected' || action === 'needfix' || status === 'needfix') {
+                    await notifyArtistAboutRelease(uid, relData, targetStatus).catch(() => null);
+                  }
+                }
+
+                // 4. Update Supabase cxrner_forms with service_role key
+                await supabasePatchFormByRelease(uid, { ...relData, supabase_form_id: formRow.id }, {
                   status: mapReleaseStatusToFormStatus(targetStatus),
-                  upc: clean(relData.upc || ''),
+                  upc: finalUpc,
                   reject_reason: clean(relData.reject_reason || ''),
-                  moderator_comment: clean(relData.moderator_comment || '')
+                  moderator_comment: clean(relData.moderator_comment || ''),
+                  moderation_message_id: activeMsgId || null,
+                  form_payload: relData
                 });
 
-                // Upsert or delete public releases
+                // 5. Sync public releases
                 if (targetStatus === STATUS.APPROVED || targetStatus === STATUS.PUBLISHED) {
-                  await supabaseUpsertApprovedRelease(uid, { ...relData, supabase_form_id: formId });
+                  await supabaseUpsertApprovedRelease(uid, { ...relData, supabase_form_id: formRow.id });
                 } else if ([STATUS.REJECTED, STATUS.DELETED].includes(targetStatus)) {
-                  await supabaseDeleteApprovedRelease(uid, { ...relData, supabase_form_id: formId });
+                  await supabaseDeleteApprovedRelease(uid, { ...relData, supabase_form_id: formRow.id });
                 }
 
                 matched = true;
@@ -6038,7 +6116,7 @@ function startStaticServer() {
             ok: true,
             matched,
             target_status: targetStatus,
-            form_id: formId,
+            upc: upc || null,
             rel: updatedRel
           });
         }).catch((err) => {
@@ -6047,7 +6125,7 @@ function startStaticServer() {
         });
         return;
       }
-if (u.pathname === '/health' || u.pathname === '/healthz') {
+      if (u.pathname === '/health' || u.pathname === '/healthz') {
         sendJson(res, 200, {
           ok: true,
           service: 'cxrner-music-bot',
