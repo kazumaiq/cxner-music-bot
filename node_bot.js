@@ -1058,23 +1058,29 @@ async function supabasePatchFormByRelease(userId, rel, patch = {}) {
   const now = new Date().toISOString();
   const formId = clean(rel.supabase_form_id || '');
   const body = {
-    ...patch,
     updated_at: now
   };
-  if (Object.prototype.hasOwnProperty.call(body, 'status')) {
-    body.status = clean(body.status || FORM_STATUS.ON_MODERATION);
+  if (Object.prototype.hasOwnProperty.call(patch, 'status')) {
+    body.status = clean(patch.status || FORM_STATUS.ON_MODERATION);
   }
-  if (Object.prototype.hasOwnProperty.call(body, 'reject_reason')) {
-    body.reject_reason = clean(body.reject_reason || '');
+  if (Object.prototype.hasOwnProperty.call(patch, 'reject_reason')) {
+    body.reject_reason = clean(patch.reject_reason || '');
   }
-  if (Object.prototype.hasOwnProperty.call(body, 'upc')) {
-    body.upc = clean(body.upc || '');
+  if (Object.prototype.hasOwnProperty.call(patch, 'upc')) {
+    body.upc = clean(patch.upc || '');
   }
-  if (Object.prototype.hasOwnProperty.call(body, 'moderator_comment')) {
-    body.moderator_comment = clean(body.moderator_comment || '');
+  if (Object.prototype.hasOwnProperty.call(patch, 'moderation_message_id')) {
+    body.moderation_message_id = String(patch.moderation_message_id || '');
   }
-  if (Object.prototype.hasOwnProperty.call(body, 'user_deleted')) {
-    body.user_deleted = Boolean(body.user_deleted);
+  if (patch.form_payload || patch.moderator_comment !== undefined || patch.user_deleted !== undefined) {
+    const existingPayload = rel.form_payload && typeof rel.form_payload === 'object' ? rel.form_payload : {};
+    const newPayload = {
+      ...existingPayload,
+      ...(patch.form_payload && typeof patch.form_payload === 'object' ? patch.form_payload : {})
+    };
+    if (patch.moderator_comment !== undefined) newPayload.moderator_comment = clean(patch.moderator_comment);
+    if (patch.user_deleted !== undefined) newPayload.user_deleted = Boolean(patch.user_deleted);
+    body.form_payload = newPayload;
   }
 
   try {
