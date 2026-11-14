@@ -4989,6 +4989,8 @@ function startStaticServer() {
     [
       BASE,
       envStr('MINIAPP_ORIGIN', ''),
+      'https://cxrnermusic.vercel.app',
+      'https://www.cxrnermusic.vercel.app',
       'https://bot-1787153410-6782-kazumaiq.bothost.tech',
       'https://web.telegram.org'
     ]
@@ -5001,8 +5003,174 @@ function startStaticServer() {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
     }
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization,x-telegram-init-data');
+  }
+  const DROP_CASES_CONFIG = [
+    {
+      id: 'case_001_archive',
+      name: 'CASE 001 — ARCHIVE',
+      subtitle: 'SPECIMEN ARCHIVE BASE',
+      description: 'Базовые коллекционные артефакты лейбла, цифровые ключи, визор-маски и шанс на ваучер обложки.',
+      price_cxp: 50,
+      accent: '#00F0FF',
+      drop_rates: { common: 55, rare: 25, epic: 13, legendary: 5.5, mythic: 1.4, special_reward: 0.1 }
+    },
+    {
+      id: 'case_002_black_specimen',
+      name: 'CASE 002 — BLACK SPECIMEN',
+      subtitle: 'ORGANIC FORMS & MASKS',
+      description: 'Редкая серия тёмного металла, органических сердец, глаз наблюдателя и эксклюзивных артефактов.',
+      price_cxp: 75,
+      accent: '#A855F7',
+      drop_rates: { common: 0, rare: 50, epic: 32, legendary: 14, mythic: 3.8, special_reward: 0.2 }
+    },
+    {
+      id: 'case_003_chrome_age',
+      name: 'CASE 003 — CHROME AGE',
+      subtitle: 'LIQUID CHROME & SPIKES',
+      description: 'Ультрапремиальная линейка жидкого хрома: Chrome Spike, Void Crown, Chrome Fang Black/White и реликвии.',
+      price_cxp: 100,
+      accent: '#F59E0B',
+      drop_rates: { common: 0, rare: 35, epic: 40, legendary: 20, mythic: 4.7, special_reward: 0.3 }
+    }
+  ];
+  const DROP_SPECIMENS_CATALOG = [
+    { item_id: 'specimen_cyber_vinyl_01', item_name: 'CYBER VINYL GENESIS', specimen_code: 'VN-001', specimen_class: 'MEDIA', collection_name: 'GENESIS ARCHIVE', rarity: 'common', model_color: '#A855F7', shape: 'cylinder', description: 'Первый серийный винил с лазерной гравировкой CXRNER-001.' },
+    { item_id: 'specimen_data_key_03', item_name: 'DATA KEY', specimen_code: 'DK-003', specimen_class: 'OBJECT', collection_name: 'SPECIMEN ARCHIVE', rarity: 'common', model_color: '#94A3B8', shape: 'box', description: 'Металлический цифровой ключ доступа к мастер-трекам.' },
+    { item_id: 'specimen_basic_specimen_04', item_name: 'BASIC SPECIMEN', specimen_code: 'BS-004', specimen_class: 'OBJECT', collection_name: 'SPECIMEN ARCHIVE', rarity: 'common', model_color: '#64748B', shape: 'cylinder', description: 'Запечатанная полимерная капсула архива.' },
+    { item_id: 'specimen_chrome_tag_05', item_name: 'CHROME TAG', specimen_code: 'TG-005', specimen_class: 'OBJECT', collection_name: 'CHROME AGE', rarity: 'common', model_color: '#CBD5E1', shape: 'box', description: 'Металлическая маркировочная бирка серии CXRNER.' },
+    { item_id: 'specimen_archive_cassette_02', item_name: 'ARCHIVE CASSETTE', specimen_code: 'CA-037', specimen_class: 'MEDIA', collection_name: 'GENESIS ARCHIVE', rarity: 'rare', model_color: '#00F0FF', shape: 'box', description: 'Коллекционная аудиокассета CXRNER ARCHIVE в вакуумной капсуле.' },
+    { item_id: 'specimen_chrome_disc_06', item_name: 'CHROME DISC', specimen_code: 'CD-001', specimen_class: 'MEDIA', collection_name: 'CHROME AGE', rarity: 'rare', model_color: '#38BDF8', shape: 'cylinder', description: 'Хромированный CD-диск с радужной голографической дифракцией.' },
+    { item_id: 'specimen_chrome_spike_16', item_name: 'CHROME SPIKE', specimen_code: 'CR-017', specimen_class: 'OBJECT', collection_name: 'CHROME AGE', rarity: 'rare', model_color: '#E2E8F0', shape: 'octahedron', description: 'Многогранный шип из жидкого хрома с титановым напылением.' },
+    { item_id: 'specimen_violet_visor_13', item_name: 'VIOLET VISOR', specimen_code: 'VG-005', specimen_class: 'ACCESSORY', collection_name: 'SPECIMEN ARCHIVE', rarity: 'epic', model_color: '#C084FC', shape: 'box', description: 'Футуристическая маска-визор саунд-дизайнера со спектральным HUD.' },
+    { item_id: 'specimen_black_heart_12', item_name: 'BLACK HEART', specimen_code: 'HR-009', specimen_class: 'ORGANIC', collection_name: 'BLACK SPECIMEN', rarity: 'epic', model_color: '#A855F7', shape: 'octahedron', description: 'Зеркально-чёрное механическое сердце с суб-басовым импульсом.' },
+    { item_id: 'specimen_watcher_eye_11', item_name: 'WATCHER EYE', specimen_code: 'EY-004', specimen_class: 'ORGANIC', collection_name: 'BLACK SPECIMEN', rarity: 'legendary', model_color: '#F59E0B', shape: 'dodecahedron', description: 'Биомеханическое око в венце шипов, сканирующее звуковую сцену.' },
+    { item_id: 'specimen_void_crown_17', item_name: 'VOID CROWN', specimen_code: 'CR-003', specimen_class: 'ACCESSORY', collection_name: 'BLACK SPECIMEN', rarity: 'legendary', model_color: '#FCD34D', shape: 'torus', description: 'Готическая корона из застывшего жидкого хрома правителя сцены.' },
+    { item_id: 'specimen_chrome_fang_19', item_name: 'CHROME FANG BLACK', specimen_code: 'C1/S-B', specimen_class: 'ARTIFACT', collection_name: 'CHROME AGE', rarity: 'legendary', model_color: '#FBBF24', shape: 'dodecahedron', description: 'Чёрная металлическая челюсть хищника с зеркальными клыками.' },
+    { item_id: 'specimen_white_fang_20', item_name: 'WHITE FANG SPECIMEN', specimen_code: 'C1/S-W', specimen_class: 'ARTIFACT', collection_name: 'CHROME AGE', rarity: 'legendary', model_color: '#FFFFFF', shape: 'dodecahedron', description: 'Редкая матово-белая мутация клыков хищника C1/S.' },
+    { item_id: 'specimen_cxrner_original_24', item_name: 'CHROMATIC FANG // CXRNER ORIGINAL', specimen_code: 'GLITCH-01', specimen_class: 'ARTIFACT', collection_name: 'FOUNDERS EDITION', rarity: 'mythic', model_color: '#F43F5E', shape: 'icosahedron', description: 'Сверхредкий хроматический глитч-артефакт основания CXRNER MUSIC.' },
+    { item_id: 'specimen_cover_voucher_25', item_name: 'CXRNER COVER VOUCHER', specimen_code: 'CV-2026', specimen_class: 'REWARD', collection_name: 'SPECIAL REWARDS', rarity: 'special_reward', model_color: '#F59E0B', shape: 'box', is_special_reward: true, description: 'Бесплатная обложка для релиза от @kazumaiq.' },
+    { item_id: 'specimen_fasttrack_pitch_26', item_name: 'FAST-TRACK PITCHING VOUCHER', specimen_code: 'FP-2026', specimen_class: 'REWARD', collection_name: 'SPECIAL REWARDS', rarity: 'special_reward', model_color: '#00F0FF', shape: 'box', is_special_reward: true, description: 'Приоритетная модерация 24ч и питчинг плейлистам CXRNER.' },
+    { item_id: 'specimen_royalty_boost_27', item_name: 'ROYALTY BOOST 85/15', specimen_code: 'RB-2026', specimen_class: 'REWARD', collection_name: 'SPECIAL REWARDS', rarity: 'special_reward', model_color: '#A855F7', shape: 'box', is_special_reward: true, description: 'Апгрейд ставки роялти 85% артисту на следующий релиз.' },
+    { item_id: 'specimen_label_promo_28', item_name: 'LABEL PROMO SPOT', specimen_code: 'LP-2026', specimen_class: 'REWARD', collection_name: 'SPECIAL REWARDS', rarity: 'special_reward', model_color: '#F43F5E', shape: 'box', is_special_reward: true, description: 'Персональный анонс и закреп в витрине CXRNER MUSIC.' }
+  ];
+  const DROP_SALVAGE_MAP = { common: 15, rare: 30, epic: 55, legendary: 120, mythic: 250, special_reward: 500 };
+  const DROP_FUSION_NEXT = { common: 'rare', rare: 'epic', epic: 'legendary', legendary: 'mythic' };
+  const DROP_PROMO_CODES = {
+    CXRNER2026: { cxp: 120, label: 'CXRNER 2026 Bonus' },
+    DROP100: { cxp: 100, label: 'Drop Boost +100 CXP' },
+    KAZUMACEO: { cxp: 150, label: 'CEO Patron Gift' },
+    WELCOME50: { cxp: 50, label: 'Welcome Supply' }
+  };
+  const GIFT_HMAC_SECRET = envStr('DROP_GIFT_SECRET', envStr('SUPABASE_SERVICE_ROLE_KEY', envStr('ADMIN_PASSWORD', 'cxrner_drop_gift_hmac_2026')));
+  const localDropVaultCache = new Map();
+  function deterministicTgUuid(uid) {
+    const hash = crypto.createHash('sha256').update(`cxrner:tg:${clean(uid)}`).digest('hex');
+    return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+  }
+  function signMiniAppGiftPayload(b64Data) {
+    return crypto.createHmac('sha256', GIFT_HMAC_SECRET).update(b64Data).digest('base64url').slice(0, 16);
+  }
+  function rollSpecimenForCase(caseCfg) {
+    const rates = caseCfg.drop_rates || {};
+    const entries = Object.entries(rates).filter(([, w]) => Number(w) > 0);
+    const total = entries.reduce((sum, [, w]) => sum + Number(w), 0);
+    let roll = (crypto.randomBytes(4).readUInt32BE(0) / 0x100000000) * total;
+    let rarity = entries[0]?.[0] || 'common';
+    for (const [r, w] of entries) {
+      roll -= Number(w);
+      if (roll <= 0) { rarity = r; break; }
+    }
+    const pool = DROP_SPECIMENS_CATALOG.filter((s) => s.rarity === rarity);
+    const pick = pool[crypto.randomInt(0, pool.length)] || DROP_SPECIMENS_CATALOG[0];
+    return pick;
+  }
+  async function resolveMiniAppVault(uid, tgUser = {}) {
+    const cleanUid = clean(uid);
+    const uname = clean(tgUser?.username || '').replace(/^@/, '').toLowerCase();
+    const isCeo = uname === 'kazumaiq' || isAdmin(cleanUid);
+    const fallbackUuid = deterministicTgUuid(cleanUid);
+    let targetUserId = fallbackUuid;
+    let vault = localDropVaultCache.get(cleanUid) || null;
+    if (SUPABASE_SYNC_ENABLED) {
+      try {
+        const rows = await supabaseSelectAll(SUPABASE_CABINET_TABLE_RAW, 'user_id,profile,updated_at', 'updated_at.desc');
+        const matched = (rows || []).find((row) => {
+          const p = row?.profile && typeof row.profile === 'object' ? row.profile : {};
+          const ep = p.ecosystem_profile && typeof p.ecosystem_profile === 'object' ? p.ecosystem_profile : {};
+          const pTg = clean(p.telegram_id || ep.telegram_id || '');
+          const pUser = clean(ep.username || ep.telegram_username || p.username || '').replace(/^@/, '').toLowerCase();
+          return row.user_id === fallbackUuid || row.user_id === `tg_${cleanUid}` || (pTg && pTg === cleanUid) || (uname && pUser === uname);
+        });
+        if (matched) {
+          targetUserId = matched.user_id;
+          vault = matched.profile && typeof matched.profile === 'object' ? { ...matched.profile } : {};
+        } else {
+          // Also try linking with cxrner_cxp_wallet / cxrner_drop_inventory if user logged in elsewhere
+          vault = vault || {};
+        }
+      } catch (err) {
+        console.warn('[DROP_VAULT] resolve failed:', clean(err?.message || err));
+      }
+    }
+    vault = vault && typeof vault === 'object' ? { ...vault } : {};
+    const nowIso = new Date().toISOString();
+    const defaultBalance = isCeo ? 999999 : 150;
+    const baseWallet = vault.ecosystem_wallet && typeof vault.ecosystem_wallet === 'object'
+      ? { ...vault.ecosystem_wallet }
+      : { user_id: targetUserId, balance: defaultBalance, total_earned: defaultBalance, total_spent: 0, updated_at: nowIso };
+    if (isCeo && Number(baseWallet.balance || 0) < 999999) {
+      baseWallet.balance = 999999;
+      baseWallet.total_earned = Math.max(Number(baseWallet.total_earned || 0), 999999);
+    }
+    const removedSet = new Set(Array.isArray(vault.ecosystem_removed_item_ids) ? vault.ecosystem_removed_item_ids : []);
+    let inventory = Array.isArray(vault.ecosystem_inventory) ? vault.ecosystem_inventory.filter((x) => x && !removedSet.has(x.id)) : [];
+    const history = Array.isArray(vault.ecosystem_drop_history) ? vault.ecosystem_drop_history : [];
+    if (isCeo && !inventory.length) {
+      inventory = [
+        { id: 'ceo_glitch_01', user_id: targetUserId, item_id: 'specimen_cxrner_original_24', item_name: 'CHROMATIC FANG // CXRNER ORIGINAL', specimen_code: 'GLITCH-01', specimen_class: 'ARTIFACT', collection_name: 'FOUNDERS EDITION', rarity: 'mythic', serial_number: 1, description: 'Именной Founders-артефакт CEO CXRNER MUSIC.', model_color: '#F43F5E', shape: 'icosahedron', obtained_via: 'ceo_sovereign', is_pinned: true, created_at: nowIso },
+        { id: 'ceo_crown_01', user_id: targetUserId, item_id: 'specimen_void_crown_17', item_name: 'VOID CROWN', specimen_code: 'CR-003', specimen_class: 'ACCESSORY', collection_name: 'BLACK SPECIMEN', rarity: 'legendary', serial_number: 1, description: 'Корона основателя CXRNER MUSIC.', model_color: '#FCD34D', shape: 'torus', obtained_via: 'ceo_sovereign', is_pinned: true, created_at: nowIso }
+      ];
+    }
+    vault.telegram_id = cleanUid;
+    vault.ecosystem_wallet = baseWallet;
+    vault.ecosystem_inventory = inventory;
+    vault.ecosystem_drop_history = history;
+    return { targetUserId, isCeo, vault, uid: cleanUid };
+  }
+  async function saveMiniAppVault(resolved, updater) {
+    const nextVault = updater({ ...resolved.vault });
+    const nowIso = new Date().toISOString();
+    nextVault.telegram_id = resolved.uid;
+    nextVault.updated_at = nowIso;
+    localDropVaultCache.set(resolved.uid, nextVault);
+    if (SUPABASE_SYNC_ENABLED) {
+      try {
+        await supabaseRequest(`${SUPABASE_CABINET_TABLE_RAW}?on_conflict=user_id`, {
+          method: 'POST',
+          headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+          body: [{ user_id: resolved.targetUserId, profile: nextVault, updated_at: nowIso }]
+        });
+        if (nextVault.ecosystem_wallet) {
+          await supabaseRequest('cxrner_cxp_wallet?on_conflict=user_id', {
+            method: 'POST',
+            headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+            body: [{
+              user_id: resolved.targetUserId,
+              balance: Math.max(0, Number(nextVault.ecosystem_wallet.balance || 0)),
+              total_earned: Math.max(0, Number(nextVault.ecosystem_wallet.total_earned || 0)),
+              total_spent: Math.max(0, Number(nextVault.ecosystem_wallet.total_spent || 0)),
+              updated_at: nowIso
+            }]
+          }).catch(() => {});
+        }
+      } catch (err) {
+        console.warn('[DROP_VAULT] save error:', clean(err?.message || err));
+      }
+    }
+    resolved.vault = nextVault;
+    return nextVault;
   }
   function sendJson(res, statusCode, data) {
     res.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8' });
@@ -5465,7 +5633,29 @@ function startStaticServer() {
           const ownReleaseIds = new Set((forms || []).map((row) => String(row.id)));
           const ownLikes = (engagements || []).filter((row) => ownReleaseIds.has(String(row.release_id)) && row.kind === 'like').length;
           const ownListens = (listens || []).filter((row) => ownReleaseIds.has(String(row.release_id))).length;
-          sendJson(res, 200, { ok: true, user: { ...profile, telegram_id: Number(auth.uid), photo_url: profile.photo_url || auth.user.photo_url || '' }, stats: { releases: forms?.length || 0, approved: approvedOwn, moderation: moderationOwn, views: 0, listens: ownListens, likes: ownLikes, comments: 0, followers, following }, latest, popular, recommended: latest.slice(0, 6), news: (news || []).filter((row) => row.published !== false).slice(0, 8), notifications: notifications || [], forms: forms || [], is_admin: auth.is_admin });
+          const [resolvedVault, userLinks] = await Promise.all([
+            resolveMiniAppVault(auth.uid, auth.user).catch(() => null),
+            supabaseSelectWhere(SUPABASE_LINKS_TABLE, 'id', [{ key: 'telegram_id', value: auth.uid }], '', 50).catch(() => [])
+          ]);
+          const lastScanMs = Number(new Date(resolvedVault?.vault?.ecosystem_daily_scan_at || 0).getTime()) || 0;
+          const canDailyScan = !lastScanMs || (Date.now() - lastScanMs) >= 20 * 3600 * 1000;
+          sendJson(res, 200, {
+            ok: true,
+            user: { ...profile, telegram_id: Number(auth.uid), photo_url: profile.photo_url || auth.user.photo_url || '' },
+            stats: { releases: forms?.length || 0, approved: approvedOwn, moderation: moderationOwn, views: 0, listens: ownListens, likes: ownLikes, comments: 0, followers, following, links: userLinks?.length || 0 },
+            latest,
+            popular,
+            recommended: latest.slice(0, 6),
+            news: (news || []).filter((row) => row.published !== false).slice(0, 8),
+            notifications: notifications || [],
+            forms: forms || [],
+            is_admin: auth.is_admin,
+            wallet: resolvedVault?.vault?.ecosystem_wallet || { balance: 150, total_earned: 150, total_spent: 0 },
+            can_daily_scan: canDailyScan,
+            inventory_count: resolvedVault?.vault?.ecosystem_inventory?.length || 0,
+            verification_status: resolvedVault?.vault?.ecosystem_verification?.status || (resolvedVault?.isCeo ? 'verified' : 'not_verified'),
+            site_profile: resolvedVault?.vault?.ecosystem_profile || profile.metadata?.artist_profile || null
+          });
         }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
         return;
       }
@@ -5704,22 +5894,54 @@ function startStaticServer() {
         return;
       }
       if (u.pathname === '/api/miniapp/platform/artist/profile' && req.method === 'POST') {
-        readJsonBody(req).then(async (body) => {
+        readJsonBody(req, 1500000).then(async (body) => {
           const auth = await authorizeMiniApp(req, body);
           if (!auth.ok) { sendJson(res, auth.status, auth); return; }
           const profile = body.profile && typeof body.profile === 'object' ? body.profile : {};
           const displayName = clean(profile.display_name || auth.user.first_name || '').slice(0, 80);
           const bio = clean(profile.bio || '').slice(0, 1000);
-          const avatarUrl = normalizeImageUrl(profile.avatar_url || auth.user.photo_url || '').slice(0, 700);
-          if (avatarUrl && !isHttpUrl(avatarUrl)) { sendJson(res, 400, { ok: false, error: 'avatar_url must be a valid http(s) URL' }); return; }
+          const isAllowedImg = (val) => !val || isHttpUrl(val) || /^data:image\/(png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=]+$/i.test(val);
+          const rawAvatar = clean(profile.avatar_url || auth.user.photo_url || '');
+          const rawBanner = clean(profile.banner_url || '');
+          const avatarUrl = rawAvatar.startsWith('data:image/') ? rawAvatar.slice(0, 650000) : normalizeImageUrl(rawAvatar).slice(0, 700);
+          const bannerUrl = rawBanner.startsWith('data:image/') ? rawBanner.slice(0, 650000) : normalizeImageUrl(rawBanner).slice(0, 700);
+          if (!isAllowedImg(avatarUrl) || !isAllowedImg(bannerUrl)) { sendJson(res, 400, { ok: false, error: 'Недопустимый формат изображения (нужен URL или сжатое фото)' }); return; }
+          const city = clean(profile.city || '').slice(0, 60);
+          const country = clean(profile.country || '').slice(0, 60);
+          const genres = Array.isArray(profile.genres) ? profile.genres.map((x) => clean(x).slice(0, 32)).filter(Boolean).slice(0, 8) : [];
+          const musicRoles = Array.isArray(profile.music_roles) ? profile.music_roles.map((x) => clean(x).slice(0, 32)).filter(Boolean).slice(0, 8) : [];
+          const equippedFrame = clean(profile.equipped_frame || 'default').slice(0, 48);
           const profileRow = { telegram_id: Number(auth.uid), display_name: displayName, bio, avatar_url: avatarUrl, socials: profile.socials && typeof profile.socials === 'object' ? profile.socials : {}, theme: profile.theme && typeof profile.theme === 'object' ? profile.theme : {}, updated_at: new Date().toISOString() };
-          try { await supabaseRequest('cxrner_artist_profiles?on_conflict=telegram_id', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=representation' }, body: [profileRow] }); } catch (error) { console.warn('[PLATFORM] artist profile table unavailable, using Telegram profile metadata:', clean(error?.message || error)); }
+          const fullMeta = { display_name: displayName, bio, avatar_url: avatarUrl, banner_url: bannerUrl, city, country, genres, music_roles: musicRoles, equipped_frame: equippedFrame, socials: profileRow.socials, theme: profileRow.theme };
+          try { await supabaseRequest('cxrner_artist_profiles?on_conflict=telegram_id', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=representation' }, body: [{ ...profileRow, avatar_url: avatarUrl.startsWith('data:') ? '' : avatarUrl }] }); } catch (error) { console.warn('[PLATFORM] artist profile table unavailable, using Telegram profile metadata:', clean(error?.message || error)); }
           try {
             const rows = await supabaseSelectWhere('cxrner_telegram_profiles', 'metadata', [{ key: 'telegram_id', value: auth.uid }], '', 1);
             const metadata = rows?.[0]?.metadata && typeof rows[0].metadata === 'object' ? rows[0].metadata : {};
-            await supabaseRequest(`cxrner_telegram_profiles?telegram_id=eq.${encodeURIComponent(auth.uid)}`, { method: 'PATCH', body: { metadata: { ...metadata, artist_profile: { display_name: displayName, bio, avatar_url: avatarUrl, socials: profileRow.socials, theme: profileRow.theme } }, last_seen_at: new Date().toISOString() } });
+            await supabaseRequest(`cxrner_telegram_profiles?telegram_id=eq.${encodeURIComponent(auth.uid)}`, { method: 'PATCH', body: { metadata: { ...metadata, artist_profile: fullMeta }, last_seen_at: new Date().toISOString() } });
           } catch (error) { console.warn('[PLATFORM] artist metadata fallback failed:', clean(error?.message || error)); }
-          sendJson(res, 200, { ok: true, artist_profile: profileRow });
+          try {
+            const resolved = await resolveMiniAppVault(auth.uid, auth.user);
+            await saveMiniAppVault(resolved, (prev) => ({
+              ...prev,
+              ecosystem_profile: {
+                ...(prev.ecosystem_profile && typeof prev.ecosystem_profile === 'object' ? prev.ecosystem_profile : {}),
+                display_name: displayName || prev.ecosystem_profile?.display_name || auth.user.first_name || 'Artist',
+                bio,
+                avatar_url: avatarUrl || prev.ecosystem_profile?.avatar_url || '',
+                banner_url: bannerUrl || prev.ecosystem_profile?.banner_url || '',
+                city,
+                country,
+                genres,
+                music_roles: musicRoles,
+                equipped_frame: equippedFrame,
+                telegram_id: auth.uid,
+                telegram_username: clean(auth.user.username || ''),
+                telegram_linked: true,
+                updated_at: new Date().toISOString()
+              }
+            }));
+          } catch (error) { console.warn('[PLATFORM] vault profile sync skipped:', clean(error?.message || error)); }
+          sendJson(res, 200, { ok: true, artist_profile: { ...profileRow, ...fullMeta } });
         }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
         return;
       }
@@ -5844,6 +6066,418 @@ function startStaticServer() {
           else result = await supabaseRequest(`${table}?${entity === 'user' ? 'telegram_id' : 'id'}=eq.${encodeURIComponent(id)}`, { method: 'DELETE' });
           await supabaseRequest('cxrner_admin_logs', { method: 'POST', body: [{ admin_id: Number(auth.uid), action, entity, entity_id: id || null, payload: values }] }).catch(() => null);
           sendJson(res, 200, { ok: true, result: result || null });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/notifications/read' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body);
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          const nowIso = new Date().toISOString();
+          await supabaseRequest(`cxrner_notifications?telegram_id=eq.${encodeURIComponent(auth.uid)}&read_at=is.null`, {
+            method: 'PATCH',
+            body: { read_at: nowIso }
+          }).catch(() => {});
+          sendJson(res, 200, { ok: true, read_at: nowIso });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/verification' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body);
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          const stageName = clean(body.stage_name || auth.user.first_name || '').slice(0, 80);
+          const spotifyUrl = clean(body.spotify_url || '').slice(0, 400);
+          const yandexUrl = clean(body.yandex_url || '').slice(0, 400);
+          const vkUrl = clean(body.vk_url || '').slice(0, 400);
+          const appleUrl = clean(body.apple_url || '').slice(0, 400);
+          const notes = clean(body.notes || '').slice(0, 1000);
+          if (!stageName || (!spotifyUrl && !yandexUrl && !vkUrl && !appleUrl)) {
+            sendJson(res, 400, { ok: false, error: 'Укажи сценический псевдоним и минимум 1 ссылку на площадку' });
+            return;
+          }
+          const resolved = await resolveMiniAppVault(auth.uid, auth.user);
+          const nowIso = new Date().toISOString();
+          const verification = {
+            id: crypto.randomUUID(),
+            user_id: resolved.targetUserId,
+            stage_name: stageName,
+            method: 'dsp_profile_review',
+            verification_code: `CXR-${crypto.randomBytes(3).toString('hex').toUpperCase()}`,
+            status: 'pending_review',
+            dsp_links: { spotify: spotifyUrl, yandex: yandexUrl, vk: vkUrl, apple: appleUrl },
+            evidence_notes: notes,
+            contact_telegram: `@${clean(auth.user.username || auth.uid)}`,
+            created_at: nowIso,
+            updated_at: nowIso
+          };
+          await saveMiniAppVault(resolved, (prev) => ({ ...prev, ecosystem_verification: verification }));
+          await supabaseRequest('cxrner_artist_verifications', {
+            method: 'POST',
+            headers: { Prefer: 'return=minimal' },
+            body: [{
+              user_id: resolved.targetUserId,
+              stage_name: stageName,
+              method: 'dsp_profile_review',
+              verification_code: verification.verification_code,
+              status: 'pending_review',
+              dsp_links: verification.dsp_links,
+              evidence_notes: notes,
+              contact_telegram: verification.contact_telegram,
+              created_at: nowIso,
+              updated_at: nowIso
+            }]
+          }).catch(() => {});
+          sendJson(res, 200, { ok: true, verification });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/drop/state' && (req.method === 'GET' || req.method === 'POST')) {
+        const dropReq = req.method === 'POST' ? readJsonBody(req).catch(() => ({})) : Promise.resolve({});
+        dropReq.then(async (body) => {
+          const auth = await authorizeMiniApp(req, body);
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          const resolved = await resolveMiniAppVault(auth.uid, auth.user);
+          const v = resolved.vault;
+          const lastScanMs = Number(new Date(v.ecosystem_daily_scan_at || 0).getTime()) || 0;
+          const cooldownMs = 20 * 3600 * 1000;
+          const canClaimDaily = !lastScanMs || (Date.now() - lastScanMs) >= cooldownMs;
+          let leaderboard = [];
+          if (SUPABASE_SYNC_ENABLED) {
+            const rows = await supabaseSelectAll(SUPABASE_CABINET_TABLE_RAW, 'user_id,profile,updated_at', 'updated_at.desc').catch(() => []);
+            const rankWeights = { common: 10, rare: 30, epic: 85, legendary: 260, mythic: 800, special_reward: 1500 };
+            leaderboard = (rows || []).map((r) => {
+              const p = r?.profile || {};
+              const ep = p.ecosystem_profile || {};
+              const inv = Array.isArray(p.ecosystem_inventory) ? p.ecosystem_inventory : [];
+              const score = inv.reduce((s, it) => s + (rankWeights[it?.rarity] || 10), 0);
+              return {
+                user_id: r.user_id,
+                display_name: ep.display_name || p.display_name || p.username || 'Коллекционер',
+                username: ep.username || p.username || '',
+                items_count: inv.length,
+                score,
+                is_ceo: String(ep.username || '').toLowerCase() === 'kazumaiq'
+              };
+            }).filter((x) => x.items_count > 0 || x.is_ceo).sort((a, b) => b.score - a.score).slice(0, 20);
+          }
+          sendJson(res, 200, {
+            ok: true,
+            wallet: v.ecosystem_wallet,
+            inventory: v.ecosystem_inventory || [],
+            history: (v.ecosystem_drop_history || []).slice(0, 40),
+            cases: DROP_CASES_CONFIG,
+            specimens: DROP_SPECIMENS_CATALOG,
+            leaderboard,
+            daily_scan: {
+              can_claim: canClaimDaily,
+              next_claim_at: lastScanMs ? new Date(lastScanMs + cooldownMs).toISOString() : null,
+              reward_cxp: 35,
+              streak: Number(v.ecosystem_daily_streak || 0)
+            },
+            claimed_promos: v.ecosystem_claimed_promos || []
+          });
+        }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/drop/open' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body);
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          const caseId = clean(body.case_id || 'case_001_archive');
+          const caseCfg = DROP_CASES_CONFIG.find((c) => c.id === caseId);
+          if (!caseCfg) { sendJson(res, 400, { ok: false, error: 'Неизвестный кейс' }); return; }
+          const resolved = await resolveMiniAppVault(auth.uid, auth.user);
+          const currentBal = Number(resolved.vault.ecosystem_wallet?.balance || 0);
+          if (!resolved.isCeo && currentBal < caseCfg.price_cxp) {
+            sendJson(res, 400, { ok: false, error: `Недостаточно CXP. Нужно ${caseCfg.price_cxp} CXP, на балансе ${currentBal} CXP.` });
+            return;
+          }
+          const picked = rollSpecimenForCase(caseCfg);
+          const nowIso = new Date().toISOString();
+          const serial = crypto.randomInt(1, 999);
+          const item = {
+            id: crypto.randomUUID(),
+            user_id: resolved.targetUserId,
+            item_id: picked.item_id,
+            item_name: picked.item_name,
+            specimen_code: picked.specimen_code,
+            specimen_class: picked.specimen_class,
+            collection_name: picked.collection_name,
+            rarity: picked.rarity,
+            serial_number: serial,
+            description: picked.description,
+            model_color: picked.model_color,
+            shape: picked.shape,
+            obtained_via: 'case_open',
+            is_special_reward: Boolean(picked.is_special_reward),
+            claim_code: picked.is_special_reward ? `CXR-${crypto.randomBytes(4).toString('hex').toUpperCase()}` : null,
+            is_pinned: false,
+            created_at: nowIso
+          };
+          const cashback = Math.max(5, Math.round(caseCfg.price_cxp * 0.1));
+          const historyEntry = {
+            id: crypto.randomUUID(),
+            user_id: resolved.targetUserId,
+            case_id: caseCfg.id,
+            case_name: caseCfg.name,
+            item_id: item.item_id,
+            item_name: item.item_name,
+            specimen_code: item.specimen_code,
+            rarity: item.rarity,
+            serial_number: serial,
+            cxp_spent: resolved.isCeo ? 0 : caseCfg.price_cxp,
+            created_at: nowIso
+          };
+          const nextVault = await saveMiniAppVault(resolved, (prev) => {
+            const w = prev.ecosystem_wallet || { user_id: resolved.targetUserId, balance: 150, total_earned: 150, total_spent: 0 };
+            const spent = resolved.isCeo ? 0 : caseCfg.price_cxp;
+            const nextBal = resolved.isCeo ? Math.max(999999, Number(w.balance || 0)) : Math.max(0, Number(w.balance || 0) - spent + cashback);
+            return {
+              ...prev,
+              ecosystem_wallet: {
+                ...w,
+                balance: nextBal,
+                total_earned: Number(w.total_earned || 0) + cashback,
+                total_spent: Number(w.total_spent || 0) + spent,
+                updated_at: nowIso
+              },
+              ecosystem_inventory: [item, ...(Array.isArray(prev.ecosystem_inventory) ? prev.ecosystem_inventory : [])],
+              ecosystem_drop_history: [historyEntry, ...(Array.isArray(prev.ecosystem_drop_history) ? prev.ecosystem_drop_history : [])].slice(0, 100)
+            };
+          });
+          if (SUPABASE_SYNC_ENABLED) {
+            supabaseRequest('cxrner_drop_inventory', {
+              method: 'POST',
+              headers: { Prefer: 'return=minimal' },
+              body: [{ id: item.id, user_id: item.user_id, item_id: item.item_id, item_name: item.item_name, specimen_code: item.specimen_code, specimen_class: item.specimen_class, collection_name: item.collection_name, rarity: item.rarity, serial_number: serial, description: item.description, model_color: item.model_color, obtained_via: 'mini_app', is_special_reward: item.is_special_reward, claim_code: item.claim_code, created_at: nowIso }]
+            }).catch(() => {});
+            supabaseRequest('cxrner_drop_history', {
+              method: 'POST',
+              headers: { Prefer: 'return=minimal' },
+              body: [{ id: historyEntry.id, user_id: historyEntry.user_id, case_id: historyEntry.case_id, case_name: historyEntry.case_name, item_id: historyEntry.item_id, item_name: historyEntry.item_name, specimen_code: historyEntry.specimen_code, rarity: historyEntry.rarity, serial_number: serial, cxp_spent: historyEntry.cxp_spent, is_special_reward: item.is_special_reward, claim_code: item.claim_code, created_at: nowIso }]
+            }).catch(() => {});
+          }
+          sendJson(res, 200, { ok: true, item, cashback, wallet: nextVault.ecosystem_wallet, history_entry: historyEntry });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/drop/action' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body);
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          const action = clean(body.action || '').toLowerCase();
+          const resolved = await resolveMiniAppVault(auth.uid, auth.user);
+          const nowIso = new Date().toISOString();
+          if (action === 'daily_scan') {
+            const lastMs = Number(new Date(resolved.vault.ecosystem_daily_scan_at || 0).getTime()) || 0;
+            const cooldownMs = 20 * 3600 * 1000;
+            if (lastMs && (Date.now() - lastMs) < cooldownMs) {
+              const mins = Math.ceil((cooldownMs - (Date.now() - lastMs)) / 60000);
+              sendJson(res, 400, { ok: false, error: `Следующее сканирование через ${Math.floor(mins / 60)}ч ${mins % 60}м` });
+              return;
+            }
+            const nextStreak = Math.min(7, Number(resolved.vault.ecosystem_daily_streak || 0) + 1);
+            const rewardCxp = 35 + Math.min(35, (nextStreak - 1) * 5);
+            const nextVault = await saveMiniAppVault(resolved, (prev) => {
+              const w = prev.ecosystem_wallet || { user_id: resolved.targetUserId, balance: 150, total_earned: 150, total_spent: 0 };
+              return {
+                ...prev,
+                ecosystem_daily_scan_at: nowIso,
+                ecosystem_daily_streak: nextStreak,
+                ecosystem_wallet: { ...w, balance: Number(w.balance || 0) + rewardCxp, total_earned: Number(w.total_earned || 0) + rewardCxp, updated_at: nowIso }
+              };
+            });
+            sendJson(res, 200, { ok: true, reward_cxp: rewardCxp, streak: nextStreak, wallet: nextVault.ecosystem_wallet });
+            return;
+          }
+          if (action === 'salvage') {
+            const ids = Array.isArray(body.item_ids) ? body.item_ids.map(String) : [clean(body.item_id || '')].filter(Boolean);
+            const inv = resolved.vault.ecosystem_inventory || [];
+            const matched = inv.filter((it) => ids.includes(String(it.id)));
+            if (!matched.length) { sendJson(res, 400, { ok: false, error: 'Предмет не найден на складе' }); return; }
+            const gained = matched.reduce((sum, it) => sum + (DROP_SALVAGE_MAP[it.rarity] || 15), 0);
+            const matchedIds = new Set(matched.map((x) => String(x.id)));
+            const nextVault = await saveMiniAppVault(resolved, (prev) => {
+              const w = prev.ecosystem_wallet || { user_id: resolved.targetUserId, balance: 0, total_earned: 0, total_spent: 0 };
+              return {
+                ...prev,
+                ecosystem_inventory: (prev.ecosystem_inventory || []).filter((it) => !matchedIds.has(String(it.id))),
+                ecosystem_removed_item_ids: [...new Set([...(prev.ecosystem_removed_item_ids || []), ...matchedIds])].slice(-200),
+                ecosystem_wallet: { ...w, balance: Number(w.balance || 0) + gained, total_earned: Number(w.total_earned || 0) + gained, updated_at: nowIso }
+              };
+            });
+            sendJson(res, 200, { ok: true, gained_cxp: gained, salvaged_count: matched.length, wallet: nextVault.ecosystem_wallet, inventory: nextVault.ecosystem_inventory });
+            return;
+          }
+          if (action === 'fuse') {
+            const ids = Array.isArray(body.item_ids) ? [...new Set(body.item_ids.map(String))] : [];
+            const inv = resolved.vault.ecosystem_inventory || [];
+            const matched = inv.filter((it) => ids.includes(String(it.id)));
+            if (matched.length !== 5) { sendJson(res, 400, { ok: false, error: 'Для синтеза выбери ровно 5 предметов одной редкости' }); return; }
+            const baseRarity = matched[0].rarity;
+            const nextRarity = DROP_FUSION_NEXT[baseRarity];
+            if (!nextRarity || !matched.every((it) => it.rarity === baseRarity)) {
+              sendJson(res, 400, { ok: false, error: 'Все 5 предметов должны быть одинаковой редкости (Common -> Legendary)' });
+              return;
+            }
+            const pool = DROP_SPECIMENS_CATALOG.filter((s) => s.rarity === nextRarity);
+            const forgedDef = pool[crypto.randomInt(0, pool.length)] || DROP_SPECIMENS_CATALOG[0];
+            const forgedItem = {
+              id: crypto.randomUUID(),
+              user_id: resolved.targetUserId,
+              item_id: forgedDef.item_id,
+              item_name: forgedDef.item_name,
+              specimen_code: forgedDef.specimen_code,
+              specimen_class: forgedDef.specimen_class,
+              collection_name: forgedDef.collection_name,
+              rarity: forgedDef.rarity,
+              serial_number: crypto.randomInt(1, 500),
+              description: forgedDef.description,
+              model_color: forgedDef.model_color,
+              shape: forgedDef.shape,
+              obtained_via: 'fusion_5to1',
+              is_pinned: false,
+              created_at: nowIso
+            };
+            const matchedSet = new Set(matched.map((x) => String(x.id)));
+            const nextVault = await saveMiniAppVault(resolved, (prev) => ({
+              ...prev,
+              ecosystem_inventory: [forgedItem, ...(prev.ecosystem_inventory || []).filter((it) => !matchedSet.has(String(it.id)))],
+              ecosystem_removed_item_ids: [...new Set([...(prev.ecosystem_removed_item_ids || []), ...matchedSet])].slice(-200)
+            }));
+            sendJson(res, 200, { ok: true, forged: forgedItem, inventory: nextVault.ecosystem_inventory });
+            return;
+          }
+          if (action === 'battle') {
+            const caseCfg = DROP_CASES_CONFIG.find((c) => c.id === clean(body.case_id || 'case_001_archive')) || DROP_CASES_CONFIG[0];
+            const wager = caseCfg.price_cxp;
+            const bal = Number(resolved.vault.ecosystem_wallet?.balance || 0);
+            if (!resolved.isCeo && bal < wager) { sendJson(res, 400, { ok: false, error: `Нужно ${wager} CXP для дуэли` }); return; }
+            const playerRoll = rollSpecimenForCase(caseCfg);
+            const botRoll = rollSpecimenForCase(caseCfg);
+            const scoreMap = { common: 1, rare: 2, epic: 3, legendary: 4, mythic: 5, special_reward: 6 };
+            const pScore = (scoreMap[playerRoll.rarity] || 1) * 100 + crypto.randomInt(1, 90);
+            const bScore = (scoreMap[botRoll.rarity] || 1) * 100 + crypto.randomInt(1, 90);
+            const won = pScore >= bScore;
+            const rewardCxp = won ? Math.round(wager * 0.8) : 0;
+            const wonItems = won ? [playerRoll, botRoll].map((def) => ({
+              id: crypto.randomUUID(),
+              user_id: resolved.targetUserId,
+              item_id: def.item_id,
+              item_name: def.item_name,
+              specimen_code: def.specimen_code,
+              specimen_class: def.specimen_class,
+              collection_name: def.collection_name,
+              rarity: def.rarity,
+              serial_number: crypto.randomInt(1, 999),
+              description: def.description,
+              model_color: def.model_color,
+              shape: def.shape,
+              obtained_via: 'battle_1v1',
+              created_at: nowIso
+            })) : [];
+            const nextVault = await saveMiniAppVault(resolved, (prev) => {
+              const w = prev.ecosystem_wallet || { user_id: resolved.targetUserId, balance: 0, total_earned: 0, total_spent: 0 };
+              const spent = resolved.isCeo ? 0 : wager;
+              const nextBal = resolved.isCeo ? Math.max(999999, Number(w.balance || 0)) : Math.max(0, Number(w.balance || 0) - spent + rewardCxp);
+              return {
+                ...prev,
+                ecosystem_wallet: { ...w, balance: nextBal, total_earned: Number(w.total_earned || 0) + rewardCxp, total_spent: Number(w.total_spent || 0) + spent, updated_at: nowIso },
+                ecosystem_inventory: [...wonItems, ...(prev.ecosystem_inventory || [])]
+              };
+            });
+            sendJson(res, 200, { ok: true, won, player_item: playerRoll, bot_item: botRoll, reward_cxp: rewardCxp, wallet: nextVault.ecosystem_wallet, inventory: nextVault.ecosystem_inventory });
+            return;
+          }
+          if (action === 'pin_item') {
+            const id = clean(body.item_id || '');
+            const nextVault = await saveMiniAppVault(resolved, (prev) => ({
+              ...prev,
+              ecosystem_inventory: (prev.ecosystem_inventory || []).map((it) => String(it.id) === id ? { ...it, is_pinned: !it.is_pinned } : it)
+            }));
+            sendJson(res, 200, { ok: true, inventory: nextVault.ecosystem_inventory });
+            return;
+          }
+          if (action === 'create_gift') {
+            const id = clean(body.item_id || '');
+            const target = (resolved.vault.ecosystem_inventory || []).find((it) => String(it.id) === id);
+            if (!target) { sendJson(res, 404, { ok: false, error: 'Экземпляр не найден на складе' }); return; }
+            const payloadJson = JSON.stringify({
+              id: target.id,
+              item_id: target.item_id,
+              name: target.item_name,
+              specimen_code: target.specimen_code,
+              rarity: target.rarity,
+              serial: target.serial_number || 1,
+              from: resolved.targetUserId,
+              ts: Date.now()
+            });
+            const b64 = Buffer.from(payloadJson, 'utf8').toString('base64url');
+            const sig = signMiniAppGiftPayload(b64);
+            const giftCode = `GIFT-${b64}.${sig}`;
+            const nextVault = await saveMiniAppVault(resolved, (prev) => ({
+              ...prev,
+              ecosystem_inventory: (prev.ecosystem_inventory || []).filter((it) => String(it.id) !== id),
+              ecosystem_removed_item_ids: [...new Set([...(prev.ecosystem_removed_item_ids || []), id])].slice(-200)
+            }));
+            sendJson(res, 200, { ok: true, gift_code: giftCode, gift_url: `https://cxrnermusic.vercel.app/drop?gift=${encodeURIComponent(giftCode)}`, item_name: target.item_name, inventory: nextVault.ecosystem_inventory });
+            return;
+          }
+          if (action === 'claim_code') {
+            const rawCode = clean(body.code || '');
+            const upperCode = rawCode.toUpperCase();
+            if (!rawCode) { sendJson(res, 400, { ok: false, error: 'Введи код' }); return; }
+            if (rawCode.startsWith('GIFT-') && rawCode.includes('.')) {
+              const parts = rawCode.slice(5).split('.');
+              if (parts.length !== 2 || signMiniAppGiftPayload(parts[0]) !== parts[1]) {
+                sendJson(res, 400, { ok: false, error: 'Недействительный или поддельный GIFT-код' });
+                return;
+              }
+              const parsed = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
+              const claimedGifts = new Set(resolved.vault.ecosystem_claimed_gifts || []);
+              if (claimedGifts.has(rawCode)) { sendJson(res, 400, { ok: false, error: 'Этот подарок уже был активирован' }); return; }
+              const def = DROP_SPECIMENS_CATALOG.find((s) => s.item_id === parsed.item_id) || DROP_SPECIMENS_CATALOG[0];
+              const giftedItem = {
+                id: crypto.randomUUID(),
+                user_id: resolved.targetUserId,
+                item_id: def.item_id,
+                item_name: parsed.name || def.item_name,
+                specimen_code: parsed.specimen_code || def.specimen_code,
+                specimen_class: def.specimen_class,
+                collection_name: def.collection_name,
+                rarity: parsed.rarity || def.rarity,
+                serial_number: Number(parsed.serial || 1),
+                description: def.description,
+                model_color: def.model_color,
+                shape: def.shape,
+                obtained_via: 'gift_claim',
+                created_at: nowIso
+              };
+              const nextVault = await saveMiniAppVault(resolved, (prev) => ({
+                ...prev,
+                ecosystem_claimed_gifts: [...(prev.ecosystem_claimed_gifts || []), rawCode].slice(-100),
+                ecosystem_inventory: [giftedItem, ...(prev.ecosystem_inventory || [])]
+              }));
+              sendJson(res, 200, { ok: true, type: 'gift', item: giftedItem, inventory: nextVault.ecosystem_inventory });
+              return;
+            }
+            const promo = DROP_PROMO_CODES[upperCode];
+            if (!promo) { sendJson(res, 400, { ok: false, error: 'Промокод не найден' }); return; }
+            const used = new Set(resolved.vault.ecosystem_claimed_promos || []);
+            if (used.has(upperCode)) { sendJson(res, 400, { ok: false, error: 'Этот промокод уже активирован' }); return; }
+            const nextVault = await saveMiniAppVault(resolved, (prev) => {
+              const w = prev.ecosystem_wallet || { user_id: resolved.targetUserId, balance: 0, total_earned: 0, total_spent: 0 };
+              return {
+                ...prev,
+                ecosystem_claimed_promos: [...used, upperCode],
+                ecosystem_wallet: { ...w, balance: Number(w.balance || 0) + promo.cxp, total_earned: Number(w.total_earned || 0) + promo.cxp, updated_at: nowIso }
+              };
+            });
+            sendJson(res, 200, { ok: true, type: 'promo', cxp: promo.cxp, label: promo.label, wallet: nextVault.ecosystem_wallet });
+            return;
+          }
+          sendJson(res, 400, { ok: false, error: 'Неизвестное действие CXRNER DROP' });
         }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
         return;
       }
