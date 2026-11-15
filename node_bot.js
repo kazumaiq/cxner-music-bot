@@ -321,6 +321,14 @@ const FORM_STATUS = {
   APPROVED: 'approved',
   REJECTED: 'rejected'
 };
+const BOT_BUILD_VERSION = '2026-11-15-unpin-v2';
+const pollingHealth = {
+  ok: null,
+  fail_streak: 0,
+  last_poll_ok_at: null,
+  last_update_at: null,
+  last_error: ''
+};
 const moderationHealth = {
   ok: null,
   checked_at: 0,
@@ -3200,6 +3208,7 @@ async function startTextForm(chatId, uid, user) {
 }
 
 async function handleFormTextMessage(msg) {
+  if (Number(msg?.chat?.id || 0) === Number(MOD_CHAT)) return false;
   const uid = String(msg.from?.id || '');
   const s = getFormSession(uid);
   if (!s) return false;
@@ -3481,6 +3490,7 @@ async function startCoverFlow(chatId, uid, user) {
 }
 
 async function handleCoverMessage(msg) {
+  if (Number(msg?.chat?.id || 0) === Number(MOD_CHAT)) return false;
   const uid = String(msg.from?.id || '');
   const s = getCoverSession(uid);
   if (!s) return false;
@@ -3654,6 +3664,7 @@ async function sendPromoStep(chatId, uid) {
 }
 
 async function handlePromoMessage(msg) {
+  if (Number(msg?.chat?.id || 0) === Number(MOD_CHAT)) return false;
   const uid = String(msg.from?.id || '');
   const s = getPromoSession(uid);
   if (!s) return false;
@@ -4467,12 +4478,55 @@ async function processWebAppData(msg) {
   }
 }
 
-async function canModerate(userId) {
+async function canModerate(userId, msg = null) {
+  if (msg?.sender_chat?.id && Number(msg.sender_chat.id) === Number(MOD_CHAT)) {
+    return true;
+  }
+  if (isAdmin(userId)) {
+    return true;
+  }
   try {
     const m = await tg('getChatMember', { chat_id: MOD_CHAT, user_id: Number(userId) });
     const s = clean(m?.status).toLowerCase();
     return !['left', 'kicked'].includes(s);
   } catch { return false; }
+}
+
+function parseBotCommand(rawText, botUsername = '') {
+  let s = clean(rawText);
+  if (!s) return null;
+  const known = clean(botUsername).replace(/^@/, '').toLowerCase();
+  // Support "@botname /command ..." as well as "/command@botname ..."
+  const leadMention = /^@([A-Za-z0-9_]{3,})\s+([\s\S]+)$/.exec(s);
+  if (leadMention) {
+    const targetBot = leadMention[1].toLowerCase();
+    if (known && targetBot !== known) return null;
+    s = clean(leadMention[2]);
+  }
+  const cmdMatch = /^(\/[A-Za-z0-9_]+)(?:@([A-Za-z0-9_]{3,}))?(?:\s+([\s\S]+))?$/.exec(s);
+  if (!cmdMatch) return null;
+  if (cmdMatch[2] && known && cmdMatch[2].toLowerCase() !== known) return null;
+  return {
+    command: cmdMatch[1].toLowerCase(),
+    arg: clean(cmdMatch[3] || '')
+  };
+}
+
+function replyInChat(msg, text, extra = {}) {
+  const chatId = msg?.chat?.id;
+  const threadId = Number(msg?.message_thread_id || 0);
+  const payload = { ...extra };
+  if (threadId > 0 && payload.message_thread_id === undefined) {
+    payload.message_thread_id = threadId;
+  }
+  return sendText(chatId, text, payload).catch((err) => {
+    const errStr = clean(err?.message || err).toLowerCase();
+    if (payload.reply_to_message_id && (errStr.includes('replied message not found') || errStr.includes('reply_to_message'))) {
+      delete payload.reply_to_message_id;
+      return sendText(chatId, text, payload);
+    }
+    throw err;
+  });
 }
 async function applyModeration(query, action, uid, idx) {
   if (Number(query?.message?.chat?.id || 0) !== Number(MOD_CHAT)) {
@@ -4600,6 +4654,227 @@ async function onMessage(msg) {
   const text = clean(msg.text);
   if (!chatId) return;
 
+  const parsedCmd = parseBotCommand(text, moderationHealth.bot_username);
+  if (parsedCmd && ['/new', '/unpin', '/unpin_done', '/modtest'].includes(parsedCmd.command)) {
+    const cmd = parsedCmd.command;
+    if (cmd === '/new') {
+      if (Number(chatId) !== Number(MOD_CHAT)) {
+        await replyInChat(msg, 'Команда /new работает только в группе модерации.');
+        return;
+      }
+      if (!(await canModerate(msg.from?.id, msg))) {
+        await replyInChat(msg, 'Доступ только участникам группы модерации.');
+        return;
+      }
+      const summary = await runNewModerationSweep(msg.from);
+      if (!summary.total) {
+        await replyInChat(msg, '🆕 Анкет со статусом «На отгрузке» сейчас нет.');
+        return;
+      }
+      await replyInChat(
+        msg,
+        '🆕 <b>/new выполнено</b>\n\n' +
+        `⏳ На отгрузке: <b>${summary.total}</b>\n` +
+        `✅ Отмечено свободными: <b>${summary.marked}</b>\n` +
+        `📝 Обновлено сообщений: <b>${summary.refreshed}</b>\n` +
+        `⚠️ Без moderation_message_id: <b>${summary.missingMessage}</b>`
+      );
+      return;
+    }
+
+    if (cmd === '/unpin') {
+      if (Number(chatId) !== Number(MOD_CHAT)) {
+        await replyInChat(msg, 'Команда /unpin работает только в группе модерации.');
+        return;
+      }
+      if (!(await canModerate(msg.from?.id, msg))) {
+        await replyInChat(msg, 'Доступ только участникам группы модерации.');
+        return;
+      }
+      const targetMsgId = Number(msg.reply_to_message?.message_id || 0);
+      if (!targetMsgId) {
+        await replyInChat(
+          msg,
+          'Ответьте командой <code>/unpin</code> на сообщение, которое нужно открепить, или используйте <code>/unpin_done</code> для массового открепления.',
+          { reply_to_message_id: msg.message_id }
+        );
+        return;
+      }
+      try {
+        const res = await unpinModerationMessage(targetMsgId);
+        if (!res.ok) {
+          const hint = moderationErrorHint(res.error);
+          await replyInChat(
+            msg,
+            `❌ Не удалось открепить сообщение: <code>${esc(res.error)}</code>${hint ? `\n${esc(hint)}` : ''}`,
+            { reply_to_message_id: msg.message_id }
+          );
+          return;
+        }
+        const ref = findReleaseByModerationMessageId(targetMsgId);
+        if (ref?.rel) {
+          ref.rel.moderation_pinned = false;
+          saveDb();
+          syncModerationMirror(ref.uid, ref.idx, ref.rel);
+          saveModDb();
+          await refreshModerationMessage(ref.uid, ref.idx, ref.rel, targetMsgId);
+        }
+        await replyInChat(msg, res.alreadyUnpinned ? 'ℹ️ Сообщение уже откреплено.' : '✅ Сообщение откреплено.', {
+          reply_to_message_id: targetMsgId
+        });
+      } catch (err) {
+        await replyInChat(msg, `❌ Ошибка /unpin: <code>${esc(shortTgError(err))}</code>`, {
+          reply_to_message_id: msg.message_id
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    if (cmd === '/unpin_done') {
+      if (Number(chatId) !== Number(MOD_CHAT)) {
+        await replyInChat(msg, 'Команда /unpin_done работает только в группе модерации.');
+        return;
+      }
+      if (!(await canModerate(msg.from?.id, msg))) {
+        await replyInChat(msg, 'Доступ только участникам группы модерации.');
+        return;
+      }
+      let statusMsg = null;
+      try {
+        statusMsg = await replyInChat(
+          msg,
+          '⏳ Проверяю карточки со статусами «Модерация», «Отклонено», «Принято», «Удалено»...',
+          { reply_to_message_id: msg.message_id }
+        );
+      } catch {}
+
+      try {
+        const targets = new Map();
+        for (const [uKey, listRaw] of Object.entries(db || {})) {
+          const list = Array.isArray(listRaw) ? listRaw : [];
+          for (let i = 0; i < list.length; i += 1) {
+            const r = list[i];
+            const mid = Number(r?.moderation_message_id || 0);
+            if (mid && !shouldStatusStayPinned(r?.status)) {
+              targets.set(mid, { uid: uKey, idx: i, rel: r });
+            }
+          }
+        }
+        if (SUPABASE_SYNC_ENABLED) {
+          try {
+            const rows = await supabaseSelectAll(SUPABASE_FORMS_TABLE, 'id,status,moderation_message_id', 'created_at.desc');
+            for (const row of (rows || [])) {
+              const mid = Number(row?.moderation_message_id || 0);
+              if (!mid) continue;
+              const st = mapFormStatusToReleaseStatus(row?.status || '');
+              if (!shouldStatusStayPinned(st) && !targets.has(mid)) {
+                targets.set(mid, null);
+              }
+            }
+          } catch (e) {
+            console.warn('[MODERATION] /unpin_done supabase fetch warning:', shortTgError(e));
+          }
+        }
+        let unpinned = 0;
+        let already = 0;
+        let failed = 0;
+        let missingRights = false;
+        let dirtyDb = false;
+        for (const [mid, ref] of targets.entries()) {
+          const res = await unpinModerationMessage(mid, { silent: true });
+          if (res.ok) {
+            if (res.alreadyUnpinned) already += 1;
+            else unpinned += 1;
+            if (ref?.rel && ref.rel.moderation_pinned !== false) {
+              ref.rel.moderation_pinned = false;
+              syncModerationMirror(ref.uid, ref.idx, ref.rel);
+              dirtyDb = true;
+            }
+          } else {
+            failed += 1;
+            if (res.missingRights) {
+              missingRights = true;
+              break;
+            }
+          }
+          await delay(35);
+        }
+        if (dirtyDb) {
+          saveDb();
+          saveModDb();
+        }
+        const hint = missingRights
+          ? '\n\n⚠️ Остановлено: у бота нет права администратора «Закрепление сообщений» (can_pin_messages) в группе модерации.'
+          : '';
+        const reportText =
+          `🧹 <b>Очистка закрепов завершена</b>\n\n` +
+          `Проверено карточек: <b>${targets.size}</b>\n` +
+          `📌 Откреплено: <b>${unpinned}</b>\n` +
+          `ℹ️ Уже не закреплено: <b>${already}</b>\n` +
+          `❌ Ошибок: <b>${failed}</b>${hint}`;
+
+        if (statusMsg?.message_id) {
+          await tg('editMessageText', {
+            chat_id: chatId,
+            message_id: statusMsg.message_id,
+            text: reportText,
+            parse_mode: 'HTML',
+            disable_web_page_preview: true
+          }).catch(() => replyInChat(msg, reportText, { reply_to_message_id: msg.message_id }));
+        } else {
+          await replyInChat(msg, reportText, { reply_to_message_id: msg.message_id });
+        }
+      } catch (err) {
+        const errReport = `❌ Ошибка /unpin_done: <code>${esc(shortTgError(err))}</code>`;
+        if (statusMsg?.message_id) {
+          await tg('editMessageText', {
+            chat_id: chatId,
+            message_id: statusMsg.message_id,
+            text: errReport,
+            parse_mode: 'HTML'
+          }).catch(() => replyInChat(msg, errReport, { reply_to_message_id: msg.message_id }).catch(() => {}));
+        } else {
+          await replyInChat(msg, errReport, { reply_to_message_id: msg.message_id }).catch(() => {});
+        }
+      }
+      return;
+    }
+
+    if (cmd === '/modtest') {
+      if (!isAdmin(uid) && !(msg?.sender_chat?.id && Number(msg.sender_chat.id) === Number(MOD_CHAT))) {
+        await replyInChat(msg, '❌ Команда доступна только администраторам.');
+        return;
+      }
+      await ensureModerationHealth(true);
+      try {
+        const probe = await sendModerationText(
+          `🧪 <b>Проверка модерации</b>\n` +
+          `Build: <code>${esc(BOT_BUILD_VERSION)}</code>\n` +
+          `Время: <code>${esc(new Date().toISOString())}</code>\n` +
+          `Проверка отправки из node_bot.js`
+        );
+        await replyInChat(
+          msg,
+          `✅ Отправка в модерацию работает.\n` +
+          `build: <code>${esc(BOT_BUILD_VERSION)}</code>\n` +
+          `message_id: <code>${esc(String(probe?.message_id || '0'))}</code>\n` +
+          `status бота: <b>${esc(moderationHealth.bot_status || '-')}</b>\n` +
+          `права на закреп/откреп: <b>${moderationHealth.can_pin_messages === true ? 'есть' : moderationHealth.can_pin_messages === false ? 'НЕТ (выдайте can_pin_messages)' : 'не определено'}</b>`
+        );
+      } catch (e) {
+        const errText = shortTgError(e);
+        const hint = moderationErrorHint(errText);
+        await replyInChat(
+          msg,
+          `❌ Отправка в модерацию не работает.\n` +
+          `Причина: <code>${esc(errText)}</code>` +
+          (hint ? `\nПодсказка: ${esc(hint)}` : '')
+        );
+      }
+      return;
+    }
+  }
+
   if (await handleModerationReplyMessage(msg)) return;
   if (await handleCoverMessage(msg)) return;
   if (await handlePromoMessage(msg)) return;
@@ -4638,142 +4913,6 @@ async function onMessage(msg) {
   // Active form session for distributing tracks
   if (await handleFormTextMessage(msg)) return;
 
-  if (/^\/new(?:@\w+)?$/i.test(text)) {
-    if (Number(chatId) !== Number(MOD_CHAT)) {
-      await sendText(chatId, 'Команда /new работает только в группе модерации.');
-      return;
-    }
-    if (!(await canModerate(msg.from?.id))) {
-      await sendText(chatId, 'Доступ только участникам группы модерации.');
-      return;
-    }
-    const summary = await runNewModerationSweep(msg.from);
-    if (!summary.total) {
-      await sendText(chatId, '🆕 Анкет со статусом «На отгрузке» сейчас нет.');
-      return;
-    }
-    await sendText(
-      chatId,
-      '🆕 <b>/new выполнено</b>\n\n' +
-      `⏳ На отгрузке: <b>${summary.total}</b>\n` +
-      `✅ Отмечено свободными: <b>${summary.marked}</b>\n` +
-      `📝 Обновлено сообщений: <b>${summary.refreshed}</b>\n` +
-      `⚠️ Без moderation_message_id: <b>${summary.missingMessage}</b>`
-    );
-    return;
-  }
-
-  if (/^\/unpin(?:@\w+)?$/i.test(text)) {
-    if (Number(chatId) !== Number(MOD_CHAT)) {
-      await sendText(chatId, 'Команда /unpin работает только в группе модерации.');
-      return;
-    }
-    if (!(await canModerate(msg.from?.id))) {
-      await sendText(chatId, 'Доступ только участникам группы модерации.');
-      return;
-    }
-    const targetMsgId = Number(msg.reply_to_message?.message_id || 0);
-    if (!targetMsgId) {
-      await sendText(chatId, 'Ответьте командой <code>/unpin</code> на сообщение, которое нужно открепить, или используйте <code>/unpin_done</code> для массового открепления.');
-      return;
-    }
-    const res = await unpinModerationMessage(targetMsgId);
-    if (!res.ok) {
-      const hint = moderationErrorHint(res.error);
-      await sendText(chatId, `❌ Не удалось открепить сообщение: <code>${esc(res.error)}</code>${hint ? `\n${esc(hint)}` : ''}`);
-      return;
-    }
-    const ref = findReleaseByModerationMessageId(targetMsgId);
-    if (ref?.rel) {
-      ref.rel.moderation_pinned = false;
-      saveDb();
-      syncModerationMirror(ref.uid, ref.idx, ref.rel);
-      saveModDb();
-      await refreshModerationMessage(ref.uid, ref.idx, ref.rel, targetMsgId);
-    }
-    await sendText(chatId, res.alreadyUnpinned ? 'ℹ️ Сообщение уже откреплено.' : '✅ Сообщение откреплено.', {
-      reply_to_message_id: targetMsgId
-    });
-    return;
-  }
-
-  if (/^\/unpin_done(?:@\w+)?$/i.test(text)) {
-    if (Number(chatId) !== Number(MOD_CHAT)) {
-      await sendText(chatId, 'Команда /unpin_done работает только в группе модерации.');
-      return;
-    }
-    if (!(await canModerate(msg.from?.id))) {
-      await sendText(chatId, 'Доступ только участникам группы модерации.');
-      return;
-    }
-    const targets = new Map();
-    for (const [uKey, listRaw] of Object.entries(db || {})) {
-      const list = Array.isArray(listRaw) ? listRaw : [];
-      for (let i = 0; i < list.length; i += 1) {
-        const r = list[i];
-        const mid = Number(r?.moderation_message_id || 0);
-        if (mid && !shouldStatusStayPinned(r?.status)) {
-          targets.set(mid, { uid: uKey, idx: i, rel: r });
-        }
-      }
-    }
-    if (SUPABASE_SYNC_ENABLED) {
-      try {
-        const rows = await supabaseSelectAll(SUPABASE_FORMS_TABLE, 'id,status,moderation_message_id', 'created_at.desc');
-        for (const row of (rows || [])) {
-          const mid = Number(row?.moderation_message_id || 0);
-          if (!mid) continue;
-          const st = mapFormStatusToReleaseStatus(row?.status || '');
-          if (!shouldStatusStayPinned(st) && !targets.has(mid)) {
-            targets.set(mid, null);
-          }
-        }
-      } catch (e) {
-        console.warn('[MODERATION] /unpin_done supabase fetch warning:', shortTgError(e));
-      }
-    }
-    let unpinned = 0;
-    let already = 0;
-    let failed = 0;
-    let missingRights = false;
-    let dirtyDb = false;
-    for (const [mid, ref] of targets.entries()) {
-      const res = await unpinModerationMessage(mid, { silent: true });
-      if (res.ok) {
-        if (res.alreadyUnpinned) already += 1;
-        else unpinned += 1;
-        if (ref?.rel && ref.rel.moderation_pinned !== false) {
-          ref.rel.moderation_pinned = false;
-          syncModerationMirror(ref.uid, ref.idx, ref.rel);
-          dirtyDb = true;
-        }
-      } else {
-        failed += 1;
-        if (res.missingRights) {
-          missingRights = true;
-          break;
-        }
-      }
-      await delay(35);
-    }
-    if (dirtyDb) {
-      saveDb();
-      saveModDb();
-    }
-    const hint = missingRights
-      ? '\n\n⚠️ Остановлено: у бота нет права администратора «Закрепление сообщений» (can_pin_messages) в группе модерации.'
-      : '';
-    await sendText(
-      chatId,
-      `🧹 <b>Очистка закрепов завершена</b>\n\n` +
-      `Проверено карточек: <b>${targets.size}</b>\n` +
-      `📌 Откреплено: <b>${unpinned}</b>\n` +
-      `ℹ️ Уже не закреплено: <b>${already}</b>\n` +
-      `❌ Ошибок: <b>${failed}</b>${hint}`
-    );
-    return;
-  }
-
   if (isAdmin(uid) && hasBroadcastSession(uid)) {
     if (text === '/cancel') {
       setBroadcastSession(uid, false);
@@ -4804,37 +4943,6 @@ async function onMessage(msg) {
       return;
     }
     await sendAdminPanel(chatId);
-    return;
-  }
-  if (/^\/modtest(?:@\w+)?$/i.test(text)) {
-    if (!isAdmin(uid)) {
-      await sendText(chatId, '❌ Команда доступна только администраторам.');
-      return;
-    }
-    await ensureModerationHealth(true);
-    try {
-      const probe = await sendModerationText(
-        `🧪 <b>Проверка модерации</b>\n` +
-        `Время: <code>${esc(new Date().toISOString())}</code>\n` +
-        `Проверка отправки из node_bot.js`
-      );
-      await sendText(
-        chatId,
-        `✅ Отправка в модерацию работает.\n` +
-        `message_id: <code>${esc(String(probe?.message_id || '0'))}</code>\n` +
-        `status бота: <b>${esc(moderationHealth.bot_status || '-')}</b>\n` +
-        `права на закреп/откреп: <b>${moderationHealth.can_pin_messages === true ? 'есть' : moderationHealth.can_pin_messages === false ? 'НЕТ (выдайте can_pin_messages)' : 'не определено'}</b>`
-      );
-    } catch (e) {
-      const errText = shortTgError(e);
-      const hint = moderationErrorHint(errText);
-      await sendText(
-        chatId,
-        `❌ Отправка в модерацию не работает.\n` +
-        `Причина: <code>${esc(errText)}</code>` +
-        (hint ? `\nПодсказка: ${esc(hint)}` : '')
-      );
-    }
     return;
   }
   if (/^\/statss(?:@\w+)?$/i.test(text) || /^\/stats(?:@\w+)?$/i.test(text)) {
@@ -5565,6 +5673,7 @@ function startStaticServer() {
     return {
       ok: true,
       service: 'cxrner-music-bot',
+      build_version: BOT_BUILD_VERSION,
       now: new Date().toISOString(),
       request: {
         host: clean(req.headers?.host || ''),
@@ -5588,6 +5697,17 @@ function startStaticServer() {
         supabase_host: supabaseHost || null,
         supabase_features: { ...supabaseFeatureState }
       },
+      moderation_health: {
+        ok: moderationHealth.ok,
+        chat_title: moderationHealth.chat_title || null,
+        bot_username: moderationHealth.bot_username || null,
+        bot_status: moderationHealth.bot_status || null,
+        can_send_messages: moderationHealth.can_send_messages,
+        can_pin_messages: moderationHealth.can_pin_messages,
+        reason: moderationHealth.reason || null,
+        checked_at: moderationHealth.checked_at || 0
+      },
+      polling: { ...pollingHealth },
       dns: dnsChecks,
       admin_ids_count: ADMIN_IDS.length
     };
@@ -7084,6 +7204,7 @@ function startStaticServer() {
         sendJson(res, 200, {
           ok: true,
           service: 'cxrner-music-bot',
+          build_version: BOT_BUILD_VERSION,
           webapp: true,
           port: WEB_PORT,
           now: new Date().toISOString()
@@ -7227,12 +7348,17 @@ async function loop() {
   while (!stopping) {
     try {
       const updates = await tg('getUpdates', { timeout: 50, offset, allowed_updates: ['message', 'callback_query'] });
+      pollingHealth.ok = true;
+      pollingHealth.fail_streak = 0;
+      pollingHealth.last_poll_ok_at = new Date().toISOString();
+      pollingHealth.last_error = '';
       if (pollingFailStreak > 0) {
         console.info(`[bot] polling recovered after ${pollingFailStreak} errors`);
         pollingFailStreak = 0;
       }
       for (const u of updates) {
         offset = Number(u.update_id) + 1;
+        pollingHealth.last_update_at = new Date().toISOString();
         try {
           if (u.message) await onMessage(u.message);
           else if (u.callback_query) await onCallback(u.callback_query);
@@ -7243,6 +7369,9 @@ async function loop() {
     } catch (e) {
       pollingFailStreak += 1;
       const errText = clean(e?.message || e) || 'unknown error';
+      pollingHealth.ok = false;
+      pollingHealth.fail_streak = pollingFailStreak;
+      pollingHealth.last_error = errText;
       console.error(`[bot] polling error #${pollingFailStreak}: ${errText}`);
       if (pollingFailStreak === 1 || pollingFailStreak % 10 === 0) {
         try {
@@ -7274,7 +7403,7 @@ async function loop() {
   if (SUPABASE_SYNC_ENABLED) {
     await syncSupabaseNow('startup');
   }
-  console.info('[bot] CXRNER Node fallback bot started');
+  console.info(`[bot] CXRNER Node fallback bot started build=${BOT_BUILD_VERSION}`);
   console.info(`[bot] moderation chat: ${MOD_CHAT}`);
   console.info(`[bot] admin ids: ${ADMIN_IDS.join(', ')}`);
   if (imported.added || imported.merged) {
@@ -7301,6 +7430,17 @@ async function loop() {
   console.info(`[bot] moderation thread: ${MODERATION_THREAD_ID > 0 ? MODERATION_THREAD_ID : 'default'}`);
   if (WEBAPP_URL) console.info(`[bot] webapp url: ${WEBAPP_URL}`);
   await verifyModerationChatAccess();
+  try {
+    await tg('setMyCommands', {
+      commands: [
+        { command: 'unpin_done', description: 'Открепить все карточки со статусом Модерация/Отклонено/Принято' },
+        { command: 'unpin', description: 'Открепить сообщение (ответом на карточку)' },
+        { command: 'new', description: 'Пометить анкеты «На отгрузке» свободными' },
+        { command: 'modtest', description: 'Проверить права бота в группе модерации' }
+      ],
+      scope: { type: 'chat', chat_id: MOD_CHAT }
+    });
+  } catch {}
   try { await tg('deleteWebhook', { drop_pending_updates: false }); } catch {}
   process.on('SIGINT', () => { stopping = true; process.exit(0); });
   process.on('SIGTERM', () => { stopping = true; process.exit(0); });
