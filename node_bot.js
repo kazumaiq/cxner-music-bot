@@ -322,8 +322,8 @@ const FORM_STATUS = {
   APPROVED: 'approved',
   REJECTED: 'rejected'
 };
-const BOT_BUILD_VERSION = '2026-11-15-ui-v7';
-const BOT_BUILD_RELEASE_NOTE = 'цветные кнопки Bot API 9.4, автозакрепление анкет (сайт/бот/Mini App), 2-кол. карточки, пресеты, /queue, /find, фикс 429 и топиков';
+const BOT_BUILD_VERSION = '2026-11-16-ui-v8';
+const BOT_BUILD_RELEASE_NOTE = 'Mini App 4.0 (Liquid Glass, 60 FPS DROP roulette, Путь чемпиона / друзья, Admin Control Center), автозакрепление и кэш-синхронизация';
 const BOT_STARTED_AT_MS = Date.now();
 const BOT_STARTED_AT = new Date(BOT_STARTED_AT_MS).toISOString();
 
@@ -6043,7 +6043,15 @@ async function onMessage(msg) {
 
   if (text === '/start' || text.startsWith('/start ')) {
     resetAllSessions(uid);
-    await sendText(chatId, welcomeText(), { reply_markup: keyboardMain() });
+    let refNote = '';
+    const refMatch = /^\/start(?:@\w+)?\s+ref[_-]?(\d{4,20})\b/i.exec(trimmedText);
+    if (refMatch && refMatch[1] !== uid) {
+      const refRes = await processReferralSignup(refMatch[1], uid, msg.from).catch(() => null);
+      if (refRes?.recorded) {
+        refNote = '\n\n🎁 <b>Бонус приглашения:</b> +50 CXP зачислено на твой баланс CXRNER DROP!';
+      }
+    }
+    await sendText(chatId, `${welcomeText()}${refNote}`, { reply_markup: keyboardMain() });
     return;
   }
   if (/^\/admin(?:@\w+)?$/i.test(text)) {
@@ -6622,6 +6630,583 @@ async function onCallback(query) {
   }
 }
 
+const DROP_CASES_CONFIG = [
+  {
+    id: 'case_001_archive',
+    name: 'CASE 001 — ARCHIVE',
+    subtitle: 'SPECIMEN ARCHIVE BASE',
+    description: 'Базовые коллекционные артефакты лейбла, цифровые ключи, визор-маски и шанс на ваучер обложки.',
+    price_cxp: 50,
+    accent: '#00F0FF',
+    drop_rates: { common: 55, rare: 25, epic: 13, legendary: 5.5, mythic: 1.4, special_reward: 0.1 }
+  },
+  {
+    id: 'case_002_black_specimen',
+    name: 'CASE 002 — BLACK SPECIMEN',
+    subtitle: 'ORGANIC FORMS & MASKS',
+    description: 'Редкая серия тёмного металла, органических сердец, глаз наблюдателя и эксклюзивных артефактов.',
+    price_cxp: 75,
+    accent: '#A855F7',
+    drop_rates: { common: 0, rare: 50, epic: 32, legendary: 14, mythic: 3.8, special_reward: 0.2 }
+  },
+  {
+    id: 'case_003_chrome_age',
+    name: 'CASE 003 — CHROME AGE',
+    subtitle: 'LIQUID CHROME & SPIKES',
+    description: 'Ультрапремиальная линейка жидкого хрома: Chrome Spike, Void Crown, Chrome Fang Black/White и реликвии.',
+    price_cxp: 100,
+    accent: '#F59E0B',
+    drop_rates: { common: 0, rare: 35, epic: 40, legendary: 20, mythic: 4.7, special_reward: 0.3 }
+  }
+];
+const DROP_SPECIMENS_CATALOG = [
+  { item_id: 'specimen_cyber_vinyl_01', item_name: 'CYBER VINYL GENESIS', specimen_code: 'VN-001', specimen_class: 'MEDIA', collection_name: 'GENESIS ARCHIVE', rarity: 'common', model_color: '#A855F7', shape: 'cylinder', description: 'Первый серийный винил с лазерной гравировкой CXRNER-001.' },
+  { item_id: 'specimen_data_key_03', item_name: 'DATA KEY', specimen_code: 'DK-003', specimen_class: 'OBJECT', collection_name: 'SPECIMEN ARCHIVE', rarity: 'common', model_color: '#94A3B8', shape: 'box', description: 'Металлический цифровой ключ доступа к мастер-трекам.' },
+  { item_id: 'specimen_basic_specimen_04', item_name: 'BASIC SPECIMEN', specimen_code: 'BS-004', specimen_class: 'OBJECT', collection_name: 'SPECIMEN ARCHIVE', rarity: 'common', model_color: '#64748B', shape: 'cylinder', description: 'Запечатанная полимерная капсула архива.' },
+  { item_id: 'specimen_chrome_tag_05', item_name: 'CHROME TAG', specimen_code: 'TG-005', specimen_class: 'OBJECT', collection_name: 'CHROME AGE', rarity: 'common', model_color: '#CBD5E1', shape: 'box', description: 'Металлическая маркировочная бирка серии CXRNER.' },
+  { item_id: 'specimen_archive_cassette_02', item_name: 'ARCHIVE CASSETTE', specimen_code: 'CA-037', specimen_class: 'MEDIA', collection_name: 'GENESIS ARCHIVE', rarity: 'rare', model_color: '#00F0FF', shape: 'box', description: 'Коллекционная аудиокассета CXRNER ARCHIVE в вакуумной капсуле.' },
+  { item_id: 'specimen_chrome_disc_06', item_name: 'CHROME DISC', specimen_code: 'CD-001', specimen_class: 'MEDIA', collection_name: 'CHROME AGE', rarity: 'rare', model_color: '#38BDF8', shape: 'cylinder', description: 'Хромированный CD-диск с радужной голографической дифракцией.' },
+  { item_id: 'specimen_chrome_spike_16', item_name: 'CHROME SPIKE', specimen_code: 'CR-017', specimen_class: 'OBJECT', collection_name: 'CHROME AGE', rarity: 'rare', model_color: '#E2E8F0', shape: 'octahedron', description: 'Многогранный шип из жидкого хрома с титановым напылением.' },
+  { item_id: 'specimen_violet_visor_13', item_name: 'VIOLET VISOR', specimen_code: 'VG-005', specimen_class: 'ACCESSORY', collection_name: 'SPECIMEN ARCHIVE', rarity: 'epic', model_color: '#C084FC', shape: 'box', description: 'Футуристическая маска-визор саунд-дизайнера со спектральным HUD.' },
+  { item_id: 'specimen_black_heart_12', item_name: 'BLACK HEART', specimen_code: 'HR-009', specimen_class: 'ORGANIC', collection_name: 'BLACK SPECIMEN', rarity: 'epic', model_color: '#A855F7', shape: 'octahedron', description: 'Зеркально-чёрное механическое сердце с суб-басовым импульсом.' },
+  { item_id: 'specimen_watcher_eye_11', item_name: 'WATCHER EYE', specimen_code: 'EY-004', specimen_class: 'ORGANIC', collection_name: 'BLACK SPECIMEN', rarity: 'legendary', model_color: '#F59E0B', shape: 'dodecahedron', description: 'Биомеханическое око в венце шипов, сканирующее звуковую сцену.' },
+  { item_id: 'specimen_void_crown_17', item_name: 'VOID CROWN', specimen_code: 'CR-003', specimen_class: 'ACCESSORY', collection_name: 'BLACK SPECIMEN', rarity: 'legendary', model_color: '#FCD34D', shape: 'torus', description: 'Готическая корона из застывшего жидкого хрома правителя сцены.' },
+  { item_id: 'specimen_chrome_fang_19', item_name: 'CHROME FANG BLACK', specimen_code: 'C1/S-B', specimen_class: 'ARTIFACT', collection_name: 'CHROME AGE', rarity: 'legendary', model_color: '#FBBF24', shape: 'dodecahedron', description: 'Чёрная металлическая челюсть хищника с зеркальными клыками.' },
+  { item_id: 'specimen_white_fang_20', item_name: 'WHITE FANG SPECIMEN', specimen_code: 'C1/S-W', specimen_class: 'ARTIFACT', collection_name: 'CHROME AGE', rarity: 'legendary', model_color: '#FFFFFF', shape: 'dodecahedron', description: 'Редкая матово-белая мутация клыков хищника C1/S.' },
+  { item_id: 'specimen_cxrner_original_24', item_name: 'CHROMATIC FANG // CXRNER ORIGINAL', specimen_code: 'GLITCH-01', specimen_class: 'ARTIFACT', collection_name: 'FOUNDERS EDITION', rarity: 'mythic', model_color: '#F43F5E', shape: 'icosahedron', description: 'Сверхредкий хроматический глитч-артефакт основания CXRNER MUSIC.' },
+  { item_id: 'specimen_cover_voucher_25', item_name: 'CXRNER COVER VOUCHER', specimen_code: 'CV-2026', specimen_class: 'REWARD', collection_name: 'SPECIAL REWARDS', rarity: 'special_reward', model_color: '#F59E0B', shape: 'box', is_special_reward: true, description: 'Бесплатная обложка для релиза от @kazumaiq.' },
+  { item_id: 'specimen_fasttrack_pitch_26', item_name: 'FAST-TRACK PITCHING VOUCHER', specimen_code: 'FP-2026', specimen_class: 'REWARD', collection_name: 'SPECIAL REWARDS', rarity: 'special_reward', model_color: '#00F0FF', shape: 'box', is_special_reward: true, description: 'Приоритетная модерация 24ч и питчинг плейлистам CXRNER.' },
+  { item_id: 'specimen_royalty_boost_27', item_name: 'ROYALTY BOOST 85/15', specimen_code: 'RB-2026', specimen_class: 'REWARD', collection_name: 'SPECIAL REWARDS', rarity: 'special_reward', model_color: '#A855F7', shape: 'box', is_special_reward: true, description: 'Апгрейд ставки роялти 85% артисту на следующий релиз.' },
+  { item_id: 'specimen_label_promo_28', item_name: 'LABEL PROMO SPOT', specimen_code: 'LP-2026', specimen_class: 'REWARD', collection_name: 'SPECIAL REWARDS', rarity: 'special_reward', model_color: '#F43F5E', shape: 'box', is_special_reward: true, description: 'Персональный анонс и закреп в витрине CXRNER MUSIC.' }
+];
+const DROP_SALVAGE_MAP = { common: 15, rare: 30, epic: 55, legendary: 120, mythic: 250, special_reward: 500 };
+const DROP_FUSION_NEXT = { common: 'rare', rare: 'epic', epic: 'legendary', legendary: 'mythic' };
+const DROP_PROMO_CODES = {
+  CXRNER2026: { cxp: 120, label: 'CXRNER 2026 Bonus' },
+  DROP100: { cxp: 100, label: 'Drop Boost +100 CXP' },
+  KAZUMACEO: { cxp: 150, label: 'CEO Patron Gift' },
+  WELCOME50: { cxp: 50, label: 'Welcome Supply' }
+};
+const CHAMPION_MILESTONES = [
+  { step: 1, required: 1, title: '1 друг', subtitle: '+75 CXP на баланс', reward_type: 'cxp', reward_cxp: 75 },
+  { step: 2, required: 2, title: '2 друга', subtitle: '+125 CXP на баланс', reward_type: 'cxp', reward_cxp: 125 },
+  { step: 3, required: 3, title: '3 друга', subtitle: 'Набор ARCHIVE + 50 CXP', reward_type: 'pack', reward_cxp: 50, case_id: 'case_001_archive', packs_count: 1 },
+  { step: 4, required: 4, title: '4 друга', subtitle: '+200 CXP на баланс', reward_type: 'cxp', reward_cxp: 200 },
+  { step: 5, required: 5, title: '5 друзей', subtitle: '2× BLACK SPECIMEN', reward_type: 'pack', reward_cxp: 0, case_id: 'case_002_black_specimen', packs_count: 2 }
+];
+const GIFT_HMAC_SECRET = envStr('DROP_GIFT_SECRET', envStr('SUPABASE_SERVICE_ROLE_KEY', envStr('ADMIN_PASSWORD', 'cxrner_drop_gift_hmac_2026')));
+const localDropVaultCache = new Map();
+const lastAuthSyncAt = new Map();
+const cabinetRowsCache = { rows: [], fetchedAt: 0, promise: null };
+const recentGlobalDropsCache = [];
+
+function deterministicTgUuid(uid) {
+  const hash = crypto.createHash('sha256').update(`cxrner:tg:${clean(uid)}`).digest('hex');
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+}
+function signMiniAppGiftPayload(b64Data) {
+  return crypto.createHmac('sha256', GIFT_HMAC_SECRET).update(b64Data).digest('base64url').slice(0, 16);
+}
+function rollSpecimenForCase(caseCfg) {
+  const rates = caseCfg.drop_rates || {};
+  const entries = Object.entries(rates).filter(([, w]) => Number(w) > 0);
+  const total = entries.reduce((sum, [, w]) => sum + Number(w), 0);
+  let roll = (crypto.randomBytes(4).readUInt32BE(0) / 0x100000000) * total;
+  let rarity = entries[0]?.[0] || 'common';
+  for (const [r, w] of entries) {
+    roll -= Number(w);
+    if (roll <= 0) { rarity = r; break; }
+  }
+  const pool = DROP_SPECIMENS_CATALOG.filter((s) => s.rarity === rarity);
+  const pick = pool[crypto.randomInt(0, pool.length)] || DROP_SPECIMENS_CATALOG[0];
+  return pick;
+}
+async function getCabinetRowsCached(force = false) {
+  if (!SUPABASE_SYNC_ENABLED) return [];
+  const now = Date.now();
+  if (!force && cabinetRowsCache.rows.length && (now - cabinetRowsCache.fetchedAt) < 15000) {
+    return cabinetRowsCache.rows;
+  }
+  if (cabinetRowsCache.promise) return cabinetRowsCache.promise;
+  cabinetRowsCache.promise = supabaseSelectAll(SUPABASE_CABINET_TABLE_RAW, 'user_id,profile,updated_at', 'updated_at.desc')
+    .then((rows) => {
+      cabinetRowsCache.rows = Array.isArray(rows) ? rows : [];
+      cabinetRowsCache.fetchedAt = Date.now();
+      return cabinetRowsCache.rows;
+    })
+    .catch(() => cabinetRowsCache.rows || [])
+    .finally(() => { cabinetRowsCache.promise = null; });
+  return cabinetRowsCache.promise;
+}
+function recordGlobalDropFeedEntry(entry) {
+  if (!entry || !entry.item_name) return;
+  recentGlobalDropsCache.unshift(entry);
+  if (recentGlobalDropsCache.length > 30) recentGlobalDropsCache.length = 30;
+}
+function buildGlobalDropFeed(rows = [], limit = 14) {
+  const combined = [...recentGlobalDropsCache];
+  for (const r of rows || []) {
+    const p = r?.profile || {};
+    const ep = p.ecosystem_profile || {};
+    const displayName = clean(ep.display_name || p.display_name || ep.username || p.username || 'Артист');
+    const username = clean(ep.username || p.username || '');
+    const hist = Array.isArray(p.ecosystem_drop_history) ? p.ecosystem_drop_history.slice(0, 3) : [];
+    for (const h of hist) {
+      if (!h?.item_name) continue;
+      combined.push({
+        id: clean(h.id || `${r.user_id}-${h.created_at}`),
+        display_name: displayName,
+        username,
+        item_name: h.item_name,
+        specimen_code: h.specimen_code || '',
+        rarity: h.rarity || 'common',
+        created_at: h.created_at || r.updated_at || new Date().toISOString()
+      });
+    }
+  }
+  const seen = new Set();
+  const deduped = [];
+  combined.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+  for (const item of combined) {
+    const k = `${item.id}:${item.item_name}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    deduped.push(item);
+    if (deduped.length >= limit) break;
+  }
+  return deduped;
+}
+async function resolveMiniAppVault(uid, tgUser = {}) {
+  const cleanUid = clean(uid);
+  const uname = clean(tgUser?.username || '').replace(/^@/, '').toLowerCase();
+  const isCeo = uname === 'kazumaiq' || isAdmin(cleanUid);
+  const fallbackUuid = deterministicTgUuid(cleanUid);
+  let targetUserId = fallbackUuid;
+  let vault = localDropVaultCache.get(cleanUid) || null;
+  if (!vault && SUPABASE_SYNC_ENABLED) {
+    try {
+      const rows = await getCabinetRowsCached(false);
+      const matched = (rows || []).find((row) => {
+        const p = row?.profile && typeof row.profile === 'object' ? row.profile : {};
+        const ep = p.ecosystem_profile && typeof p.ecosystem_profile === 'object' ? p.ecosystem_profile : {};
+        const pTg = clean(p.telegram_id || ep.telegram_id || '');
+        const pUser = clean(ep.username || ep.telegram_username || p.username || '').replace(/^@/, '').toLowerCase();
+        return row.user_id === fallbackUuid || row.user_id === `tg_${cleanUid}` || (pTg && pTg === cleanUid) || (uname && pUser === uname);
+      });
+      if (matched) {
+        targetUserId = matched.user_id;
+        vault = matched.profile && typeof matched.profile === 'object' ? { ...matched.profile } : {};
+      } else {
+        vault = vault || {};
+      }
+    } catch (err) {
+      console.warn('[DROP_VAULT] resolve failed:', clean(err?.message || err));
+    }
+  }
+  vault = vault && typeof vault === 'object' ? { ...vault } : {};
+  const nowIso = new Date().toISOString();
+  const defaultBalance = isCeo ? 999999 : 150;
+  const baseWallet = vault.ecosystem_wallet && typeof vault.ecosystem_wallet === 'object'
+    ? { ...vault.ecosystem_wallet }
+    : { user_id: targetUserId, balance: defaultBalance, total_earned: defaultBalance, total_spent: 0, updated_at: nowIso };
+  if (isCeo && Number(baseWallet.balance || 0) < 999999) {
+    baseWallet.balance = 999999;
+    baseWallet.total_earned = Math.max(Number(baseWallet.total_earned || 0), 999999);
+  }
+  const removedSet = new Set(Array.isArray(vault.ecosystem_removed_item_ids) ? vault.ecosystem_removed_item_ids : []);
+  let inventory = Array.isArray(vault.ecosystem_inventory) ? vault.ecosystem_inventory.filter((x) => x && !removedSet.has(x.id)) : [];
+  const history = Array.isArray(vault.ecosystem_drop_history) ? vault.ecosystem_drop_history : [];
+  if (isCeo && !inventory.length) {
+    inventory = [
+      { id: 'ceo_glitch_01', user_id: targetUserId, item_id: 'specimen_cxrner_original_24', item_name: 'CHROMATIC FANG // CXRNER ORIGINAL', specimen_code: 'GLITCH-01', specimen_class: 'ARTIFACT', collection_name: 'FOUNDERS EDITION', rarity: 'mythic', serial_number: 1, description: 'Именной Founders-артефакт CEO CXRNER MUSIC.', model_color: '#F43F5E', shape: 'icosahedron', obtained_via: 'ceo_sovereign', is_pinned: true, created_at: nowIso },
+      { id: 'ceo_crown_01', user_id: targetUserId, item_id: 'specimen_void_crown_17', item_name: 'VOID CROWN', specimen_code: 'CR-003', specimen_class: 'ACCESSORY', collection_name: 'BLACK SPECIMEN', rarity: 'legendary', serial_number: 1, description: 'Корона основателя CXRNER MUSIC.', model_color: '#FCD34D', shape: 'torus', obtained_via: 'ceo_sovereign', is_pinned: true, created_at: nowIso }
+    ];
+  }
+  vault.telegram_id = cleanUid;
+  vault.ecosystem_wallet = baseWallet;
+  vault.ecosystem_inventory = inventory;
+  vault.ecosystem_drop_history = history;
+  localDropVaultCache.set(cleanUid, vault);
+  return { targetUserId, isCeo, vault, uid: cleanUid };
+}
+async function saveMiniAppVault(resolved, updater) {
+  const nextVault = updater({ ...resolved.vault });
+  const nowIso = new Date().toISOString();
+  nextVault.telegram_id = resolved.uid;
+  nextVault.updated_at = nowIso;
+  localDropVaultCache.set(resolved.uid, nextVault);
+  if (cabinetRowsCache.rows.length) {
+    const idx = cabinetRowsCache.rows.findIndex((r) => r.user_id === resolved.targetUserId);
+    const updatedRow = { user_id: resolved.targetUserId, profile: nextVault, updated_at: nowIso };
+    if (idx >= 0) cabinetRowsCache.rows[idx] = updatedRow;
+    else cabinetRowsCache.rows.unshift(updatedRow);
+  }
+  if (SUPABASE_SYNC_ENABLED) {
+    try {
+      await supabaseRequest(`${SUPABASE_CABINET_TABLE_RAW}?on_conflict=user_id`, {
+        method: 'POST',
+        headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+        body: [{ user_id: resolved.targetUserId, profile: nextVault, updated_at: nowIso }]
+      });
+      if (nextVault.ecosystem_wallet) {
+        await supabaseRequest('cxrner_cxp_wallet?on_conflict=user_id', {
+          method: 'POST',
+          headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+          body: [{
+            user_id: resolved.targetUserId,
+            balance: Math.max(0, Number(nextVault.ecosystem_wallet.balance || 0)),
+            total_earned: Math.max(0, Number(nextVault.ecosystem_wallet.total_earned || 0)),
+            total_spent: Math.max(0, Number(nextVault.ecosystem_wallet.total_spent || 0)),
+            updated_at: nowIso
+          }]
+        }).catch(() => {});
+      }
+    } catch (err) {
+      console.warn('[DROP_VAULT] save error:', clean(err?.message || err));
+    }
+  }
+  resolved.vault = nextVault;
+  return nextVault;
+}
+async function processReferralSignup(referrerUidRaw, invitedUidRaw, invitedUser = {}) {
+  const referrerUid = clean(referrerUidRaw).replace(/^ref[_-]?/i, '');
+  const invitedUid = clean(invitedUidRaw);
+  if (!/^\d{4,20}$/.test(referrerUid) || !/^\d{4,20}$/.test(invitedUid) || referrerUid === invitedUid) {
+    return { ok: false, reason: 'invalid_referral' };
+  }
+  const [invResolved, refResolved] = await Promise.all([
+    resolveMiniAppVault(invitedUid, invitedUser),
+    resolveMiniAppVault(referrerUid, {})
+  ]);
+  if (invResolved.vault.ecosystem_referrals?.invited_by) {
+    return { ok: true, already_recorded: true, referrer_id: invResolved.vault.ecosystem_referrals.invited_by };
+  }
+  const existingFriends = Array.isArray(refResolved.vault.ecosystem_referrals?.friends) ? refResolved.vault.ecosystem_referrals.friends : [];
+  if (existingFriends.some((f) => String(f.invited_id) === invitedUid)) {
+    return { ok: true, already_recorded: true, referrer_id: referrerUid };
+  }
+  const nowIso = new Date().toISOString();
+  const displayName = clean([invitedUser.first_name, invitedUser.last_name].filter(Boolean).join(' ') || invitedUser.username || `ID ${invitedUid}`);
+  const username = clean(invitedUser.username || '').replace(/^@/, '');
+  const friendEntry = {
+    invited_id: Number(invitedUid),
+    display_name: displayName,
+    username,
+    photo_url: clean(invitedUser.photo_url || ''),
+    event_type: 'signup',
+    bonus: 75,
+    created_at: nowIso
+  };
+  await saveMiniAppVault(invResolved, (prev) => {
+    const w = prev.ecosystem_wallet || { user_id: invResolved.targetUserId, balance: 150, total_earned: 150, total_spent: 0 };
+    return {
+      ...prev,
+      ecosystem_referrals: { ...(prev.ecosystem_referrals || {}), invited_by: referrerUid, joined_at: nowIso, welcome_bonus: 50 },
+      ecosystem_wallet: { ...w, balance: Number(w.balance || 0) + 50, total_earned: Number(w.total_earned || 0) + 50, updated_at: nowIso }
+    };
+  });
+  await saveMiniAppVault(refResolved, (prev) => {
+    const w = prev.ecosystem_wallet || { user_id: refResolved.targetUserId, balance: 150, total_earned: 150, total_spent: 0 };
+    const prevRef = prev.ecosystem_referrals && typeof prev.ecosystem_referrals === 'object' ? prev.ecosystem_referrals : {};
+    const prevFriends = Array.isArray(prevRef.friends) ? prevRef.friends.filter((f) => String(f.invited_id) !== invitedUid) : [];
+    return {
+      ...prev,
+      ecosystem_referrals: {
+        ...prevRef,
+        friends: [friendEntry, ...prevFriends].slice(0, 500),
+        total_bonus_earned: Number(prevRef.total_bonus_earned || 0) + 75
+      },
+      ecosystem_wallet: { ...w, balance: Number(w.balance || 0) + 75, total_earned: Number(w.total_earned || 0) + 75, updated_at: nowIso }
+    };
+  });
+  if (SUPABASE_SYNC_ENABLED) {
+    await supabaseRequest('cxrner_referrals?on_conflict=telegram_id', {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: [{ telegram_id: Number(invitedUid), code: `ref_${invitedUid}`, invited_by: Number(referrerUid), bonus_balance: 50 }]
+    }).catch(() => {});
+    await supabaseRequest('cxrner_referral_events?on_conflict=referrer_id,invited_id', {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: [{ referrer_id: Number(referrerUid), invited_id: Number(invitedUid), event_type: 'signup', bonus: 75 }]
+    }).catch(() => {});
+    await supabaseRequest('cxrner_notifications', {
+      method: 'POST',
+      headers: { Prefer: 'return=minimal' },
+      body: [{ telegram_id: Number(referrerUid), type: 'referral', title: 'Новый друг в команде!', body: `${displayName} перешёл по твоей ссылке. Начислено +75 CXP!` }]
+    }).catch(() => {});
+  }
+  return { ok: true, recorded: true, referrer_id: referrerUid, friend: friendEntry };
+}
+
+async function executeModerationAction(opts = {}) {
+  const formId = clean(opts.formId || opts.id || opts.form_id || '');
+  const status = clean(opts.status || '');
+  const action = clean(opts.action || status);
+  const upc = clean(opts.upc || '');
+  const rejectReason = clean(opts.rejectReason || opts.reject_reason || '');
+  const moderatorComment = clean(opts.moderatorComment || opts.moderator_comment || '');
+  const moderatorName = clean(opts.moderatorName || opts.moderator_name || 'cxrner.label@gmail.com');
+  const telegramId = clean(opts.telegramId || opts.telegram_id || '');
+  const trackName = clean(opts.trackName || opts.track_name || '');
+
+  console.info(`[api/moderation/action] processing: form_id=${formId} status=${status} action=${action} upc=${upc}`);
+
+  const map = {
+    upload: STATUS.ON_UPLOAD,
+    on_upload: STATUS.ON_UPLOAD,
+    pending: STATUS.ON_UPLOAD,
+    moderate: STATUS.MODERATION,
+    moderation: STATUS.MODERATION,
+    on_moderation: STATUS.MODERATION,
+    approve: STATUS.APPROVED,
+    approved: STATUS.APPROVED,
+    needfix: STATUS.NEEDS_FIX,
+    fix_required: STATUS.NEEDS_FIX,
+    reject: STATUS.REJECTED,
+    rejected: STATUS.REJECTED,
+    delete: STATUS.DELETED,
+    deleted: STATUS.DELETED
+  };
+  const targetStatus = map[status] || map[action] || STATUS.ON_UPLOAD;
+
+  let matched = false;
+  let updatedRel = null;
+
+  // Case 1: Composite ID from Telegram bot (uid:time:idx)
+  if (formId.includes(':')) {
+    const parts = formId.split(':');
+    const uid = parts[0];
+    const idx = Number.parseInt(parts[parts.length - 1], 10);
+    if (Number.isFinite(idx)) {
+      const out = await applyReleaseStatus(
+        uid,
+        idx,
+        targetStatus,
+        { id: 0, first_name: moderatorName, username: moderatorName },
+        {
+          upc,
+          rejectReason,
+          moderatorComment,
+          clearRejectReason: targetStatus !== STATUS.REJECTED,
+          restoreFromDelete: targetStatus !== STATUS.DELETED,
+          restorePin: targetStatus === STATUS.ON_UPLOAD,
+          note: `Изменено через Web CMS (${moderatorName})`
+        }
+      );
+      if (out.ok) {
+        matched = true;
+        updatedRel = out.rel;
+        const msgId = Number(out.rel?.moderation_message_id || 0);
+        if (upc) {
+          await sendText(MOD_CHAT, `✅ UPC присвоен: <code>${esc(upc)}</code>`, {
+            reply_to_message_id: msgId || undefined
+          }).catch(() => null);
+          if (/^\d{4,20}$/.test(clean(uid))) {
+            await sendText(Number(uid), `📦 <b>UPC присвоен</b>\n\n🎵 <b>${esc(out.rel?.name || 'Релиз')}</b>\nUPC: <code>${esc(upc)}</code>`).catch(() => null);
+          }
+        }
+        if (action === 'approve' || status === 'approved') {
+          await sendText(MOD_CHAT, `✅ <b>Релиз одобрен модератором</b> (${esc(moderatorName)})`, {
+            reply_to_message_id: msgId || undefined
+          }).catch(() => null);
+        } else if (action === 'reject' || status === 'rejected') {
+          await sendText(MOD_CHAT, `❌ <b>Релиз отклонен:</b> ${esc(rejectReason || 'Без указания причины')}`, {
+            reply_to_message_id: msgId || undefined
+          }).catch(() => null);
+        } else if (action === 'needfix' || status === 'needfix') {
+          await sendText(MOD_CHAT, `✏️ <b>Отправлено на исправления:</b> ${esc(moderatorComment || 'Требуются правки')}`, {
+            reply_to_message_id: msgId || undefined
+          }).catch(() => null);
+        }
+      }
+    }
+  }
+
+  // Case 2: Match by formId or telegram_id in bot memory db
+  if (!matched) {
+    for (const [uid, list] of Object.entries(db || {})) {
+      if (!Array.isArray(list)) continue;
+      for (let idx = 0; idx < list.length; idx += 1) {
+        const r = list[idx];
+        if (r && (r.supabase_form_id === formId || String(r.supabase_form_id || '').startsWith(formId) || (telegramId && String(uid) === String(telegramId) && r.name === trackName))) {
+          const out = await applyReleaseStatus(
+            uid,
+            idx,
+            targetStatus,
+            { id: 0, first_name: moderatorName, username: moderatorName },
+            {
+              upc,
+              rejectReason,
+              moderatorComment,
+              clearRejectReason: targetStatus !== STATUS.REJECTED,
+              restoreFromDelete: targetStatus !== STATUS.DELETED,
+              note: `Изменено через Web CMS (${moderatorName})`
+            }
+          );
+          if (out.ok) {
+            matched = true;
+            updatedRel = out.rel;
+            const msgId = Number(out.rel?.moderation_message_id || 0);
+            if (upc) {
+              await sendText(MOD_CHAT, `✅ UPC присвоен: <code>${esc(upc)}</code>`, {
+                reply_to_message_id: msgId || undefined
+              }).catch(() => null);
+              if (/^\d{4,20}$/.test(clean(uid))) {
+                await sendText(Number(uid), `📦 <b>UPC присвоен</b>\n\n🎵 <b>${esc(out.rel?.name || 'Релиз')}</b>\nUPC: <code>${esc(upc)}</code>`).catch(() => null);
+              }
+            }
+            if (action === 'approve' || status === 'approved') {
+              await sendText(MOD_CHAT, `✅ <b>Релиз одобрен модератором</b> (${esc(moderatorName)})`, {
+                reply_to_message_id: msgId || undefined
+              }).catch(() => null);
+            } else if (action === 'reject' || status === 'rejected') {
+              await sendText(MOD_CHAT, `❌ <b>Релиз отклонен:</b> ${esc(rejectReason || 'Без указания причины')}`, {
+                reply_to_message_id: msgId || undefined
+              }).catch(() => null);
+            } else if (action === 'needfix' || status === 'needfix') {
+              await sendText(MOD_CHAT, `✏️ <b>Отправлено на исправления:</b> ${esc(moderatorComment || 'Требуются правки')}`, {
+                reply_to_message_id: msgId || undefined
+              }).catch(() => null);
+            }
+            break;
+          }
+        }
+      }
+      if (matched) break;
+    }
+  }
+
+  // Case 3: Web-submitted release in Supabase cxrner_forms
+  if (!matched && formId) {
+    try {
+      let rows = await supabaseSelectWhere(SUPABASE_FORMS_TABLE, '*', [{ key: 'id', value: formId }], '', 1);
+      let formRow = Array.isArray(rows) && rows[0] ? rows[0] : null;
+
+      if (!formRow) {
+        const allRecent = await supabaseSelectAll(SUPABASE_FORMS_TABLE, '*', 'created_at.desc');
+        formRow = (allRecent || []).find((r) => String(r.id || '').startsWith(formId) || String(r.submission_key || '') === formId) || null;
+      }
+
+      if (formRow) {
+        const uid = clean(formRow.telegram_id || telegramId || '');
+        const p = formRow.form_payload && typeof formRow.form_payload === 'object' ? formRow.form_payload : {};
+        const msgId = Number(formRow.moderation_message_id || p.moderation_message_id || 0);
+
+        const finalUpc = upc || formRow.upc || p.upc || '';
+        const relData = {
+          ...p,
+          name: clean(formRow.track_name || p.name || ''),
+          nick: clean(formRow.artist_name || p.nick || ''),
+          status: targetStatus,
+          upc: finalUpc,
+          reject_reason: rejectReason || formRow.reject_reason || '',
+          moderator_comment: moderatorComment || formRow.moderator_comment || '',
+          moderation_message_id: msgId || 0
+        };
+
+        const pinHintId = Number(msgId || 0);
+        if (pinHintId) {
+          await syncModerationPinForRelease(relData, pinHintId, {
+            pinIfOnUpload: targetStatus === STATUS.ON_UPLOAD && (canonicalStatus(formRow.status || p.status) !== STATUS.ON_UPLOAD || !p.moderation_pinned)
+          });
+        }
+
+        if (msgId) {
+          try {
+            await tg('editMessageText', {
+              chat_id: MOD_CHAT,
+              message_id: msgId,
+              text: buildModerationText(uid || 'web', relData),
+              parse_mode: 'HTML',
+              disable_web_page_preview: true,
+              reply_markup: moderationKeyboard(uid || 'web', 0, relData)
+            });
+          } catch (err) {
+            console.warn('[api/moderation/action] editMessageText notice:', err?.message || err);
+          }
+        } else {
+          try {
+            const sent = await tg('sendMessage', moderationPayload({
+              text: buildModerationText(uid || 'web', relData),
+              parse_mode: 'HTML',
+              disable_web_page_preview: true,
+              reply_markup: moderationKeyboard(uid || 'web', 0, relData)
+            }));
+            if (sent?.message_id) {
+              relData.moderation_message_id = sent.message_id;
+              if (shouldStatusStayPinned(targetStatus)) {
+                const pinRes = await pinModerationMessageNow(sent.message_id, { immediateRetry: true });
+                relData.moderation_pinned = !!pinRes.ok;
+              } else {
+                relData.moderation_pinned = false;
+              }
+            }
+          } catch (err) {
+            console.warn('[api/moderation/action] sendMessage notice:', err?.message || err);
+          }
+        }
+
+        const activeMsgId = Number(msgId || relData.moderation_message_id || 0);
+        if (upc) {
+          await sendText(MOD_CHAT, `✅ UPC присвоен: <code>${esc(upc)}</code>`, {
+            reply_to_message_id: activeMsgId || undefined
+          }).catch(() => null);
+        }
+        if (action === 'approve' || status === 'approved') {
+          await sendText(MOD_CHAT, `✅ <b>Релиз одобрен модератором</b> (${esc(moderatorName)})`, {
+            reply_to_message_id: activeMsgId || undefined
+          }).catch(() => null);
+        } else if (action === 'reject' || status === 'rejected') {
+          await sendText(MOD_CHAT, `❌ <b>Релиз отклонен:</b> ${esc(rejectReason || 'Без указания причины')}`, {
+            reply_to_message_id: activeMsgId || undefined
+          }).catch(() => null);
+        } else if (action === 'needfix' || status === 'needfix') {
+          await sendText(MOD_CHAT, `✏️ <b>Отправлено на исправления:</b> ${esc(moderatorComment || 'Требуются правки')}`, {
+            reply_to_message_id: activeMsgId || undefined
+          }).catch(() => null);
+        }
+
+        if (/^\d{4,20}$/.test(clean(uid))) {
+          if (upc) {
+            await sendText(Number(uid), `📦 <b>UPC присвоен</b>\n\n🎵 <b>${esc(relData.name || 'Релиз')}</b>\nUPC: <code>${esc(upc)}</code>`).catch(() => null);
+          }
+          if (action === 'approve' || status === 'approved' || action === 'reject' || status === 'rejected' || action === 'needfix' || status === 'needfix') {
+            await notifyArtistAboutRelease(uid, relData, targetStatus).catch(() => null);
+          }
+        }
+
+        await supabasePatchFormByRelease(uid, { ...relData, supabase_form_id: formRow.id }, {
+          status: mapReleaseStatusToFormStatus(targetStatus),
+          upc: finalUpc,
+          reject_reason: clean(relData.reject_reason || ''),
+          moderator_comment: clean(relData.moderator_comment || ''),
+          moderation_message_id: activeMsgId || null,
+          form_payload: relData
+        });
+
+        if (targetStatus === STATUS.APPROVED || targetStatus === STATUS.PUBLISHED) {
+          await supabaseUpsertApprovedRelease(uid, { ...relData, supabase_form_id: formRow.id });
+        } else if ([STATUS.REJECTED, STATUS.DELETED].includes(targetStatus)) {
+          await supabaseDeleteApprovedRelease(uid, { ...relData, supabase_form_id: formRow.id });
+        }
+
+        matched = true;
+        updatedRel = relData;
+      }
+    } catch (dbErr) {
+      console.error('[api/moderation/action] Supabase lookup error:', dbErr?.message || dbErr);
+    }
+  }
+
+  return {
+    matched,
+    target_status: targetStatus,
+    upc: upc || null,
+    rel: updatedRel
+  };
+}
+
 function startStaticServer() {
   if (!WEB_ENABLED) {
     console.warn('[web] static server disabled: set ENABLE_WEB_SERVER=1 or provide PORT + WEBAPP_URL');
@@ -6650,172 +7235,6 @@ function startStaticServer() {
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'content-type,authorization,x-telegram-init-data');
   }
-  const DROP_CASES_CONFIG = [
-    {
-      id: 'case_001_archive',
-      name: 'CASE 001 — ARCHIVE',
-      subtitle: 'SPECIMEN ARCHIVE BASE',
-      description: 'Базовые коллекционные артефакты лейбла, цифровые ключи, визор-маски и шанс на ваучер обложки.',
-      price_cxp: 50,
-      accent: '#00F0FF',
-      drop_rates: { common: 55, rare: 25, epic: 13, legendary: 5.5, mythic: 1.4, special_reward: 0.1 }
-    },
-    {
-      id: 'case_002_black_specimen',
-      name: 'CASE 002 — BLACK SPECIMEN',
-      subtitle: 'ORGANIC FORMS & MASKS',
-      description: 'Редкая серия тёмного металла, органических сердец, глаз наблюдателя и эксклюзивных артефактов.',
-      price_cxp: 75,
-      accent: '#A855F7',
-      drop_rates: { common: 0, rare: 50, epic: 32, legendary: 14, mythic: 3.8, special_reward: 0.2 }
-    },
-    {
-      id: 'case_003_chrome_age',
-      name: 'CASE 003 — CHROME AGE',
-      subtitle: 'LIQUID CHROME & SPIKES',
-      description: 'Ультрапремиальная линейка жидкого хрома: Chrome Spike, Void Crown, Chrome Fang Black/White и реликвии.',
-      price_cxp: 100,
-      accent: '#F59E0B',
-      drop_rates: { common: 0, rare: 35, epic: 40, legendary: 20, mythic: 4.7, special_reward: 0.3 }
-    }
-  ];
-  const DROP_SPECIMENS_CATALOG = [
-    { item_id: 'specimen_cyber_vinyl_01', item_name: 'CYBER VINYL GENESIS', specimen_code: 'VN-001', specimen_class: 'MEDIA', collection_name: 'GENESIS ARCHIVE', rarity: 'common', model_color: '#A855F7', shape: 'cylinder', description: 'Первый серийный винил с лазерной гравировкой CXRNER-001.' },
-    { item_id: 'specimen_data_key_03', item_name: 'DATA KEY', specimen_code: 'DK-003', specimen_class: 'OBJECT', collection_name: 'SPECIMEN ARCHIVE', rarity: 'common', model_color: '#94A3B8', shape: 'box', description: 'Металлический цифровой ключ доступа к мастер-трекам.' },
-    { item_id: 'specimen_basic_specimen_04', item_name: 'BASIC SPECIMEN', specimen_code: 'BS-004', specimen_class: 'OBJECT', collection_name: 'SPECIMEN ARCHIVE', rarity: 'common', model_color: '#64748B', shape: 'cylinder', description: 'Запечатанная полимерная капсула архива.' },
-    { item_id: 'specimen_chrome_tag_05', item_name: 'CHROME TAG', specimen_code: 'TG-005', specimen_class: 'OBJECT', collection_name: 'CHROME AGE', rarity: 'common', model_color: '#CBD5E1', shape: 'box', description: 'Металлическая маркировочная бирка серии CXRNER.' },
-    { item_id: 'specimen_archive_cassette_02', item_name: 'ARCHIVE CASSETTE', specimen_code: 'CA-037', specimen_class: 'MEDIA', collection_name: 'GENESIS ARCHIVE', rarity: 'rare', model_color: '#00F0FF', shape: 'box', description: 'Коллекционная аудиокассета CXRNER ARCHIVE в вакуумной капсуле.' },
-    { item_id: 'specimen_chrome_disc_06', item_name: 'CHROME DISC', specimen_code: 'CD-001', specimen_class: 'MEDIA', collection_name: 'CHROME AGE', rarity: 'rare', model_color: '#38BDF8', shape: 'cylinder', description: 'Хромированный CD-диск с радужной голографической дифракцией.' },
-    { item_id: 'specimen_chrome_spike_16', item_name: 'CHROME SPIKE', specimen_code: 'CR-017', specimen_class: 'OBJECT', collection_name: 'CHROME AGE', rarity: 'rare', model_color: '#E2E8F0', shape: 'octahedron', description: 'Многогранный шип из жидкого хрома с титановым напылением.' },
-    { item_id: 'specimen_violet_visor_13', item_name: 'VIOLET VISOR', specimen_code: 'VG-005', specimen_class: 'ACCESSORY', collection_name: 'SPECIMEN ARCHIVE', rarity: 'epic', model_color: '#C084FC', shape: 'box', description: 'Футуристическая маска-визор саунд-дизайнера со спектральным HUD.' },
-    { item_id: 'specimen_black_heart_12', item_name: 'BLACK HEART', specimen_code: 'HR-009', specimen_class: 'ORGANIC', collection_name: 'BLACK SPECIMEN', rarity: 'epic', model_color: '#A855F7', shape: 'octahedron', description: 'Зеркально-чёрное механическое сердце с суб-басовым импульсом.' },
-    { item_id: 'specimen_watcher_eye_11', item_name: 'WATCHER EYE', specimen_code: 'EY-004', specimen_class: 'ORGANIC', collection_name: 'BLACK SPECIMEN', rarity: 'legendary', model_color: '#F59E0B', shape: 'dodecahedron', description: 'Биомеханическое око в венце шипов, сканирующее звуковую сцену.' },
-    { item_id: 'specimen_void_crown_17', item_name: 'VOID CROWN', specimen_code: 'CR-003', specimen_class: 'ACCESSORY', collection_name: 'BLACK SPECIMEN', rarity: 'legendary', model_color: '#FCD34D', shape: 'torus', description: 'Готическая корона из застывшего жидкого хрома правителя сцены.' },
-    { item_id: 'specimen_chrome_fang_19', item_name: 'CHROME FANG BLACK', specimen_code: 'C1/S-B', specimen_class: 'ARTIFACT', collection_name: 'CHROME AGE', rarity: 'legendary', model_color: '#FBBF24', shape: 'dodecahedron', description: 'Чёрная металлическая челюсть хищника с зеркальными клыками.' },
-    { item_id: 'specimen_white_fang_20', item_name: 'WHITE FANG SPECIMEN', specimen_code: 'C1/S-W', specimen_class: 'ARTIFACT', collection_name: 'CHROME AGE', rarity: 'legendary', model_color: '#FFFFFF', shape: 'dodecahedron', description: 'Редкая матово-белая мутация клыков хищника C1/S.' },
-    { item_id: 'specimen_cxrner_original_24', item_name: 'CHROMATIC FANG // CXRNER ORIGINAL', specimen_code: 'GLITCH-01', specimen_class: 'ARTIFACT', collection_name: 'FOUNDERS EDITION', rarity: 'mythic', model_color: '#F43F5E', shape: 'icosahedron', description: 'Сверхредкий хроматический глитч-артефакт основания CXRNER MUSIC.' },
-    { item_id: 'specimen_cover_voucher_25', item_name: 'CXRNER COVER VOUCHER', specimen_code: 'CV-2026', specimen_class: 'REWARD', collection_name: 'SPECIAL REWARDS', rarity: 'special_reward', model_color: '#F59E0B', shape: 'box', is_special_reward: true, description: 'Бесплатная обложка для релиза от @kazumaiq.' },
-    { item_id: 'specimen_fasttrack_pitch_26', item_name: 'FAST-TRACK PITCHING VOUCHER', specimen_code: 'FP-2026', specimen_class: 'REWARD', collection_name: 'SPECIAL REWARDS', rarity: 'special_reward', model_color: '#00F0FF', shape: 'box', is_special_reward: true, description: 'Приоритетная модерация 24ч и питчинг плейлистам CXRNER.' },
-    { item_id: 'specimen_royalty_boost_27', item_name: 'ROYALTY BOOST 85/15', specimen_code: 'RB-2026', specimen_class: 'REWARD', collection_name: 'SPECIAL REWARDS', rarity: 'special_reward', model_color: '#A855F7', shape: 'box', is_special_reward: true, description: 'Апгрейд ставки роялти 85% артисту на следующий релиз.' },
-    { item_id: 'specimen_label_promo_28', item_name: 'LABEL PROMO SPOT', specimen_code: 'LP-2026', specimen_class: 'REWARD', collection_name: 'SPECIAL REWARDS', rarity: 'special_reward', model_color: '#F43F5E', shape: 'box', is_special_reward: true, description: 'Персональный анонс и закреп в витрине CXRNER MUSIC.' }
-  ];
-  const DROP_SALVAGE_MAP = { common: 15, rare: 30, epic: 55, legendary: 120, mythic: 250, special_reward: 500 };
-  const DROP_FUSION_NEXT = { common: 'rare', rare: 'epic', epic: 'legendary', legendary: 'mythic' };
-  const DROP_PROMO_CODES = {
-    CXRNER2026: { cxp: 120, label: 'CXRNER 2026 Bonus' },
-    DROP100: { cxp: 100, label: 'Drop Boost +100 CXP' },
-    KAZUMACEO: { cxp: 150, label: 'CEO Patron Gift' },
-    WELCOME50: { cxp: 50, label: 'Welcome Supply' }
-  };
-  const GIFT_HMAC_SECRET = envStr('DROP_GIFT_SECRET', envStr('SUPABASE_SERVICE_ROLE_KEY', envStr('ADMIN_PASSWORD', 'cxrner_drop_gift_hmac_2026')));
-  const localDropVaultCache = new Map();
-  function deterministicTgUuid(uid) {
-    const hash = crypto.createHash('sha256').update(`cxrner:tg:${clean(uid)}`).digest('hex');
-    return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
-  }
-  function signMiniAppGiftPayload(b64Data) {
-    return crypto.createHmac('sha256', GIFT_HMAC_SECRET).update(b64Data).digest('base64url').slice(0, 16);
-  }
-  function rollSpecimenForCase(caseCfg) {
-    const rates = caseCfg.drop_rates || {};
-    const entries = Object.entries(rates).filter(([, w]) => Number(w) > 0);
-    const total = entries.reduce((sum, [, w]) => sum + Number(w), 0);
-    let roll = (crypto.randomBytes(4).readUInt32BE(0) / 0x100000000) * total;
-    let rarity = entries[0]?.[0] || 'common';
-    for (const [r, w] of entries) {
-      roll -= Number(w);
-      if (roll <= 0) { rarity = r; break; }
-    }
-    const pool = DROP_SPECIMENS_CATALOG.filter((s) => s.rarity === rarity);
-    const pick = pool[crypto.randomInt(0, pool.length)] || DROP_SPECIMENS_CATALOG[0];
-    return pick;
-  }
-  async function resolveMiniAppVault(uid, tgUser = {}) {
-    const cleanUid = clean(uid);
-    const uname = clean(tgUser?.username || '').replace(/^@/, '').toLowerCase();
-    const isCeo = uname === 'kazumaiq' || isAdmin(cleanUid);
-    const fallbackUuid = deterministicTgUuid(cleanUid);
-    let targetUserId = fallbackUuid;
-    let vault = localDropVaultCache.get(cleanUid) || null;
-    if (SUPABASE_SYNC_ENABLED) {
-      try {
-        const rows = await supabaseSelectAll(SUPABASE_CABINET_TABLE_RAW, 'user_id,profile,updated_at', 'updated_at.desc');
-        const matched = (rows || []).find((row) => {
-          const p = row?.profile && typeof row.profile === 'object' ? row.profile : {};
-          const ep = p.ecosystem_profile && typeof p.ecosystem_profile === 'object' ? p.ecosystem_profile : {};
-          const pTg = clean(p.telegram_id || ep.telegram_id || '');
-          const pUser = clean(ep.username || ep.telegram_username || p.username || '').replace(/^@/, '').toLowerCase();
-          return row.user_id === fallbackUuid || row.user_id === `tg_${cleanUid}` || (pTg && pTg === cleanUid) || (uname && pUser === uname);
-        });
-        if (matched) {
-          targetUserId = matched.user_id;
-          vault = matched.profile && typeof matched.profile === 'object' ? { ...matched.profile } : {};
-        } else {
-          // Also try linking with cxrner_cxp_wallet / cxrner_drop_inventory if user logged in elsewhere
-          vault = vault || {};
-        }
-      } catch (err) {
-        console.warn('[DROP_VAULT] resolve failed:', clean(err?.message || err));
-      }
-    }
-    vault = vault && typeof vault === 'object' ? { ...vault } : {};
-    const nowIso = new Date().toISOString();
-    const defaultBalance = isCeo ? 999999 : 150;
-    const baseWallet = vault.ecosystem_wallet && typeof vault.ecosystem_wallet === 'object'
-      ? { ...vault.ecosystem_wallet }
-      : { user_id: targetUserId, balance: defaultBalance, total_earned: defaultBalance, total_spent: 0, updated_at: nowIso };
-    if (isCeo && Number(baseWallet.balance || 0) < 999999) {
-      baseWallet.balance = 999999;
-      baseWallet.total_earned = Math.max(Number(baseWallet.total_earned || 0), 999999);
-    }
-    const removedSet = new Set(Array.isArray(vault.ecosystem_removed_item_ids) ? vault.ecosystem_removed_item_ids : []);
-    let inventory = Array.isArray(vault.ecosystem_inventory) ? vault.ecosystem_inventory.filter((x) => x && !removedSet.has(x.id)) : [];
-    const history = Array.isArray(vault.ecosystem_drop_history) ? vault.ecosystem_drop_history : [];
-    if (isCeo && !inventory.length) {
-      inventory = [
-        { id: 'ceo_glitch_01', user_id: targetUserId, item_id: 'specimen_cxrner_original_24', item_name: 'CHROMATIC FANG // CXRNER ORIGINAL', specimen_code: 'GLITCH-01', specimen_class: 'ARTIFACT', collection_name: 'FOUNDERS EDITION', rarity: 'mythic', serial_number: 1, description: 'Именной Founders-артефакт CEO CXRNER MUSIC.', model_color: '#F43F5E', shape: 'icosahedron', obtained_via: 'ceo_sovereign', is_pinned: true, created_at: nowIso },
-        { id: 'ceo_crown_01', user_id: targetUserId, item_id: 'specimen_void_crown_17', item_name: 'VOID CROWN', specimen_code: 'CR-003', specimen_class: 'ACCESSORY', collection_name: 'BLACK SPECIMEN', rarity: 'legendary', serial_number: 1, description: 'Корона основателя CXRNER MUSIC.', model_color: '#FCD34D', shape: 'torus', obtained_via: 'ceo_sovereign', is_pinned: true, created_at: nowIso }
-      ];
-    }
-    vault.telegram_id = cleanUid;
-    vault.ecosystem_wallet = baseWallet;
-    vault.ecosystem_inventory = inventory;
-    vault.ecosystem_drop_history = history;
-    return { targetUserId, isCeo, vault, uid: cleanUid };
-  }
-  async function saveMiniAppVault(resolved, updater) {
-    const nextVault = updater({ ...resolved.vault });
-    const nowIso = new Date().toISOString();
-    nextVault.telegram_id = resolved.uid;
-    nextVault.updated_at = nowIso;
-    localDropVaultCache.set(resolved.uid, nextVault);
-    if (SUPABASE_SYNC_ENABLED) {
-      try {
-        await supabaseRequest(`${SUPABASE_CABINET_TABLE_RAW}?on_conflict=user_id`, {
-          method: 'POST',
-          headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
-          body: [{ user_id: resolved.targetUserId, profile: nextVault, updated_at: nowIso }]
-        });
-        if (nextVault.ecosystem_wallet) {
-          await supabaseRequest('cxrner_cxp_wallet?on_conflict=user_id', {
-            method: 'POST',
-            headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
-            body: [{
-              user_id: resolved.targetUserId,
-              balance: Math.max(0, Number(nextVault.ecosystem_wallet.balance || 0)),
-              total_earned: Math.max(0, Number(nextVault.ecosystem_wallet.total_earned || 0)),
-              total_spent: Math.max(0, Number(nextVault.ecosystem_wallet.total_spent || 0)),
-              updated_at: nowIso
-            }]
-          }).catch(() => {});
-        }
-      } catch (err) {
-        console.warn('[DROP_VAULT] save error:', clean(err?.message || err));
-      }
-    }
-    resolved.vault = nextVault;
-    return nextVault;
-  }
   function sendJson(res, statusCode, data) {
     res.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(data));
@@ -6841,16 +7260,27 @@ function startStaticServer() {
     const check = verifyTelegramInitData(initData);
     if (!check.ok || !check.user?.id) return { ok: false, status: 403, error: check.reason || 'Telegram authorization failed' };
     const uid = String(check.user.id);
-    try {
-      await supabaseRequest('cxrner_telegram_profiles?on_conflict=telegram_id', {
-        method: 'POST',
-        headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
-        body: [{ telegram_id: Number(uid), username: clean(check.user.username || ''), first_name: clean(check.user.first_name || ''), last_name: clean(check.user.last_name || ''), role: isAdmin(uid) ? 'admin' : 'artist', status: 'active', last_seen_at: new Date().toISOString(), metadata: { photo_url: clean(check.user.photo_url || '') } }]
-      });
-    } catch (error) {
-      console.error(`[PLATFORM_AUTH] profile sync failed user_id=${uid}:`, clean(error?.message || error));
+    const now = Date.now();
+    const lastSync = lastAuthSyncAt.get(uid) || 0;
+    const syncProfiles = async () => {
+      try {
+        await supabaseRequest('cxrner_telegram_profiles?on_conflict=telegram_id', {
+          method: 'POST',
+          headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+          body: [{ telegram_id: Number(uid), username: clean(check.user.username || ''), first_name: clean(check.user.first_name || ''), last_name: clean(check.user.last_name || ''), role: isAdmin(uid) ? 'admin' : 'artist', status: 'active', last_seen_at: new Date().toISOString(), metadata: { photo_url: clean(check.user.photo_url || '') } }]
+        });
+      } catch (error) {
+        console.error(`[PLATFORM_AUTH] profile sync failed user_id=${uid}:`, clean(error?.message || error));
+      }
+      try { await supabaseUpsertCabinetUser(uid, check.user, true); } catch (error) { console.error(`[PLATFORM_AUTH] cabinet sync failed user_id=${uid}:`, clean(error?.message || error)); }
+    };
+    if (!lastSync) {
+      lastAuthSyncAt.set(uid, now);
+      await syncProfiles();
+    } else if ((now - lastSync) > 60000) {
+      lastAuthSyncAt.set(uid, now);
+      syncProfiles().catch(() => {});
     }
-    try { await supabaseUpsertCabinetUser(uid, check.user, true); } catch (error) { console.error(`[PLATFORM_AUTH] cabinet sync failed user_id=${uid}:`, clean(error?.message || error)); }
     return { ok: true, uid, user: check.user, is_admin: isAdmin(uid) };
   }
   function platformRelease(row, counts = {}) {
@@ -7364,14 +7794,18 @@ function startStaticServer() {
           const ownReleaseIds = new Set((forms || []).map((row) => String(row.id)));
           const ownLikes = (engagements || []).filter((row) => ownReleaseIds.has(String(row.release_id)) && row.kind === 'like').length;
           const ownListens = (listens || []).filter((row) => ownReleaseIds.has(String(row.release_id))).length;
-          const [resolvedVault, userLinks] = await Promise.all([
+          const [resolvedVault, userLinks, cachedCabRows] = await Promise.all([
             resolveMiniAppVault(auth.uid, auth.user).catch(() => null),
-            supabaseSelectWhere(SUPABASE_LINKS_TABLE, 'id', [{ key: 'telegram_id', value: auth.uid }], '', 50).catch(() => [])
+            supabaseSelectWhere(SUPABASE_LINKS_TABLE, 'id', [{ key: 'telegram_id', value: auth.uid }], '', 50).catch(() => []),
+            getCabinetRowsCached(false).catch(() => [])
           ]);
           const lastScanMs = Number(new Date(resolvedVault?.vault?.ecosystem_daily_scan_at || 0).getTime()) || 0;
           const canDailyScan = !lastScanMs || (Date.now() - lastScanMs) >= 20 * 3600 * 1000;
+          const botUsername = clean(moderationHealth.bot_username || envStr('BOT_USERNAME', '')).replace(/^@/, '');
           sendJson(res, 200, {
             ok: true,
+            build_version: BOT_BUILD_VERSION,
+            bot_username: botUsername,
             user: { ...profile, telegram_id: Number(auth.uid), photo_url: profile.photo_url || auth.user.photo_url || '' },
             stats: { releases: forms?.length || 0, approved: approvedOwn, moderation: moderationOwn, views: 0, listens: ownListens, likes: ownLikes, comments: 0, followers, following, links: userLinks?.length || 0 },
             latest,
@@ -7385,7 +7819,9 @@ function startStaticServer() {
             can_daily_scan: canDailyScan,
             inventory_count: resolvedVault?.vault?.ecosystem_inventory?.length || 0,
             verification_status: resolvedVault?.vault?.ecosystem_verification?.status || (resolvedVault?.isCeo ? 'verified' : 'not_verified'),
-            site_profile: resolvedVault?.vault?.ecosystem_profile || profile.metadata?.artist_profile || null
+            site_profile: resolvedVault?.vault?.ecosystem_profile || profile.metadata?.artist_profile || null,
+            referrals_count: (resolvedVault?.vault?.ecosystem_referrals?.friends || []).length,
+            recent_drops: buildGlobalDropFeed(cachedCabRows, 10)
           });
         }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
         return;
@@ -7576,13 +8012,139 @@ function startStaticServer() {
         referralBody.then(async (body) => {
           const auth = await authorizeMiniApp(req, body);
           if (!auth.ok) { sendJson(res, auth.status, auth); return; }
-          if (req.method === 'POST' && body.invited_id) {
-            const invitedId = clean(body.invited_id);
-            await supabaseRequest('cxrner_referral_events?on_conflict=referrer_id,invited_id', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: [{ referrer_id: Number(auth.uid), invited_id: Number(invitedId), event_type: 'signup', bonus: Number(body.bonus || 0) }] });
+          const resolved = await resolveMiniAppVault(auth.uid, auth.user);
+          const action = clean(body.action || '').toLowerCase();
+          if (req.method === 'POST' && (action === 'register_ref' || body.referrer_id || body.ref_code)) {
+            const refResult = await processReferralSignup(body.referrer_id || body.ref_code || '', auth.uid, auth.user);
+            const refreshed = await resolveMiniAppVault(auth.uid, auth.user);
+            sendJson(res, 200, { ok: true, ref_result: refResult, wallet: refreshed.vault.ecosystem_wallet });
+            return;
           }
-          const rows = await supabaseSelectWhere('cxrner_referrals', 'telegram_id,code,invited_by,bonus_balance,created_at', [{ key: 'telegram_id', value: auth.uid }], '', 1);
-          const events = await supabaseSelectWhere('cxrner_referral_events', 'invited_id,event_type,bonus,created_at', [{ key: 'referrer_id', value: auth.uid }], 'created_at.desc', 500);
-          sendJson(res, 200, { ok: true, referral: rows?.[0] || null, invited: events || [], total: events?.length || 0 });
+          if (req.method === 'POST' && body.invited_id) {
+            await processReferralSignup(auth.uid, body.invited_id, {});
+          }
+          const [rows, events, allProfiles] = await Promise.all([
+            supabaseSelectWhere('cxrner_referrals', 'telegram_id,code,invited_by,bonus_balance,created_at', [{ key: 'telegram_id', value: auth.uid }], '', 1).catch(() => []),
+            supabaseSelectWhere('cxrner_referral_events', 'invited_id,event_type,bonus,created_at', [{ key: 'referrer_id', value: auth.uid }], 'created_at.desc', 500).catch(() => []),
+            supabaseSelectAll('cxrner_telegram_profiles', 'telegram_id,username,first_name,last_name,photo_url,metadata', 'last_seen_at.desc').catch(() => [])
+          ]);
+          const profileMap = new Map((allProfiles || []).map((p) => [String(p.telegram_id), p]));
+          const vaultFriends = Array.isArray(resolved.vault.ecosystem_referrals?.friends) ? resolved.vault.ecosystem_referrals.friends : [];
+          const mergedMap = new Map();
+          for (const f of vaultFriends) {
+            const fid = clean(f?.invited_id);
+            if (!fid) continue;
+            mergedMap.set(fid, { ...f });
+          }
+          for (const ev of events || []) {
+            const fid = clean(ev?.invited_id);
+            if (!fid) continue;
+            if (!mergedMap.has(fid)) {
+              mergedMap.set(fid, { invited_id: ev.invited_id, event_type: ev.event_type || 'signup', bonus: Number(ev.bonus || 75), created_at: ev.created_at });
+            }
+          }
+          const enrichedInvited = [...mergedMap.values()].map((item) => {
+            const prof = profileMap.get(String(item.invited_id)) || {};
+            const metaPhoto = prof?.metadata?.photo_url || '';
+            const fullName = clean([prof.first_name, prof.last_name].filter(Boolean).join(' ') || item.display_name || prof.username || item.username || `Участник #${String(item.invited_id).slice(-4)}`);
+            return {
+              invited_id: item.invited_id,
+              display_name: fullName,
+              username: clean(item.username || prof.username || ''),
+              photo_url: clean(item.photo_url || prof.photo_url || metaPhoto || ''),
+              event_type: item.event_type || 'signup',
+              bonus: Number(item.bonus || 75),
+              created_at: item.created_at || new Date().toISOString()
+            };
+          }).sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+
+          const claimedSteps = new Set(Array.isArray(resolved.vault.ecosystem_referrals?.claimed_steps) ? resolved.vault.ecosystem_referrals.claimed_steps.map(Number) : []);
+
+          if (req.method === 'POST' && action === 'claim_milestone') {
+            const stepNum = Number(body.step || 0);
+            const milestone = CHAMPION_MILESTONES.find((m) => m.step === stepNum);
+            if (!milestone) { sendJson(res, 400, { ok: false, error: 'Неизвестный шаг Пути чемпиона' }); return; }
+            if (enrichedInvited.length < milestone.required) {
+              sendJson(res, 400, { ok: false, error: `Нужно пригласить ${milestone.required} друзей (сейчас: ${enrichedInvited.length})` });
+              return;
+            }
+            if (claimedSteps.has(stepNum)) {
+              sendJson(res, 400, { ok: false, error: 'Награда за этот этап уже получена' });
+              return;
+            }
+            const nowIso = new Date().toISOString();
+            const bonusItems = [];
+            if (milestone.reward_type === 'pack' && milestone.case_id) {
+              const caseCfg = DROP_CASES_CONFIG.find((c) => c.id === milestone.case_id) || DROP_CASES_CONFIG[0];
+              for (let i = 0; i < (milestone.packs_count || 1); i += 1) {
+                const def = rollSpecimenForCase(caseCfg);
+                bonusItems.push({
+                  id: crypto.randomUUID(),
+                  user_id: resolved.targetUserId,
+                  item_id: def.item_id,
+                  item_name: def.item_name,
+                  specimen_code: def.specimen_code,
+                  specimen_class: def.specimen_class,
+                  collection_name: def.collection_name,
+                  rarity: def.rarity,
+                  serial_number: crypto.randomInt(1, 500),
+                  description: def.description,
+                  model_color: def.model_color,
+                  shape: def.shape,
+                  obtained_via: `champion_step_${stepNum}`,
+                  is_pinned: false,
+                  created_at: nowIso
+                });
+              }
+            }
+            claimedSteps.add(stepNum);
+            const nextVault = await saveMiniAppVault(resolved, (prev) => {
+              const w = prev.ecosystem_wallet || { user_id: resolved.targetUserId, balance: 150, total_earned: 150, total_spent: 0 };
+              const cxpAdd = Number(milestone.reward_cxp || 0);
+              return {
+                ...prev,
+                ecosystem_referrals: { ...(prev.ecosystem_referrals || {}), claimed_steps: [...claimedSteps] },
+                ecosystem_wallet: { ...w, balance: Number(w.balance || 0) + cxpAdd, total_earned: Number(w.total_earned || 0) + cxpAdd, updated_at: nowIso },
+                ecosystem_inventory: [...bonusItems, ...(Array.isArray(prev.ecosystem_inventory) ? prev.ecosystem_inventory : [])]
+              };
+            });
+            sendJson(res, 200, {
+              ok: true,
+              step: stepNum,
+              reward_cxp: milestone.reward_cxp,
+              bonus_items: bonusItems,
+              wallet: nextVault.ecosystem_wallet,
+              inventory: nextVault.ecosystem_inventory,
+              milestones: CHAMPION_MILESTONES.map((m) => ({
+                ...m,
+                unlocked: enrichedInvited.length >= m.required,
+                claimed: claimedSteps.has(m.step)
+              }))
+            });
+            return;
+          }
+
+          const botUsername = clean(moderationHealth.bot_username || envStr('BOT_USERNAME', '')).replace(/^@/, '');
+          const refCode = `ref_${auth.uid}`;
+          const miniappInviteUrl = botUsername ? `https://t.me/${botUsername}?startapp=${encodeURIComponent(refCode)}` : '';
+          const botInviteUrl = botUsername ? `https://t.me/${botUsername}?start=${encodeURIComponent(refCode)}` : '';
+          sendJson(res, 200, {
+            ok: true,
+            bot_username: botUsername,
+            ref_code: refCode,
+            miniapp_invite_url: miniappInviteUrl,
+            invite_url: botInviteUrl,
+            invited_by: resolved.vault.ecosystem_referrals?.invited_by || rows?.[0]?.invited_by || null,
+            referral: rows?.[0] || { telegram_id: Number(auth.uid), code: refCode, bonus_balance: Number(resolved.vault.ecosystem_referrals?.total_bonus_earned || 0) },
+            invited: enrichedInvited,
+            total: enrichedInvited.length,
+            total_bonus_earned: enrichedInvited.reduce((s, x) => s + Number(x.bonus || 75), 0),
+            milestones: CHAMPION_MILESTONES.map((m) => ({
+              ...m,
+              unlocked: enrichedInvited.length >= m.required,
+              claimed: claimedSteps.has(m.step)
+            }))
+          });
         }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
         return;
       }
@@ -7715,9 +8277,10 @@ function startStaticServer() {
         authorizeMiniApp(req).then(async (auth) => {
           if (!auth.ok) { sendJson(res, auth.status, auth); return; }
           if (!auth.is_admin) { sendJson(res, 403, { ok: false, error: 'admin access required' }); return; }
-          const [users, forms, releases, comments, engagements, payouts, links, news, logs, listens] = await Promise.all([
+          await ensureModerationHealth(false).catch(() => {});
+          const [users, forms, releases, comments, engagements, payouts, links, news, logs, listens, verifications, cabRows] = await Promise.all([
             supabaseSelectAll('cxrner_telegram_profiles', 'telegram_id,username,first_name,last_name,photo_url,role,status,registered_at,last_seen_at,metadata', 'last_seen_at.desc').catch(() => []),
-            supabaseSelectAll(SUPABASE_FORMS_TABLE, 'id,telegram_id,artist_name,track_name,status,upc,created_at,updated_at,reject_reason', 'updated_at.desc').catch(() => []),
+            supabaseSelectAll(SUPABASE_FORMS_TABLE, 'id,telegram_id,username,artist_name,track_name,genre,release_type,status,upc,source,moderation_message_id,created_at,updated_at,reject_reason,form_payload', 'updated_at.desc').catch(() => []),
             supabaseSelectAll(SUPABASE_PUBLIC_RELEASES_TABLE, 'form_id,telegram_id,artist_name,track_name,status,approved_at,updated_at', 'approved_at.desc').catch(() => []),
             supabaseSelectAll('cxrner_comments', 'id,release_id,telegram_id,body,is_pinned,created_at', 'created_at.desc').catch(() => []),
             supabaseSelectAll('cxrner_release_engagements', 'release_id,telegram_id,kind,created_at', 'created_at.desc').catch(() => []),
@@ -7725,11 +8288,278 @@ function startStaticServer() {
             supabaseSelectAll(SUPABASE_LINKS_TABLE, 'id,telegram_id,release_id,slug,title,artist,status,created_at,updated_at', 'updated_at.desc').catch(() => []),
             supabaseSelectAll('cxrner_news', 'id,title,body,cover_url,published,published_at,created_at,updated_at', 'created_at.desc').catch(() => []),
             supabaseSelectAll('cxrner_admin_logs', 'id,admin_id,action,entity,entity_id,payload,created_at', 'created_at.desc').catch(() => []),
-            supabaseSelectAll('cxrner_listen_events', 'release_id,telegram_id,created_at', 'created_at.desc').catch(() => [])
+            supabaseSelectAll('cxrner_listen_events', 'release_id,telegram_id,created_at', 'created_at.desc').catch(() => []),
+            supabaseSelectAll('cxrner_artist_verifications', 'id,user_id,stage_name,method,verification_code,status,dsp_links,evidence_notes,contact_telegram,created_at,updated_at', 'created_at.desc').catch(() => []),
+            getCabinetRowsCached(false).catch(() => [])
           ]);
+          const seenKeys = new Set();
+          const normalizedForms = (forms || []).map((f) => {
+            const p = f.form_payload && typeof f.form_payload === 'object' ? f.form_payload : {};
+            const st = canonicalStatus(p.status || f.status || '');
+            const src = clean(f.source || p.source || 'bot_text').toLowerCase();
+            if (f.id) seenKeys.add(String(f.id));
+            return {
+              id: f.id,
+              telegram_id: f.telegram_id,
+              username: clean(f.username || p.username || p.tg || ''),
+              artist_name: clean(f.artist_name || p.nick || 'Без имени'),
+              track_name: clean(f.track_name || p.name || 'Без названия'),
+              genre: clean(f.genre || p.genre || ''),
+              release_type: clean(f.release_type || p.type || 'single'),
+              status: st || f.status || 'pending',
+              raw_status: f.status,
+              upc: clean(f.upc || p.upc || ''),
+              source: src.includes('web') ? 'web' : src.includes('mini') ? 'mini_app' : 'bot',
+              moderation_message_id: f.moderation_message_id || p.moderation_message_id || null,
+              reject_reason: clean(f.reject_reason || p.reject_reason || ''),
+              cover_url: clean(p.cover_url || p.cover || ''),
+              created_at: f.created_at,
+              updated_at: f.updated_at || f.created_at
+            };
+          });
+          // Merge local db releases not yet present in Supabase forms
+          for (const [duid, list] of Object.entries(db || {})) {
+            if (!Array.isArray(list)) continue;
+            list.forEach((rel, idx) => {
+              if (!rel || rel.user_deleted || canonicalStatus(rel.status) === STATUS.DELETED) return;
+              const fid = clean(rel.supabase_form_id || `${duid}:0:${idx}`);
+              if (seenKeys.has(fid)) return;
+              const src = clean(rel.source || 'bot_text').toLowerCase();
+              normalizedForms.push({
+                id: `${duid}:0:${idx}`,
+                telegram_id: duid,
+                username: clean(rel.username || rel.tg || ''),
+                artist_name: clean(rel.nick || 'Без имени'),
+                track_name: clean(rel.name || 'Без названия'),
+                genre: clean(rel.genre || ''),
+                release_type: clean(rel.type || 'single'),
+                status: canonicalStatus(rel.status || STATUS.ON_UPLOAD),
+                upc: clean(rel.upc || ''),
+                source: src.includes('web') ? 'web' : src.includes('mini') ? 'mini_app' : 'bot',
+                moderation_message_id: rel.moderation_message_id || null,
+                reject_reason: clean(rel.reject_reason || ''),
+                cover_url: clean(rel.cover_url || ''),
+                created_at: rel.submission_time || new Date().toISOString(),
+                updated_at: rel.updated_at || rel.submission_time || new Date().toISOString()
+              });
+            });
+          }
+          normalizedForms.sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0));
+
+          const statusCounts = { on_upload: 0, moderation: 0, approved: 0, needfix: 0, rejected: 0 };
+          const sourceCounts = { web: 0, mini_app: 0, bot: 0 };
+          for (const f of normalizedForms) {
+            const st = clean(f.status);
+            if (st === STATUS.ON_UPLOAD) statusCounts.on_upload += 1;
+            else if (st === STATUS.MODERATION) statusCounts.moderation += 1;
+            else if (st === STATUS.APPROVED || st === STATUS.PUBLISHED) statusCounts.approved += 1;
+            else if (st === STATUS.NEEDS_FIX) statusCounts.needfix += 1;
+            else if (st === STATUS.REJECTED) statusCounts.rejected += 1;
+            if (f.source === 'web') sourceCounts.web += 1;
+            else if (f.source === 'mini_app') sourceCounts.mini_app += 1;
+            else sourceCounts.bot += 1;
+          }
+
+          const mergedProfilesByUid = new Map();
+          for (const cr of cabRows || []) {
+            const cp = cr?.profile || {};
+            if (cp.telegram_id) mergedProfilesByUid.set(String(cp.telegram_id), cp);
+          }
+          for (const [uidKey, vProfile] of localDropVaultCache.entries()) {
+            if (vProfile) mergedProfilesByUid.set(String(uidKey), vProfile);
+          }
+          let dropTotalItems = 0;
+          let dropTotalCxp = 0;
+          const userMetaByCab = new Map();
+          for (const [uidKey, cp] of mergedProfilesByUid.entries()) {
+            const invLen = Array.isArray(cp.ecosystem_inventory) ? cp.ecosystem_inventory.length : 0;
+            const bal = Number(cp.ecosystem_wallet?.balance || 0);
+            dropTotalItems += invLen;
+            dropTotalCxp += bal;
+            userMetaByCab.set(String(uidKey), {
+              wallet_balance: bal,
+              inventory_count: invLen,
+              friends_count: Array.isArray(cp.ecosystem_referrals?.friends) ? cp.ecosystem_referrals.friends.length : 0,
+              verification_status: cp.ecosystem_verification?.status || ''
+            });
+          }
+          const enrichedUsers = (users || []).map((uRow) => ({
+            ...uRow,
+            ...(userMetaByCab.get(String(uRow.telegram_id)) || {})
+          }));
+
+          const verifList = (verifications || []).slice().sort((a, b) => {
+            const ap = a.status === 'pending_review' ? 0 : 1;
+            const bp = b.status === 'pending_review' ? 0 : 1;
+            if (ap !== bp) return ap - bp;
+            return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+          });
+
           const today = new Date(); today.setHours(0, 0, 0, 0);
-          sendJson(res, 200, { ok: true, stats: { artists: (users || []).filter((x) => x.role === 'artist').length, users: users?.length || 0, releases: releases?.length || 0, moderation: (forms || []).filter((x) => ['moderation', 'on_moderation'].includes(x.status)).length, links: links?.length || 0, views: listens?.length || 0, comments: comments?.length || 0, likes: (engagements || []).filter((x) => x.kind === 'like').length, payouts: payouts?.length || 0, new_today: (users || []).filter((x) => new Date(x.registered_at || 0) >= today).length }, users: users || [], forms: forms || [], releases: releases || [], comments: comments || [], engagements: engagements || [], payouts: payouts || [], links: links || [], news: news || [], logs: logs || [] });
+          sendJson(res, 200, {
+            ok: true,
+            bot_health: {
+              build: BOT_BUILD_VERSION,
+              commit: BOT_DEPLOY_INFO.commit || '',
+              branch: BOT_DEPLOY_INFO.branch || 'main',
+              subject: BOT_DEPLOY_INFO.commit_subject || '',
+              started_at: BOT_STARTED_AT,
+              uptime_sec: Math.floor((Date.now() - BOT_STARTED_AT_MS) / 1000),
+              polling: { ...pollingHealth },
+              moderation: { ...moderationHealth },
+              supabase_enabled: SUPABASE_SYNC_ENABLED,
+              supabase_features: { ...supabaseFeatureState }
+            },
+            stats: {
+              artists: (users || []).filter((x) => x.role === 'artist').length,
+              users: users?.length || 0,
+              releases: releases?.length || 0,
+              forms_total: normalizedForms.length,
+              on_upload: statusCounts.on_upload,
+              moderation: statusCounts.moderation + statusCounts.on_upload,
+              approved: statusCounts.approved,
+              needfix: statusCounts.needfix,
+              rejected: statusCounts.rejected,
+              source_breakdown: sourceCounts,
+              verifications_pending: verifList.filter((v) => v.status === 'pending_review').length,
+              links: links?.length || 0,
+              views: listens?.length || 0,
+              comments: comments?.length || 0,
+              likes: (engagements || []).filter((x) => x.kind === 'like').length,
+              payouts: payouts?.length || 0,
+              drop_total_items: dropTotalItems,
+              drop_total_cxp: dropTotalCxp,
+              new_today: (users || []).filter((x) => new Date(x.registered_at || 0) >= today).length
+            },
+            users: enrichedUsers,
+            forms: normalizedForms,
+            releases: releases || [],
+            verifications: verifList,
+            comments: comments || [],
+            engagements: engagements || [],
+            payouts: payouts || [],
+            links: links || [],
+            news: news || [],
+            logs: logs || []
+          });
         }).catch((error) => sendJson(res, 500, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/admin/moderate' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body);
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          if (!auth.is_admin) { sendJson(res, 403, { ok: false, error: 'admin access required' }); return; }
+          const modName = clean(auth.user.username ? `@${auth.user.username}` : auth.user.first_name || `Admin ${auth.uid}`);
+          const result = await executeModerationAction({
+            formId: clean(body.form_id || body.id || ''),
+            status: clean(body.status || ''),
+            action: clean(body.action || body.status || ''),
+            upc: clean(body.upc || ''),
+            rejectReason: clean(body.reject_reason || ''),
+            moderatorComment: clean(body.moderator_comment || ''),
+            moderatorName: modName,
+            telegramId: clean(body.telegram_id || ''),
+            trackName: clean(body.track_name || '')
+          });
+          await supabaseRequest('cxrner_admin_logs', {
+            method: 'POST',
+            body: [{ admin_id: Number(auth.uid), action: clean(body.action || body.status || 'moderate'), entity: 'form', entity_id: clean(body.form_id || body.id || ''), payload: { upc: clean(body.upc || ''), reject_reason: clean(body.reject_reason || ''), moderator_comment: clean(body.moderator_comment || '') } }]
+          }).catch(() => {});
+          sendJson(res, 200, { ok: true, ...result });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/admin/verification' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body);
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          if (!auth.is_admin) { sendJson(res, 403, { ok: false, error: 'admin access required' }); return; }
+          const decision = clean(body.decision || '').toLowerCase() === 'approve' ? 'verified' : 'rejected';
+          const verifId = clean(body.id || '');
+          const userId = clean(body.user_id || '');
+          const stageName = clean(body.stage_name || '');
+          const nowIso = new Date().toISOString();
+          if (verifId && SUPABASE_SYNC_ENABLED) {
+            await supabaseRequest(`cxrner_artist_verifications?id=eq.${encodeURIComponent(verifId)}`, {
+              method: 'PATCH',
+              body: { status: decision, updated_at: nowIso }
+            }).catch(() => {});
+          }
+          // Find user vault by UUID or telegram_id and update ecosystem_verification
+          const cabRows = await getCabinetRowsCached(false).catch(() => []);
+          const matchedCab = (cabRows || []).find((r) => String(r.user_id) === userId || String(r.profile?.telegram_id || '') === userId);
+          const tgId = clean(matchedCab?.profile?.telegram_id || body.telegram_id || (/^\d{4,20}$/.test(userId) ? userId : ''));
+          if (/^\d{4,20}$/.test(tgId)) {
+            const resolved = await resolveMiniAppVault(tgId, {});
+            await saveMiniAppVault(resolved, (prev) => ({
+              ...prev,
+              ecosystem_verification: { ...(prev.ecosystem_verification || {}), status: decision, stage_name: stageName || prev.ecosystem_verification?.stage_name || '', reviewed_at: nowIso, reviewed_by: auth.uid }
+            }));
+            const msgText = decision === 'verified'
+              ? `✅ <b>Верификация артиста одобрена!</b>\n\nПрофиль <b>${esc(stageName || 'CXRNER ID')}</b> теперь отмечен галочкой Verified.`
+              : `❌ <b>Заявка на верификацию отклонена.</b>\n\n${body.note ? `Комментарий: ${esc(body.note)}` : 'Проверьте ссылки на DSP-площадки и отправьте повторно.'}`;
+            await sendText(Number(tgId), msgText).catch(() => {});
+            await supabaseRequest('cxrner_notifications', {
+              method: 'POST',
+              headers: { Prefer: 'return=minimal' },
+              body: [{ telegram_id: Number(tgId), type: 'verification', title: decision === 'verified' ? 'Верификация одобрена' : 'Верификация отклонена', body: decision === 'verified' ? 'Твой аккаунт получил статус Verified!' : (clean(body.note) || 'Заявка отклонена модерацией.') }]
+            }).catch(() => {});
+          }
+          await supabaseRequest('cxrner_admin_logs', {
+            method: 'POST',
+            body: [{ admin_id: Number(auth.uid), action: `verification_${decision}`, entity: 'verification', entity_id: verifId || userId, payload: { stage_name: stageName } }]
+          }).catch(() => {});
+          sendJson(res, 200, { ok: true, status: decision, id: verifId });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
+        return;
+      }
+      if (u.pathname === '/api/miniapp/platform/admin/user-bonus' && req.method === 'POST') {
+        readJsonBody(req).then(async (body) => {
+          const auth = await authorizeMiniApp(req, body);
+          if (!auth.ok) { sendJson(res, auth.status, auth); return; }
+          if (!auth.is_admin) { sendJson(res, 403, { ok: false, error: 'admin access required' }); return; }
+          const targetUid = clean(body.telegram_id || '');
+          if (!/^\d{4,20}$/.test(targetUid)) { sendJson(res, 400, { ok: false, error: 'valid telegram_id is required' }); return; }
+          const deltaCxp = Number(body.delta_cxp || 0);
+          const nextRole = clean(body.role || '');
+          const nextStatus = clean(body.status || '');
+          const nowIso = new Date().toISOString();
+          let updatedWallet = null;
+          if (Number.isFinite(deltaCxp) && deltaCxp !== 0) {
+            const resolved = await resolveMiniAppVault(targetUid, {});
+            const nv = await saveMiniAppVault(resolved, (prev) => {
+              const w = prev.ecosystem_wallet || { user_id: resolved.targetUserId, balance: 150, total_earned: 150, total_spent: 0 };
+              const nextBal = Math.max(0, Number(w.balance || 0) + deltaCxp);
+              return {
+                ...prev,
+                ecosystem_wallet: { ...w, balance: nextBal, total_earned: deltaCxp > 0 ? Number(w.total_earned || 0) + deltaCxp : Number(w.total_earned || 0), updated_at: nowIso }
+              };
+            });
+            updatedWallet = nv.ecosystem_wallet;
+            if (deltaCxp > 0) {
+              await supabaseRequest('cxrner_notifications', {
+                method: 'POST',
+                headers: { Prefer: 'return=minimal' },
+                body: [{ telegram_id: Number(targetUid), type: 'bonus', title: `+${deltaCxp} CXP от администрации`, body: clean(body.reason || 'Бонус начислен на баланс CXRNER DROP') }]
+              }).catch(() => {});
+            }
+          }
+          const profilePatch = {};
+          if (['artist', 'moderator', 'admin'].includes(nextRole)) profilePatch.role = nextRole;
+          if (['active', 'blocked'].includes(nextStatus)) profilePatch.status = nextStatus;
+          if (Object.keys(profilePatch).length) {
+            await supabaseRequest(`cxrner_telegram_profiles?telegram_id=eq.${encodeURIComponent(targetUid)}`, {
+              method: 'PATCH',
+              body: profilePatch
+            }).catch(() => {});
+          }
+          await supabaseRequest('cxrner_admin_logs', {
+            method: 'POST',
+            body: [{ admin_id: Number(auth.uid), action: 'user_update', entity: 'user', entity_id: targetUid, payload: { delta_cxp: deltaCxp, ...profilePatch } }]
+          }).catch(() => {});
+          sendJson(res, 200, { ok: true, telegram_id: targetUid, wallet: updatedWallet, patch: profilePatch });
+        }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
         return;
       }
       if (u.pathname === '/api/miniapp/platform/admin/search' && req.method === 'GET') {
@@ -7875,25 +8705,22 @@ function startStaticServer() {
           const lastScanMs = Number(new Date(v.ecosystem_daily_scan_at || 0).getTime()) || 0;
           const cooldownMs = 20 * 3600 * 1000;
           const canClaimDaily = !lastScanMs || (Date.now() - lastScanMs) >= cooldownMs;
-          let leaderboard = [];
-          if (SUPABASE_SYNC_ENABLED) {
-            const rows = await supabaseSelectAll(SUPABASE_CABINET_TABLE_RAW, 'user_id,profile,updated_at', 'updated_at.desc').catch(() => []);
-            const rankWeights = { common: 10, rare: 30, epic: 85, legendary: 260, mythic: 800, special_reward: 1500 };
-            leaderboard = (rows || []).map((r) => {
-              const p = r?.profile || {};
-              const ep = p.ecosystem_profile || {};
-              const inv = Array.isArray(p.ecosystem_inventory) ? p.ecosystem_inventory : [];
-              const score = inv.reduce((s, it) => s + (rankWeights[it?.rarity] || 10), 0);
-              return {
-                user_id: r.user_id,
-                display_name: ep.display_name || p.display_name || p.username || 'Коллекционер',
-                username: ep.username || p.username || '',
-                items_count: inv.length,
-                score,
-                is_ceo: String(ep.username || '').toLowerCase() === 'kazumaiq'
-              };
-            }).filter((x) => x.items_count > 0 || x.is_ceo).sort((a, b) => b.score - a.score).slice(0, 20);
-          }
+          const cabRows = await getCabinetRowsCached(false).catch(() => []);
+          const rankWeights = { common: 10, rare: 30, epic: 85, legendary: 260, mythic: 800, special_reward: 1500 };
+          const leaderboard = (cabRows || []).map((r) => {
+            const p = r?.profile || {};
+            const ep = p.ecosystem_profile || {};
+            const inv = Array.isArray(p.ecosystem_inventory) ? p.ecosystem_inventory : [];
+            const score = inv.reduce((s, it) => s + (rankWeights[it?.rarity] || 10), 0);
+            return {
+              user_id: r.user_id,
+              display_name: ep.display_name || p.display_name || p.username || 'Коллекционер',
+              username: ep.username || p.username || '',
+              items_count: inv.length,
+              score,
+              is_ceo: String(ep.username || '').toLowerCase() === 'kazumaiq'
+            };
+          }).filter((x) => x.items_count > 0 || x.is_ceo).sort((a, b) => b.score - a.score).slice(0, 20);
           sendJson(res, 200, {
             ok: true,
             wallet: v.ecosystem_wallet,
@@ -7902,6 +8729,7 @@ function startStaticServer() {
             cases: DROP_CASES_CONFIG,
             specimens: DROP_SPECIMENS_CATALOG,
             leaderboard,
+            recent_drops: buildGlobalDropFeed(cabRows, 14),
             daily_scan: {
               can_claim: canClaimDaily,
               next_claim_at: lastScanMs ? new Date(lastScanMs + cooldownMs).toISOString() : null,
@@ -7991,6 +8819,15 @@ function startStaticServer() {
               body: [{ id: historyEntry.id, user_id: historyEntry.user_id, case_id: historyEntry.case_id, case_name: historyEntry.case_name, item_id: historyEntry.item_id, item_name: historyEntry.item_name, specimen_code: historyEntry.specimen_code, rarity: historyEntry.rarity, serial_number: serial, cxp_spent: historyEntry.cxp_spent, is_special_reward: item.is_special_reward, claim_code: item.claim_code, created_at: nowIso }]
             }).catch(() => {});
           }
+          recordGlobalDropFeedEntry({
+            id: historyEntry.id,
+            display_name: clean(auth.user?.first_name || auth.user?.username || 'Коллекционер'),
+            username: clean(auth.user?.username || ''),
+            item_name: item.item_name,
+            specimen_code: item.specimen_code,
+            rarity: item.rarity,
+            created_at: nowIso
+          });
           sendJson(res, 200, { ok: true, item, cashback, wallet: nextVault.ecosystem_wallet, history_entry: historyEntry });
         }).catch((error) => sendJson(res, 400, { ok: false, error: clean(error?.message || error) }));
         return;
@@ -8228,278 +9065,8 @@ function startStaticServer() {
         }
 
         readJsonBody(req).then(async (body) => {
-          const formId = clean(body.id || body.form_id || '');
-          const status = clean(body.status || '');
-          const action = clean(body.action || status);
-          const upc = clean(body.upc || '');
-          const rejectReason = clean(body.reject_reason || '');
-          const moderatorComment = clean(body.moderator_comment || '');
-          const moderatorName = clean(body.moderator_name || 'cxrner.label@gmail.com');
-          const telegramId = clean(body.telegram_id || '');
-
-          console.info(`[api/moderation/action] processing: form_id=${formId} status=${status} action=${action} upc=${upc}`);
-
-          const map = {
-            upload: STATUS.ON_UPLOAD,
-            on_upload: STATUS.ON_UPLOAD,
-            pending: STATUS.ON_UPLOAD,
-            moderate: STATUS.MODERATION,
-            moderation: STATUS.MODERATION,
-            on_moderation: STATUS.MODERATION,
-            approve: STATUS.APPROVED,
-            approved: STATUS.APPROVED,
-            needfix: STATUS.NEEDS_FIX,
-            fix_required: STATUS.NEEDS_FIX,
-            reject: STATUS.REJECTED,
-            rejected: STATUS.REJECTED,
-            delete: STATUS.DELETED,
-            deleted: STATUS.DELETED
-          };
-          const targetStatus = map[status] || map[action] || STATUS.ON_UPLOAD;
-
-          let matched = false;
-          let updatedRel = null;
-
-          // Case 1: Composite ID from Telegram bot (uid:time:idx)
-          if (formId.includes(':')) {
-            const parts = formId.split(':');
-            const uid = parts[0];
-            const idx = Number.parseInt(parts[parts.length - 1], 10);
-            if (Number.isFinite(idx)) {
-              const out = await applyReleaseStatus(
-                uid,
-                idx,
-                targetStatus,
-                { id: 0, first_name: moderatorName, username: moderatorName },
-                {
-                  upc,
-                  rejectReason,
-                  moderatorComment,
-                  clearRejectReason: targetStatus !== STATUS.REJECTED,
-                  restoreFromDelete: targetStatus !== STATUS.DELETED,
-                  restorePin: targetStatus === STATUS.ON_UPLOAD,
-                  note: `Изменено через Web CMS (${moderatorName})`
-                }
-              );
-              if (out.ok) {
-                matched = true;
-                updatedRel = out.rel;
-                const msgId = Number(out.rel?.moderation_message_id || 0);
-                if (upc) {
-                  await sendText(MOD_CHAT, `✅ UPC присвоен: <code>${esc(upc)}</code>`, {
-                    reply_to_message_id: msgId || undefined
-                  }).catch(() => null);
-                  if (/^\d{4,20}$/.test(clean(uid))) {
-                    await sendText(Number(uid), `📦 <b>UPC присвоен</b>\n\n🎵 <b>${esc(out.rel?.name || 'Релиз')}</b>\nUPC: <code>${esc(upc)}</code>`).catch(() => null);
-                  }
-                }
-                if (action === 'approve' || status === 'approved') {
-                  await sendText(MOD_CHAT, `✅ <b>Релиз одобрен модератором</b> (${esc(moderatorName)})`, {
-                    reply_to_message_id: msgId || undefined
-                  }).catch(() => null);
-                } else if (action === 'reject' || status === 'rejected') {
-                  await sendText(MOD_CHAT, `❌ <b>Релиз отклонен:</b> ${esc(rejectReason || 'Без указания причины')}`, {
-                    reply_to_message_id: msgId || undefined
-                  }).catch(() => null);
-                } else if (action === 'needfix' || status === 'needfix') {
-                  await sendText(MOD_CHAT, `✏️ <b>Отправлено на исправления:</b> ${esc(moderatorComment || 'Требуются правки')}`, {
-                    reply_to_message_id: msgId || undefined
-                  }).catch(() => null);
-                }
-              }
-            }
-          }
-
-          // Case 2: Match by formId or telegram_id in bot memory db
-          if (!matched) {
-            for (const [uid, list] of Object.entries(db || {})) {
-              if (!Array.isArray(list)) continue;
-              for (let idx = 0; idx < list.length; idx += 1) {
-                const r = list[idx];
-                if (r && (r.supabase_form_id === formId || String(r.supabase_form_id || '').startsWith(formId) || (telegramId && String(uid) === String(telegramId) && r.name === body.track_name))) {
-                  const out = await applyReleaseStatus(
-                    uid,
-                    idx,
-                    targetStatus,
-                    { id: 0, first_name: moderatorName, username: moderatorName },
-                    {
-                      upc,
-                      rejectReason,
-                      moderatorComment,
-                      clearRejectReason: targetStatus !== STATUS.REJECTED,
-                      restoreFromDelete: targetStatus !== STATUS.DELETED,
-                      note: `Изменено через Web CMS (${moderatorName})`
-                    }
-                  );
-                  if (out.ok) {
-                    matched = true;
-                    updatedRel = out.rel;
-                    const msgId = Number(out.rel?.moderation_message_id || 0);
-                    if (upc) {
-                      await sendText(MOD_CHAT, `✅ UPC присвоен: <code>${esc(upc)}</code>`, {
-                        reply_to_message_id: msgId || undefined
-                      }).catch(() => null);
-                      if (/^\d{4,20}$/.test(clean(uid))) {
-                        await sendText(Number(uid), `📦 <b>UPC присвоен</b>\n\n🎵 <b>${esc(out.rel?.name || 'Релиз')}</b>\nUPC: <code>${esc(upc)}</code>`).catch(() => null);
-                      }
-                    }
-                    if (action === 'approve' || status === 'approved') {
-                      await sendText(MOD_CHAT, `✅ <b>Релиз одобрен модератором</b> (${esc(moderatorName)})`, {
-                        reply_to_message_id: msgId || undefined
-                      }).catch(() => null);
-                    } else if (action === 'reject' || status === 'rejected') {
-                      await sendText(MOD_CHAT, `❌ <b>Релиз отклонен:</b> ${esc(rejectReason || 'Без указания причины')}`, {
-                        reply_to_message_id: msgId || undefined
-                      }).catch(() => null);
-                    } else if (action === 'needfix' || status === 'needfix') {
-                      await sendText(MOD_CHAT, `✏️ <b>Отправлено на исправления:</b> ${esc(moderatorComment || 'Требуются правки')}`, {
-                        reply_to_message_id: msgId || undefined
-                      }).catch(() => null);
-                    }
-                    break;
-                  }
-                }
-              }
-              if (matched) break;
-            }
-          }
-
-          // Case 3: Web-submitted release in Supabase cxrner_forms
-          if (!matched && formId) {
-            try {
-              let rows = await supabaseSelectWhere(SUPABASE_FORMS_TABLE, '*', [{ key: 'id', value: formId }], '', 1);
-              let formRow = Array.isArray(rows) && rows[0] ? rows[0] : null;
-
-              if (!formRow) {
-                // Try prefix match (e.g. 3cf5c1c0)
-                const allRecent = await supabaseSelectAll(SUPABASE_FORMS_TABLE, '*', 'created_at.desc');
-                formRow = (allRecent || []).find((r) => String(r.id || '').startsWith(formId) || String(r.submission_key || '') === formId) || null;
-              }
-
-              if (formRow) {
-                const uid = clean(formRow.telegram_id || telegramId || '');
-                const p = formRow.form_payload && typeof formRow.form_payload === 'object' ? formRow.form_payload : {};
-                const msgId = Number(formRow.moderation_message_id || p.moderation_message_id || 0);
-
-                const finalUpc = upc || formRow.upc || p.upc || '';
-                const relData = {
-                  ...p,
-                  name: clean(formRow.track_name || p.name || ''),
-                  nick: clean(formRow.artist_name || p.nick || ''),
-                  status: targetStatus,
-                  upc: finalUpc,
-                  reject_reason: rejectReason || formRow.reject_reason || '',
-                  moderator_comment: moderatorComment || formRow.moderator_comment || '',
-                  moderation_message_id: msgId || 0
-                };
-
-                // 1. Sync pin state and edit/send Telegram card in moderation group
-                const pinHintId = Number(msgId || 0);
-                if (pinHintId) {
-                  await syncModerationPinForRelease(relData, pinHintId, {
-                    pinIfOnUpload: targetStatus === STATUS.ON_UPLOAD && (canonicalStatus(formRow.status || p.status) !== STATUS.ON_UPLOAD || !p.moderation_pinned)
-                  });
-                }
-
-                if (msgId) {
-                  try {
-                    await tg('editMessageText', {
-                      chat_id: MOD_CHAT,
-                      message_id: msgId,
-                      text: buildModerationText(uid || 'web', relData),
-                      parse_mode: 'HTML',
-                      disable_web_page_preview: true,
-                      reply_markup: moderationKeyboard(uid || 'web', 0, relData)
-                    });
-                  } catch (err) {
-                    console.warn('[api/moderation/action] editMessageText notice:', err?.message || err);
-                  }
-                } else {
-                  try {
-                    const sent = await tg('sendMessage', moderationPayload({
-                      text: buildModerationText(uid || 'web', relData),
-                      parse_mode: 'HTML',
-                      disable_web_page_preview: true,
-                      reply_markup: moderationKeyboard(uid || 'web', 0, relData)
-                    }));
-                    if (sent?.message_id) {
-                      relData.moderation_message_id = sent.message_id;
-                      if (shouldStatusStayPinned(targetStatus)) {
-                        const pinRes = await pinModerationMessageNow(sent.message_id, { immediateRetry: true });
-                        relData.moderation_pinned = !!pinRes.ok;
-                      } else {
-                        relData.moderation_pinned = false;
-                      }
-                    }
-                  } catch (err) {
-                    console.warn('[api/moderation/action] sendMessage notice:', err?.message || err);
-                  }
-                }
-
-                const activeMsgId = Number(msgId || relData.moderation_message_id || 0);
-
-                // 2. Post action confirmation message in the moderation group
-                if (upc) {
-                  await sendText(MOD_CHAT, `✅ UPC присвоен: <code>${esc(upc)}</code>`, {
-                    reply_to_message_id: activeMsgId || undefined
-                  }).catch(() => null);
-                }
-                if (action === 'approve' || status === 'approved') {
-                  await sendText(MOD_CHAT, `✅ <b>Релиз одобрен модератором</b> (${esc(moderatorName)})`, {
-                    reply_to_message_id: activeMsgId || undefined
-                  }).catch(() => null);
-                } else if (action === 'reject' || status === 'rejected') {
-                  await sendText(MOD_CHAT, `❌ <b>Релиз отклонен:</b> ${esc(rejectReason || 'Без указания причины')}`, {
-                    reply_to_message_id: activeMsgId || undefined
-                  }).catch(() => null);
-                } else if (action === 'needfix' || status === 'needfix') {
-                  await sendText(MOD_CHAT, `✏️ <b>Отправлено на исправления:</b> ${esc(moderatorComment || 'Требуются правки')}`, {
-                    reply_to_message_id: activeMsgId || undefined
-                  }).catch(() => null);
-                }
-
-                // 3. Notify artist via Telegram DM if telegram_id is numeric
-                if (/^\d{4,20}$/.test(clean(uid))) {
-                  if (upc) {
-                    await sendText(Number(uid), `📦 <b>UPC присвоен</b>\n\n🎵 <b>${esc(relData.name || 'Релиз')}</b>\nUPC: <code>${esc(upc)}</code>`).catch(() => null);
-                  }
-                  if (action === 'approve' || status === 'approved' || action === 'reject' || status === 'rejected' || action === 'needfix' || status === 'needfix') {
-                    await notifyArtistAboutRelease(uid, relData, targetStatus).catch(() => null);
-                  }
-                }
-
-                // 4. Update Supabase cxrner_forms with service_role key
-                await supabasePatchFormByRelease(uid, { ...relData, supabase_form_id: formRow.id }, {
-                  status: mapReleaseStatusToFormStatus(targetStatus),
-                  upc: finalUpc,
-                  reject_reason: clean(relData.reject_reason || ''),
-                  moderator_comment: clean(relData.moderator_comment || ''),
-                  moderation_message_id: activeMsgId || null,
-                  form_payload: relData
-                });
-
-                // 5. Sync public releases
-                if (targetStatus === STATUS.APPROVED || targetStatus === STATUS.PUBLISHED) {
-                  await supabaseUpsertApprovedRelease(uid, { ...relData, supabase_form_id: formRow.id });
-                } else if ([STATUS.REJECTED, STATUS.DELETED].includes(targetStatus)) {
-                  await supabaseDeleteApprovedRelease(uid, { ...relData, supabase_form_id: formRow.id });
-                }
-
-                matched = true;
-                updatedRel = relData;
-              }
-            } catch (dbErr) {
-              console.error('[api/moderation/action] Supabase lookup error:', dbErr?.message || dbErr);
-            }
-          }
-
-          sendJson(res, 200, {
-            ok: true,
-            matched,
-            target_status: targetStatus,
-            upc: upc || null,
-            rel: updatedRel
-          });
+          const result = await executeModerationAction(body);
+          sendJson(res, 200, { ok: true, ...result });
         }).catch((err) => {
           console.error('[api/moderation/action] Error:', err);
           sendJson(res, 500, { ok: false, error: clean(err?.message || err) });
@@ -8603,7 +9170,15 @@ function startStaticServer() {
         res.end('Not found');
         return;
       }
-      res.writeHead(200, { 'content-type': ct[path.extname(f).toLowerCase()] || 'application/octet-stream' });
+      const ext = path.extname(f).toLowerCase();
+      const headers = {
+        'content-type': ct[ext] || 'application/octet-stream',
+        'x-content-type-options': 'nosniff'
+      };
+      if (['.html', '.js', '.css'].includes(ext)) {
+        headers['cache-control'] = 'no-cache, must-revalidate';
+      }
+      res.writeHead(200, headers);
       fs.createReadStream(f).pipe(res);
     } catch {
       res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });

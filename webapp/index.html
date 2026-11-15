@@ -2,534 +2,532 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-  <meta name="theme-color" content="#07070D">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+  <meta name="theme-color" content="#0B0816">
   <title>CXRNER MUSIC — Ecosystem Mini App</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&family=Manrope:wght@500;600;700;800&family=Unbounded:wght@600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=3.0.1">
+  <link rel="stylesheet" href="styles.css?v=4.0.0">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script defer src="app.js?v=3.0.1"></script>
+  <script defer src="app.js?v=4.0.0"></script>
 </head>
 <body>
-  <div id="loader" class="loader">
-    <div class="loader-crest">
-      <img src="assets/logo.png" alt="CXRNER">
+  <div class="ambient-bg" aria-hidden="true"></div>
+
+  <div id="loader" class="loader-screen">
+    <div class="loader-core">
+      <div class="loader-ring"></div>
+      <div class="loader-mark">
+        <svg viewBox="0 0 64 64" width="38" height="38" fill="none">
+          <path d="M32 10L52 24L32 54L12 24L32 10Z" stroke="url(#ldGrad)" stroke-width="3" fill="rgba(124,58,237,0.16)"/>
+          <path d="M32 10V54M12 24H52" stroke="url(#ldGrad)" stroke-width="2" opacity="0.7"/>
+          <defs>
+            <linearGradient id="ldGrad" x1="12" y1="10" x2="52" y2="54" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#A855F7"/><stop offset="1" stop-color="#22D3EE"/>
+            </linearGradient>
+          </defs>
+        </svg>
+      </div>
     </div>
-    <strong>CXRNER MUSIC</strong>
-    <span>Инициализация экосистемы…</span>
+    <div class="loader-title">CXRNER MUSIC</div>
+    <div class="loader-sub">Синхронизация экосистемы 4.0…</div>
   </div>
 
   <div id="appShell" class="app-shell is-hidden">
     <header class="app-topbar" id="appTopbar">
-      <div class="topbar-inner">
-        <button class="brand-chip" data-screen="home" type="button">
-          <span class="brand-logo-wrap"><img src="assets/logo.png" alt="CXRNER"></span>
-          <span class="brand-text">
-            <b>CXRNER</b>
-            <small>ECOSYSTEM 3.0</small>
-          </span>
+      <button class="brand-btn" data-screen="home" type="button" aria-label="CXRNER Главная">
+        <span class="brand-glyph">
+          <svg viewBox="0 0 36 36" width="22" height="22" fill="none">
+            <path d="M18 4L32 13L18 32L4 13L18 4Z" stroke="url(#topLogoG)" stroke-width="2.5" fill="rgba(168,85,247,0.18)"/>
+            <circle cx="18" cy="17" r="3" fill="#22D3EE"/>
+            <defs><linearGradient id="topLogoG" x1="4" y1="4" x2="32" y2="32"><stop stop-color="#A855F7"/><stop offset="1" stop-color="#22D3EE"/></linearGradient></defs>
+          </svg>
+        </span>
+        <span class="brand-meta">
+          <strong>CXRNER</strong>
+          <small>ECOSYSTEM 4.0</small>
+        </span>
+      </button>
+
+      <div class="topbar-actions">
+        <button class="balance-pill" data-screen="drop" type="button" title="Баланс CXRNER DROP">
+          <span class="bp-bolt">⚡</span>
+          <span id="topBalance" class="mono">0</span>
+          <span class="bp-unit">CXP</span>
+          <span class="bp-plus">+</span>
         </button>
-        <div class="topbar-actions">
-          <button class="cxp-pill" id="topbarCxpBtn" data-screen="drop" type="button" title="CXRNER DROP &amp; Баланс CXP">
-            <span class="cxp-spark">⚡</span>
-            <span id="topbarCxpValue" class="mono-num">—</span>
-            <span class="cxp-unit">CXP</span>
-            <span class="cxp-plus">+</span>
-          </button>
-          <button class="icon-pill" id="topbarBellBtn" data-screen="notifications" type="button" aria-label="Уведомления">
-            <span class="svg-icon" data-icon="bell"></span>
-            <span id="topbarBellDot" class="bell-dot is-hidden"></span>
-          </button>
-          <button class="avatar-pill" id="topbarAvatarBtn" data-screen="profile" type="button" aria-label="Профиль">
-            <img id="topbarAvatarImg" src="assets/logo.png" alt="">
-            <span id="topbarAvatarFallback" class="avatar-mono is-hidden">CX</span>
-          </button>
-        </div>
+
+        <button class="icon-circle" data-screen="notifications" type="button" aria-label="Уведомления">
+          <span class="ico-wrap" data-icon="bell"></span>
+          <span id="notifBadge" class="badge-count is-hidden">0</span>
+        </button>
+
+        <button class="icon-circle" data-screen="more" type="button" aria-label="Все сервисы">
+          <span class="ico-wrap" data-icon="grid"></span>
+        </button>
+
+        <button class="avatar-btn" data-screen="profile" type="button" aria-label="Мой профиль">
+          <img id="topAvatar" alt="">
+          <span id="topAvatarFallback" class="avatar-fallback">C</span>
+        </button>
       </div>
     </header>
 
-    <main id="app" class="app-main">
-      <!-- 01. HOME -->
-      <section id="home" class="screen is-active">
-        <div class="live-ticker" id="homeTicker">
-          <span class="ticker-dot"></span>
-          <span id="homeTickerText" class="ticker-text">LIVE ARCHIVE // Загружаем витрину релизов и статус сети…</span>
-        </div>
+    <main class="app-main" id="appMain">
+      <!-- HOME -->
+      <section class="screen is-active" id="home">
+        <div id="homeLiveStrip" class="live-ticker-wrap is-hidden"></div>
+        <div id="homeAdminEntry"></div>
 
-        <div id="homeActionBanners" class="banner-strip"></div>
-
-        <div class="hero-card">
-          <div class="hero-top">
-            <span class="eyebrow-tag">CXRNER MUSIC LABEL</span>
-            <span class="hero-status-pill"><i class="pulse-dot"></i> LIVE</span>
+        <div class="hero-card hero-violet">
+          <div class="hero-glow" aria-hidden="true"></div>
+          <div class="hero-top-row">
+            <span class="hero-kicker">CXRNER MUSIC LABEL</span>
+            <span class="pill-live"><span class="live-dot"></span>LIVE</span>
           </div>
-          <h1>Твоя музыка.<br><span class="text-gradient">Без границ.</span></h1>
-          <p class="hero-sub">Дистрибуция на 120+ площадок, смарт-ссылки CXRNER LINK, коллекционные артефакты DROP и прямой статус модерации в Telegram.</p>
-          <div class="hero-kpi-strip">
-            <div><b>100%</b><small>Мобильный контроль</small></div>
-            <div><b>24/7</b><small>Модерация TG</small></div>
-            <div><b>FREE</b><small>CXRNER LINK</small></div>
+          <h1>Твоя музыка.<br><span class="grad-text">Без границ.</span></h1>
+          <p class="hero-desc">Дистрибуция на 120+ площадок, смарт-ссылки CXRNER LINK, коллекционные артефакты DROP и живая модерация в Telegram.</p>
+          <div class="hero-stats-row">
+            <div class="h-stat"><strong>120+</strong><span>Площадок</span></div>
+            <div class="h-stat"><strong>24/7</strong><span>Модерация TG</span></div>
+            <div class="h-stat"><strong>FREE</strong><span>Смарт-ссылки</span></div>
           </div>
-          <div class="cta-row">
-            <button class="btn btn-primary" data-screen="submit" type="button">
-              <span class="svg-icon" data-icon="upload"></span> Отправить релиз
+          <div class="hero-cta-row">
+            <button class="btn btn-white" data-screen="submit" type="button">
+              <span class="btn-ico" data-icon="upload"></span>
+              <span>Отправить релиз</span>
             </button>
-            <button class="btn btn-cyan" data-screen="drop" type="button">
-              <span class="svg-icon" data-icon="cube"></span> CXRNER DROP
+            <button class="btn btn-glass-lite" data-screen="drop" type="button">
+              <span class="btn-ico" data-icon="cube"></span>
+              <span>CXRNER DROP</span>
             </button>
           </div>
         </div>
 
-        <div class="dashboard-card" id="dashboardHero">
-          <div class="dash-head">
-            <div>
-              <span class="eyebrow-tag">ТВОЙ DASHBOARD</span>
-              <h2 id="homeGreeting">Добро пожаловать</h2>
-              <p id="homeLastRelease" class="muted-text">Синхронизация с лейблом…</p>
+        <div id="homeUserSummary"></div>
+
+        <div class="promo-duo-grid">
+          <button class="promo-tile promo-emerald" data-action="open-friends" type="button">
+            <div class="pt-icon">🤝</div>
+            <div class="pt-copy">
+              <strong>Зови друзей</strong>
+              <span>+75 CXP и кейсы в Пути чемпиона</span>
             </div>
-            <div id="homeRoleBadges" class="badge-cluster"></div>
-          </div>
-          <div class="dash-grid">
-            <button class="dash-stat" data-screen="profile" type="button"><b id="homeStatReleases" class="mono-num">—</b><small>Релизов</small></button>
-            <button class="dash-stat" data-screen="profile" type="button"><b id="homeStatModeration" class="mono-num">—</b><small>На проверке</small></button>
-            <button class="dash-stat" data-screen="link" type="button"><b id="homeStatLinks" class="mono-num">—</b><small>Смарт-ссылок</small></button>
-            <button class="dash-stat" data-screen="drop" type="button"><b id="homeStatItems" class="mono-num">—</b><small>Артефактов</small></button>
-          </div>
-          <div class="completion-bar-wrap">
-            <div class="completion-head">
-              <span>Профиль CXRNER ID</span>
-              <b id="homeCompletionPct" class="mono-num">40%</b>
+            <span class="pt-arrow">›</span>
+          </button>
+          <button class="promo-tile promo-amber" data-screen="link" type="button">
+            <div class="pt-icon">🔗</div>
+            <div class="pt-copy">
+              <strong>CXRNER LINK</strong>
+              <span>Мультиссылка для любого релиза</span>
             </div>
-            <div class="progress-track"><div id="homeCompletionFill" class="progress-fill" style="width:40%"></div></div>
+            <span class="pt-arrow">›</span>
+          </button>
+        </div>
+
+        <div class="sec-head">
+          <div>
+            <h2>Свежие релизы</h2>
+            <p class="sec-sub">Новое в официальном каталоге лейбла</p>
+          </div>
+          <button class="link-btn" data-screen="catalog" type="button">Весь каталог ›</button>
+        </div>
+        <div class="h-scroll" id="homeLatestRow"></div>
+
+        <div class="sec-head">
+          <div>
+            <h2>В тренде</h2>
+            <p class="sec-sub">Лидеры по прослушиваниям и реакциям</p>
+          </div>
+          <button class="link-btn" data-screen="ranking" type="button">Чарт артистов ›</button>
+        </div>
+        <div class="h-scroll" id="homePopularRow"></div>
+
+        <div class="sec-head">
+          <div>
+            <h2>Новости лейбла</h2>
+            <p class="sec-sub">Релизные анонсы, апдейты и питчинг</p>
           </div>
         </div>
+        <div id="homeNewsList" class="stack-list"></div>
 
-        <div class="quick-modules">
-          <button class="q-tile q-cyan" data-screen="drop" type="button">
-            <span class="q-ico" data-icon="cube"></span>
-            <b>CXRNER DROP</b>
-            <small>Кейсы &amp; 3D стенд</small>
+        <div class="sec-head">
+          <div>
+            <h2>Быстрые сервисы</h2>
+            <p class="sec-sub">Всё для релиза и роста аудитории</p>
+          </div>
+        </div>
+        <div class="quick-grid">
+          <button class="quick-card qc-cyan" data-screen="drop" type="button">
+            <span class="qc-ico" data-icon="cube"></span>
+            <strong>CXRNER DROP</strong>
+            <small>Кейсы и дуэли</small>
           </button>
-          <button class="q-tile q-purple" data-screen="link" type="button">
-            <span class="q-ico" data-icon="link"></span>
-            <b>CXRNER LINK</b>
-            <small>Смарт-ссылка</small>
+          <button class="quick-card qc-amber" data-screen="verification" type="button">
+            <span class="qc-ico" data-icon="shield"></span>
+            <strong>Верификация</strong>
+            <small>Галочка артиста</small>
           </button>
-          <button class="q-tile" data-screen="ranking" type="button">
-            <span class="q-ico" data-icon="trophy"></span>
-            <b>Топ артистов</b>
-            <small>Чарт CXRNER</small>
+          <button class="quick-card qc-purple" data-screen="calendar" type="button">
+            <span class="qc-ico" data-icon="calendar"></span>
+            <strong>Календарь</strong>
+            <small>График премьер</small>
           </button>
-          <button class="q-tile" data-screen="calendar" type="button">
-            <span class="q-ico" data-icon="calendar"></span>
-            <b>Календарь</b>
-            <small>Даты релизов</small>
+          <button class="quick-card qc-rose" data-screen="ranking" type="button">
+            <span class="qc-ico" data-icon="trophy"></span>
+            <strong>Топ чарт</strong>
+            <small>Рейтинг лейбла</small>
           </button>
-          <button class="q-tile" data-screen="activity" type="button">
-            <span class="q-ico" data-icon="bolt"></span>
-            <b>Активность</b>
-            <small>История заявок</small>
-          </button>
-          <button class="q-tile" data-screen="verification" type="button">
-            <span class="q-ico" data-icon="shield"></span>
-            <b>Верификация</b>
-            <small>Синяя галочка</small>
-          </button>
-        </div>
-
-        <div class="section-head">
-          <div><span class="eyebrow-tag">ВИТРИНА</span><h2>Последние релизы</h2></div>
-          <button class="link-btn" data-screen="catalog" type="button">Все <span class="svg-icon" data-icon="arrow"></span></button>
-        </div>
-        <div id="homeReleases" class="rail-grid">
-          <div class="skeleton card-skel"></div><div class="skeleton card-skel"></div>
-        </div>
-
-        <div class="section-head">
-          <div><span class="eyebrow-tag">ЧАРТ</span><h2>Слушают сейчас</h2></div>
-          <button class="link-btn" data-screen="catalog" type="button">Каталог <span class="svg-icon" data-icon="arrow"></span></button>
-        </div>
-        <div id="homePopular" class="rail-grid compact-rail">
-          <div class="skeleton card-skel"></div><div class="skeleton card-skel"></div>
-        </div>
-
-        <div class="section-head">
-          <div><span class="eyebrow-tag">РЕЗИДЕНТЫ</span><h2>Артисты CXRNER</h2></div>
-        </div>
-        <div id="homeArtists" class="artists-rail">
-          <div class="skeleton" style="height:76px;width:160px"></div>
-        </div>
-
-        <div class="section-head">
-          <div><span class="eyebrow-tag">CXRNER NEWS</span><h2>Новости лейбла</h2></div>
-        </div>
-        <div id="homeNews" class="news-list">
-          <div class="skeleton" style="height:82px"></div>
         </div>
       </section>
 
-      <!-- 02. CATALOG -->
-      <section id="catalog" class="screen">
+      <!-- CATALOG -->
+      <section class="screen" id="catalog">
         <div class="page-head">
-          <span class="eyebrow-tag">КАТАЛОГ РЕЛИЗОВ</span>
+          <div class="eyebrow">ОФИЦИАЛЬНЫЙ КАТАЛОГ</div>
           <h1>Музыка CXRNER</h1>
-          <p>Ищи релизы, слушай на официальных площадках, сохраняй в избранное.</p>
+          <p class="muted">Слушай треки на площадках, сохраняй в избранное и открывай страницы артистов.</p>
         </div>
 
-        <label class="search-field">
-          <span class="svg-icon" data-icon="search"></span>
-          <input id="catalogSearch" type="search" placeholder="Название трека, артист, жанр…">
-          <button id="clearSearch" type="button" aria-label="Очистить"><span class="svg-icon" data-icon="close"></span></button>
-        </label>
+        <div class="search-bar">
+          <span class="ico-wrap" data-icon="search"></span>
+          <input id="catalogSearchInput" type="search" placeholder="Поиск трека, артиста или жанра…">
+          <button id="catalogSearchClear" class="clear-btn is-hidden" type="button" aria-label="Очистить">✕</button>
+        </div>
 
-        <div id="genreChips" class="chip-scroll"></div>
+        <div class="chip-scroll" id="catalogGenreChips"></div>
 
         <div class="filter-bar">
-          <select id="sortFilter">
+          <select id="catalogSort" class="select-sm">
             <option value="newest">Сначала новые</option>
             <option value="popular">Популярные</option>
-            <option value="title">По алфавиту</option>
+            <option value="title">По названию А–Я</option>
           </select>
-          <button id="catalogFavToggle" class="chip-btn" type="button">★ Избранное</button>
-          <span id="catalogCount" class="mono-num muted-badge">0 релизов</span>
+          <button id="catalogFavOnly" class="btn-chip" type="button">★ Избранное</button>
+          <span id="catalogCount" class="mono muted-count">0 релизов</span>
         </div>
 
-        <div id="recentViewedWrap" class="is-hidden">
-          <div class="mini-label">НЕДАВНО ПРОСМОТРЕННЫЕ</div>
-          <div id="recentViewedList" class="mini-rail"></div>
+        <div class="release-grid" id="catalogGrid"></div>
+      </section>
+
+      <!-- SUBMIT RELEASE (WIZARD) -->
+      <section class="screen" id="submit">
+        <div class="page-head">
+          <div class="eyebrow">ДИСТРИБУЦИЯ</div>
+          <h1>Новый релиз</h1>
+          <p class="muted">5 шагов — анкета сразу закрепится в группе модерации и появится на сайте.</p>
         </div>
 
-        <div id="catalogGrid" class="catalog-grid">
-          <div class="skeleton card-skel"></div><div class="skeleton card-skel"></div>
+        <div class="stepper" id="wizardStepper">
+          <div class="step-dot is-active" data-step="1"><span>1</span><small>Релиз</small></div>
+          <div class="step-line"></div>
+          <div class="step-dot" data-step="2"><span>2</span><small>Артист</small></div>
+          <div class="step-line"></div>
+          <div class="step-dot" data-step="3"><span>3</span><small>Медиа</small></div>
+          <div class="step-line"></div>
+          <div class="step-dot" data-step="4"><span>4</span><small>Ссылки</small></div>
+          <div class="step-line"></div>
+          <div class="step-dot" data-step="5"><span>5</span><small>Отправка</small></div>
+        </div>
+
+        <form id="releaseWizardForm" class="wizard-card">
+          <div class="wizard-pane" data-step="1">
+            <h3>1. Основная информация</h3>
+            <p class="muted-sm">Формат релиза, название, жанр и дата выхода.</p>
+            <label class="field"><span>Тип релиза</span>
+              <select name="type" id="wizType" class="select-ui" required>
+                <option value="">Выбери формат</option>
+                <option value="single">Сингл (1 трек)</option>
+                <option value="ep">EP (2–6 треков)</option>
+                <option value="album">Альбом (7+ треков)</option>
+              </select>
+            </label>
+            <label class="field"><span>Название релиза *</span>
+              <input name="name" id="wizName" required placeholder="Например: Midnight Signal">
+            </label>
+            <label class="field"><span>Саб-название / Версия</span>
+              <input name="version" id="wizVersion" placeholder="slowed / sped up / feat. …">
+            </label>
+            <label class="field"><span>Жанр</span>
+              <div class="preset-chips" id="wizGenrePresets">
+                <button type="button" class="preset-chip" data-genre="Phonk">Phonk</button>
+                <button type="button" class="preset-chip" data-genre="Trap">Trap</button>
+                <button type="button" class="preset-chip" data-genre="Hip-Hop">Hip-Hop</button>
+                <button type="button" class="preset-chip" data-genre="Electronic">Electronic</button>
+                <button type="button" class="preset-chip" data-genre="Hyperpop">Hyperpop</button>
+                <button type="button" class="preset-chip" data-genre="Dark Wave">Dark Wave</button>
+                <button type="button" class="preset-chip" data-genre="Pop">Pop</button>
+                <button type="button" class="preset-chip" data-genre="Alternative">Alternative</button>
+              </div>
+              <input name="genre" id="wizGenre" placeholder="Или введи свой жанр">
+            </label>
+            <label class="field"><span>Планируемая дата релиза *</span>
+              <input name="date" id="wizDate" required placeholder="ДД.ММ.ГГГГ (пример: 28.11.2026)">
+            </label>
+          </div>
+
+          <div class="wizard-pane is-hidden" data-step="2">
+            <h3>2. Данные артиста</h3>
+            <p class="muted-sm">Исполнители, авторы и контакт для обратной связи.</p>
+            <label class="field"><span>Никнейм артиста(ов) *</span>
+              <input name="nick" id="wizNick" required placeholder="Например: CXRNER x Artist">
+            </label>
+            <label class="field"><span>ФИО автора (как в паспорте)</span>
+              <input name="fio" id="wizFio" placeholder="Иванов Иван Иванович">
+            </label>
+            <label class="field"><span>Telegram для связи</span>
+              <input name="tg" id="wizTg" placeholder="@username">
+            </label>
+            <label class="field"><span>Текст трека / битмейкеры</span>
+              <textarea name="lyrics" id="wizLyrics" rows="3" placeholder="Продюсер, авторы музыки и текста…"></textarea>
+            </label>
+            <div class="toggle-grid">
+              <label class="toggle-row"><input type="checkbox" name="tiktok" id="wizTiktok"><span>Отправить фрагмент в TikTok</span></label>
+              <label class="toggle-row"><input type="checkbox" name="explicit" id="wizExplicit"><span>Ненормативная лексика (18+)</span></label>
+              <label class="toggle-row"><input type="checkbox" name="karaoke" id="wizKaraoke"><span>Караоке-текст (Яндекс / VK)</span></label>
+            </div>
+          </div>
+
+          <div class="wizard-pane is-hidden" data-step="3">
+            <h3>3. Материалы и обложка</h3>
+            <p class="muted-sm">Прямые ссылки на WAV/FLAC 16-24 bit и квадратную обложку 3000×3000 px.</p>
+            <label class="field"><span>Ссылка на аудиофайл / архив *</span>
+              <input name="link" id="wizLink" required type="url" placeholder="https://disk.yandex.ru/… или Google Drive">
+            </label>
+            <label class="field"><span>Прямая ссылка на обложку (HTTPS)</span>
+              <input name="cover_url" id="wizCoverUrl" type="url" placeholder="https://…/cover.jpg">
+            </label>
+            <div id="wizCoverPreviewWrap" class="cover-preview-box is-hidden">
+              <img id="wizCoverPreview" alt="">
+              <span class="mono">PREVIEW 1:1</span>
+            </div>
+            <label class="field"><span>Таймкод превью (Яндекс/TikTok)</span>
+              <input name="tt_time" id="wizTtTime" placeholder="Например: 0:42">
+            </label>
+          </div>
+
+          <div class="wizard-pane is-hidden" data-step="4">
+            <h3>4. Карточки и промо</h3>
+            <p class="muted-sm">Необязательно — поможет корректнее привязать релиз к карточкам на площадках.</p>
+            <label class="field"><span>Яндекс Музыка / Spotify / Apple URL</span>
+              <input name="yandex" id="wizYandex" type="url" placeholder="https://music.yandex.ru/artist/…">
+            </label>
+            <label class="field"><span>Питчинг-описание и промо-план</span>
+              <textarea name="promo" id="wizPromo" rows="3" placeholder="Настроение трека, референсы, ключевые факты для редакторов…"></textarea>
+            </label>
+            <label class="field"><span>Комментарий модератору</span>
+              <textarea name="comment" id="wizComment" rows="2" placeholder="Пожелания по выпуску…"></textarea>
+            </label>
+          </div>
+
+          <div class="wizard-pane is-hidden" data-step="5">
+            <h3>5. Проверка и отправка</h3>
+            <p class="muted-sm">Убедись, что все поля заполнены верно.</p>
+            <div id="wizReviewBox" class="review-box"></div>
+            <p id="wizStatusMsg" class="status-note is-hidden"></p>
+          </div>
+
+          <div class="wizard-nav">
+            <button id="wizPrevBtn" class="btn btn-outline is-hidden" type="button">← Назад</button>
+            <button id="wizNextBtn" class="btn btn-primary" type="button">Далее →</button>
+            <button id="wizSubmitBtn" class="btn btn-success is-hidden" type="submit">Отправить релиз 🚀</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- CXRNER DROP -->
+      <section class="screen" id="drop">
+        <div id="dropLiveFeed" class="live-ticker-wrap is-hidden"></div>
+        <div id="dropHeader" class="drop-hero-wrap"></div>
+        <div id="dropBody"></div>
+      </section>
+
+      <!-- PROFILE -->
+      <section class="screen" id="profile">
+        <div id="profileHeaderCard"></div>
+        <div class="seg-tabs seg-tabs-4" id="profileTabs">
+          <button class="seg-btn is-active" data-ptab="overview" type="button">CXRNER ID</button>
+          <button class="seg-btn" data-ptab="friends" type="button">Друзья</button>
+          <button class="seg-btn" data-ptab="releases" type="button">Релизы (<span id="profileRelCount">0</span>)</button>
+          <button class="seg-btn" data-ptab="analytics" type="button">Статистика</button>
+        </div>
+        <div id="profileTabBody"></div>
+      </section>
+
+      <!-- MORE HUB -->
+      <section class="screen" id="more">
+        <div class="page-head">
+          <div class="eyebrow">ЭКОСИСТЕМА CXRNER</div>
+          <h1>Все инструменты</h1>
+          <p class="muted">Единый центр сервисов артиста и модерации.</p>
+        </div>
+        <div class="menu-stack" id="moreMenuStack">
+          <button class="menu-row menu-row-hot" data-screen="drop" type="button">
+            <span class="mr-ico mr-purple" data-icon="cube"></span>
+            <span class="mr-text"><strong>CXRNER DROP</strong><small>Кейсы, Краш/Дуэли, Крафт 5→1 и артефакты</small></span>
+            <span class="mr-chevron">›</span>
+          </button>
+          <button class="menu-row" data-action="open-friends" type="button">
+            <span class="mr-ico mr-emerald" data-icon="users"></span>
+            <span class="mr-text"><strong>Друзья и Путь чемпиона</strong><small>Реферальные награды +75 CXP и бесплатные кейсы</small></span>
+            <span class="mr-chevron">›</span>
+          </button>
+          <button class="menu-row" data-screen="link" type="button">
+            <span class="mr-ico mr-cyan" data-icon="link"></span>
+            <span class="mr-text"><strong>CXRNER LINK Studio</strong><small>Создай смарт-ссылку по UPC или вручную</small></span>
+            <span class="mr-chevron">›</span>
+          </button>
+          <button class="menu-row" data-screen="verification" type="button">
+            <span class="mr-ico mr-amber" data-icon="shield"></span>
+            <span class="mr-text"><strong>Верификация артиста</strong><small>Получи официальную галочку Verified</small></span>
+            <span class="mr-chevron">›</span>
+          </button>
+          <button class="menu-row" data-screen="ranking" type="button">
+            <span class="mr-ico mr-rose" data-icon="trophy"></span>
+            <span class="mr-text"><strong>Топ артистов</strong><small>Рейтинг релизов, лайков и стримов</small></span>
+            <span class="mr-chevron">›</span>
+          </button>
+          <button class="menu-row" data-screen="calendar" type="button">
+            <span class="mr-ico mr-purple" data-icon="calendar"></span>
+            <span class="mr-text"><strong>Календарь релизов</strong><small>Ближайшие премьеры лейбла</small></span>
+            <span class="mr-chevron">›</span>
+          </button>
+          <button class="menu-row" data-screen="activity" type="button">
+            <span class="mr-ico mr-cyan" data-icon="activity"></span>
+            <span class="mr-text"><strong>Лента событий</strong><small>История модерации и уведомлений</small></span>
+            <span class="mr-chevron">›</span>
+          </button>
+          <button class="menu-row is-hidden" id="moreAdminBtn" data-screen="admin" type="button">
+            <span class="mr-ico mr-gold" data-icon="settings"></span>
+            <span class="mr-text"><strong>Админ-центр CXRNER</strong><small>Бот, модерация сайта и Mini App, юзеры, DROP</small></span>
+            <span class="mr-chevron">›</span>
+          </button>
         </div>
       </section>
 
-      <!-- 03. RELEASE WIZARD -->
-      <section id="submit" class="screen">
-        <div class="page-head">
-          <span class="eyebrow-tag">ДИСТРИБУЦИЯ</span>
-          <h1>Новый релиз</h1>
-          <p>Заполни 5 шагов — заявка мгновенно попадёт в модерацию и синхронизируется с сайтом.</p>
+      <!-- CXRNER LINK -->
+      <section class="screen" id="link">
+        <div class="subscreen-bar">
+          <button class="back-pill" data-screen="more" type="button">‹ Назад</button>
+          <strong>CXRNER LINK Studio</strong>
+        </div>
+        <div class="glass-card">
+          <h3>Подставить по UPC</h3>
+          <p class="muted-sm">Найди одобренный релиз по UPC и подтяни обложку со всеми площадками автоматически.</p>
+          <div class="row-gap">
+            <input id="linkUpcLookup" placeholder="Введи UPC релиза">
+            <button id="linkUpcLookupBtn" class="btn btn-primary btn-sm" type="button">Найти</button>
+          </div>
+          <p id="linkUpcStatus" class="status-note is-hidden"></p>
         </div>
 
-        <div class="wizard-stepper" id="wizardStepper">
-          <button class="w-step is-current" data-go-step="1" type="button"><span class="w-num">1</span><small>Релиз</small></button>
-          <span class="w-line"></span>
-          <button class="w-step" data-go-step="2" type="button"><span class="w-num">2</span><small>Артист</small></button>
-          <span class="w-line"></span>
-          <button class="w-step" data-go-step="3" type="button"><span class="w-num">3</span><small>Медиа</small></button>
-          <span class="w-line"></span>
-          <button class="w-step" data-go-step="4" type="button"><span class="w-num">4</span><small>Ссылки</small></button>
-          <span class="w-line"></span>
-          <button class="w-step" data-go-step="5" type="button"><span class="w-num">5</span><small>Отправка</small></button>
-        </div>
-
-        <form id="releaseForm" class="glass-form" novalidate>
-          <div class="form-step is-current" data-form-step="1">
-            <h2>1. Основная информация</h2>
-            <p class="form-desc">Тип релиза, название, жанр и планируемая дата выхода.</p>
-            <label>Тип релиза
-              <select name="type" required>
-                <option value="">Выбери формат</option>
-                <option value="single">Сингл (1 трек)</option>
-                <option value="album">Альбом / EP (2+ треков)</option>
-              </select>
-            </label>
-            <label>Название релиза
-              <input name="name" required placeholder="Например: Midnight Signal">
-            </label>
-            <label>Саб-название / Ремикс / Версия
-              <input name="subname" placeholder="slowed / sped up / feat. ...">
-            </label>
-            <div class="field-group">
-              <span class="field-label">Жанр</span>
-              <div class="preset-pills" id="genrePresetPills">
-                <button type="button" data-preset-genre="Phonk">Phonk</button>
-                <button type="button" data-preset-genre="Trap">Trap</button>
-                <button type="button" data-preset-genre="Hip-Hop">Hip-Hop</button>
-                <button type="button" data-preset-genre="Electronic">Electronic</button>
-                <button type="button" data-preset-genre="Hyperpop">Hyperpop</button>
-                <button type="button" data-preset-genre="Dark Wave">Dark Wave</button>
-              </div>
-              <input name="genre" required placeholder="Впиши или выбери жанр">
-            </div>
-            <label>Планируемая дата релиза
-              <input name="date" required placeholder="ДД.ММ.ГГГГ (например 15.12.2026)">
-            </label>
-            <div class="wizard-nav">
-              <button type="button" class="btn btn-primary full-w next-step">Далее: Артист <span class="svg-icon" data-icon="arrow"></span></button>
-            </div>
+        <form id="linkEditorForm" class="glass-card">
+          <h3 id="linkFormTitle">Создать смарт-ссылку</h3>
+          <input type="hidden" name="id" id="linkEditId">
+          <label class="field"><span>Название *</span><input name="title" id="linkTitle" required placeholder="Midnight Signal"></label>
+          <label class="field"><span>Артист *</span><input name="artist" id="linkArtist" required placeholder="CXRNER"></label>
+          <label class="field"><span>Slug (URL)</span><input name="slug" id="linkSlug" placeholder="midnight-signal"></label>
+          <label class="field"><span>Тема оформления</span>
+            <select name="theme" id="linkTheme" class="select-ui">
+              <option value="aurora">Aurora</option>
+              <option value="glass">Liquid Glass</option>
+              <option value="cyber">Cyber</option>
+              <option value="neon">Neon</option>
+              <option value="chrome">Chrome</option>
+              <option value="midnight">Midnight</option>
+              <option value="purple-dream">Purple Dream</option>
+            </select>
+          </label>
+          <label class="field"><span>URL обложки</span><input name="cover_url" id="linkCoverUrl" type="url" placeholder="https://…"></label>
+          <div class="platforms-grid">
+            <label class="field"><span>Яндекс Музыка</span><input name="pl_yandex" id="plYandex" type="url" placeholder="https://music.yandex.ru/…"></label>
+            <label class="field"><span>VK Музыка</span><input name="pl_vk" id="plVk" type="url" placeholder="https://vk.com/audio…"></label>
+            <label class="field"><span>Spotify</span><input name="pl_spotify" id="plSpotify" type="url" placeholder="https://open.spotify.com/…"></label>
+            <label class="field"><span>Apple Music</span><input name="pl_apple" id="plApple" type="url" placeholder="https://music.apple.com/…"></label>
+            <label class="field"><span>YouTube Music</span><input name="pl_youtube" id="plYoutube" type="url" placeholder="https://music.youtube.com/…"></label>
+            <label class="field"><span>SoundCloud</span><input name="pl_soundcloud" id="plSoundcloud" type="url" placeholder="https://soundcloud.com/…"></label>
           </div>
-
-          <div class="form-step" data-form-step="2">
-            <h2>2. Данные исполнителя</h2>
-            <p class="form-desc">Эти метаданные попадут в карточки артистов на всех DSP.</p>
-            <label>Сценический псевдоним (Ник)
-              <input name="nick" required placeholder="Как подписан на площадках">
-            </label>
-            <label>ФИО исполнителя / правообладателя
-              <input name="fio" required placeholder="Иван Иванов">
-            </label>
-            <label>Наличие текста / вокала
-              <select name="has_lyrics" required>
-                <option value="">Выбери вариант</option>
-                <option value="Да">Да, есть вокал / текст</option>
-                <option value="Нет, это инструментал">Нет, инструментальный трек</option>
-              </select>
-            </label>
-            <label>Ненормативная лексика (Explicit)
-              <select name="mat" required>
-                <option value="">Выбери вариант</option>
-                <option value="Нет">Нет (Clean)</option>
-                <option value="Да">Да (Explicit 18+)</option>
-              </select>
-            </label>
-            <label>Версия мастер-записи
-              <input name="version" placeholder="Original / Radio Edit / Remix">
-            </label>
-            <div class="wizard-nav two-col">
-              <button type="button" class="btn btn-ghost prev-step">Назад</button>
-              <button type="button" class="btn btn-primary next-step">Далее: Медиа <span class="svg-icon" data-icon="arrow"></span></button>
-            </div>
-          </div>
-
-          <div class="form-step" data-form-step="3">
-            <h2>3. Аудио и обложка</h2>
-            <p class="form-desc">Обложка 3000×3000px и ссылка на папку с WAV-файлами (Google Drive / Яндекс Диск).</p>
-            <label>Ссылка на аудио-файлы (WAV + обложка)
-              <input name="link" type="url" required placeholder="https://drive.google.com/...">
-            </label>
-            <label>Прямая ссылка на обложку (предпросмотр)
-              <input name="cover_url" id="wizardCoverInput" type="url" placeholder="https://.../cover.jpg">
-            </label>
-            <div class="wizard-cover-preview" id="wizardCoverPreviewBox">
-              <img id="wizardCoverPreviewImg" src="" alt="Preview" class="is-hidden">
-              <div id="wizardCoverPreviewPlaceholder" class="preview-placeholder">Предпросмотр обложки появится здесь</div>
-            </div>
-            <label>Telegram для связи с модератором
-              <input name="tg" required placeholder="@username">
-            </label>
-            <div class="wizard-nav two-col">
-              <button type="button" class="btn btn-ghost prev-step">Назад</button>
-              <button type="button" class="btn btn-primary next-step">Далее: Ссылки <span class="svg-icon" data-icon="arrow"></span></button>
-            </div>
-          </div>
-
-          <div class="form-step" data-form-step="4">
-            <h2>4. Площадки и питчинг</h2>
-            <p class="form-desc">Укажи профиль Яндекс Музыки и промо-описание для редакторов.</p>
-            <label>Мультиссылка / BandLink (если есть)
-              <input name="smart_link" type="url" placeholder="https://band.link/...">
-            </label>
-            <label>Карточка артиста Яндекс Музыка
-              <input name="yandex" placeholder="https://music.yandex.ru/artist/... или .">
-            </label>
-            <label class="album-only">Треклист альбома / EP
-              <textarea name="tracklist" rows="3" placeholder="1. Intro&#10;2. Main Track"></textarea>
-            </label>
-            <label>Промо-текст / Питчинг в плейлисты
-              <textarea name="promo" rows="3" placeholder="Настроение трека, референсы, история создания…"></textarea>
-            </label>
-            <label>Комментарий для модератора
-              <textarea name="comment" rows="2" placeholder="Дополнительные пожелания"></textarea>
-            </label>
-            <div class="wizard-nav two-col">
-              <button type="button" class="btn btn-ghost prev-step">Назад</button>
-              <button type="button" class="btn btn-primary next-step">Далее: Проверка <span class="svg-icon" data-icon="arrow"></span></button>
-            </div>
-          </div>
-
-          <div class="form-step" data-form-step="5">
-            <h2>5. Финальная проверка</h2>
-            <p class="form-desc">Проверь все поля перед отправкой в Telegram-модерацию CXRNER.</p>
-            <div id="wizardSummaryBox" class="summary-card"></div>
-            <div class="wizard-nav two-col">
-              <button type="button" class="btn btn-ghost prev-step">Назад</button>
-              <button type="submit" id="wizardSubmitBtn" class="btn btn-primary">
-                <span class="svg-icon" data-icon="send"></span> Отправить релиз
-              </button>
-            </div>
+          <div class="row-gap">
+            <button class="btn btn-primary" type="submit">Сохранить ссылку</button>
+            <button id="linkResetBtn" class="btn btn-outline is-hidden" type="button">Отменить правку</button>
           </div>
         </form>
 
-        <div id="wizardSuccessCard" class="glass-card success-card is-hidden">
-          <div class="success-icon">✓</div>
-          <h2>Релиз отправлен на модерацию!</h2>
-          <p class="muted-text">Заявка сохранена, передана модераторам и появится в разделе «Мои релизы» твоего профиля.</p>
-          <div class="cta-row">
-            <button type="button" class="btn btn-primary" data-screen="profile">Открыть мои релизы</button>
-            <button type="button" class="btn btn-ghost" id="wizardResetBtn">Отправить ещё один</button>
-          </div>
-        </div>
+        <div class="sec-head"><div><h2>Мои ссылки</h2></div></div>
+        <div id="myLinksList" class="stack-list"></div>
       </section>
 
-      <!-- 04. PROFILE / CXRNER ID -->
-      <section id="profile" class="screen">
-        <div id="profileContent" class="stack-gap">
-          <div class="skeleton" style="height:260px"></div>
+      <!-- VERIFICATION -->
+      <section class="screen" id="verification">
+        <div class="subscreen-bar">
+          <button class="back-pill" data-screen="more" type="button">‹ Назад</button>
+          <strong>Верификация артиста</strong>
         </div>
+        <div id="verificationStateBox"></div>
       </section>
 
-      <!-- 05. MORE HUB -->
-      <section id="more" class="screen">
-        <div class="page-head">
-          <span class="eyebrow-tag">ЭКОСИСТЕМА</span>
-          <h1>Все сервисы</h1>
-          <p>Переключайся между инструментами артиста и настройками в одном окне.</p>
+      <!-- NOTIFICATIONS -->
+      <section class="screen" id="notifications">
+        <div class="subscreen-bar">
+          <button class="back-pill" data-screen="home" type="button">‹ Назад</button>
+          <strong>Уведомления</strong>
+          <button id="markAllReadBtn" class="link-btn" type="button">Прочитать всё</button>
         </div>
-
-        <div class="more-grid">
-          <button class="more-card accent-cyan" data-screen="drop" type="button">
-            <span class="more-ico" data-icon="cube"></span>
-            <div><b>CXRNER DROP Arena</b><small>Кейсы, дуэли 1v1, синтез 5→1 и 3D склад</small></div>
-            <span class="svg-icon" data-icon="arrow"></span>
-          </button>
-          <button class="more-card accent-purple" data-screen="link" type="button">
-            <span class="more-ico" data-icon="link"></span>
-            <div><b>CXRNER LINK Studio</b><small>Умные смарт-ссылки для релизов</small></div>
-            <span class="svg-icon" data-icon="arrow"></span>
-          </button>
-          <button class="more-card" data-screen="verification" type="button">
-            <span class="more-ico" data-icon="shield"></span>
-            <div><b>Верификация артиста</b><small>Подтверждение площадок и синяя галочка</small></div>
-            <span class="svg-icon" data-icon="arrow"></span>
-          </button>
-          <button class="more-card" data-screen="notifications" type="button">
-            <span class="more-ico" data-icon="bell"></span>
-            <div><b>Центр уведомлений</b><small>Статусы заявок и системные события</small></div>
-            <span class="svg-icon" data-icon="arrow"></span>
-          </button>
-          <button class="more-card" data-screen="ranking" type="button">
-            <span class="more-ico" data-icon="trophy"></span>
-            <div><b>Рейтинг артистов</b><small>Лидеры прослушиваний и лайков</small></div>
-            <span class="svg-icon" data-icon="arrow"></span>
-          </button>
-          <button class="more-card" data-screen="calendar" type="button">
-            <span class="more-ico" data-icon="calendar"></span>
-            <div><b>Календарь релизов</b><small>Предстоящие и прошедшие выходы</small></div>
-            <span class="svg-icon" data-icon="arrow"></span>
-          </button>
-          <button class="more-card" data-screen="activity" type="button">
-            <span class="more-ico" data-icon="bolt"></span>
-            <div><b>Лента активности</b><small>Лог релизов и событий аккаунта</small></div>
-            <span class="svg-icon" data-icon="arrow"></span>
-          </button>
-        </div>
-
-        <div id="adminEntry"></div>
-
-        <div class="mini-label" style="margin-top:20px">ОФИЦИАЛЬНЫЕ РЕСУРСЫ</div>
-        <div class="more-grid">
-          <a class="more-card" href="https://cxrnermusic.vercel.app/dashboard" target="_blank" rel="noopener">
-            <span class="more-ico" data-icon="external"></span>
-            <div><b>Веб-кабинет на сайте</b><small>cxrnermusic.vercel.app/dashboard</small></div>
-            <span class="svg-icon" data-icon="external"></span>
-          </a>
-          <a class="more-card" href="https://t.me/cxrnermusic" target="_blank" rel="noopener">
-            <span class="more-ico" data-icon="telegram"></span>
-            <div><b>Telegram-канал лейбла</b><small>@cxrnermusic</small></div>
-            <span class="svg-icon" data-icon="external"></span>
-          </a>
-          <a class="more-card" href="mailto:cxrner.label@gmail.com">
-            <span class="more-ico" data-icon="mail"></span>
-            <div><b>Почта поддержки</b><small>cxrner.label@gmail.com</small></div>
-            <span class="svg-icon" data-icon="external"></span>
-          </a>
-        </div>
+        <div id="notificationsList" class="stack-list"></div>
       </section>
 
-      <!-- SUB-SCREEN: CXRNER DROP -->
-      <section id="drop" class="screen">
-        <div id="dropContent" class="stack-gap">
-          <div class="skeleton" style="height:240px"></div>
+      <!-- RANKING -->
+      <section class="screen" id="ranking">
+        <div class="subscreen-bar">
+          <button class="back-pill" data-screen="more" type="button">‹ Назад</button>
+          <strong>Топ артистов</strong>
         </div>
+        <div class="seg-tabs">
+          <button class="seg-btn is-active" data-rank-sort="likes" type="button">По лайкам</button>
+          <button class="seg-btn" data-rank-sort="listens" type="button">По стримам</button>
+          <button class="seg-btn" data-rank-sort="releases" type="button">По релизам</button>
+        </div>
+        <div id="rankingList" class="stack-list"></div>
       </section>
 
-      <!-- SUB-SCREEN: CXRNER LINK STUDIO -->
-      <section id="link" class="screen">
-        <div class="page-head">
-          <span class="eyebrow-tag">CXRNER LINK STUDIO</span>
-          <h1>Смарт-ссылки</h1>
-          <p>Собирай премиальные релиз-страницы для всех музыкальных площадок.</p>
+      <!-- CALENDAR -->
+      <section class="screen" id="calendar">
+        <div class="subscreen-bar">
+          <button class="back-pill" data-screen="more" type="button">‹ Назад</button>
+          <strong>Календарь релизов</strong>
         </div>
-        <div id="linkContent" class="stack-gap">
-          <div class="skeleton" style="height:220px"></div>
-        </div>
+        <div id="calendarList" class="stack-list"></div>
       </section>
 
-      <!-- SUB-SCREEN: VERIFICATION -->
-      <section id="verification" class="screen">
-        <div class="page-head">
-          <span class="eyebrow-tag">CXRNER VERIFICATION</span>
-          <h1>Верификация артиста</h1>
-          <p>Подтверди свои профили Яндекс Музыки, Spotify, VK и Apple Music прямо внутри Mini App.</p>
+      <!-- ACTIVITY -->
+      <section class="screen" id="activity">
+        <div class="subscreen-bar">
+          <button class="back-pill" data-screen="more" type="button">‹ Назад</button>
+          <strong>Лента событий</strong>
         </div>
-        <div id="verificationContent" class="stack-gap"></div>
+        <div id="activityList" class="stack-list"></div>
       </section>
 
-      <!-- SUB-SCREEN: NOTIFICATIONS -->
-      <section id="notifications" class="screen">
-        <div class="page-head row-head">
-          <div>
-            <span class="eyebrow-tag">ЦЕНТР УВЕДОМЛЕНИЙ</span>
-            <h1>Уведомления</h1>
-          </div>
-          <button id="markAllReadBtn" class="chip-btn" type="button">Прочитать все</button>
+      <!-- ADMIN CONTROL CENTER -->
+      <section class="screen" id="admin">
+        <div class="subscreen-bar">
+          <button class="back-pill" data-screen="profile" type="button">‹ Назад</button>
+          <strong>Админ-центр CXRNER</strong>
+          <button id="adminRefreshBtn" class="btn-chip" type="button">↻ Обновить</button>
         </div>
-        <div id="notificationsContent" class="stack-gap"></div>
-      </section>
-
-      <!-- SUB-SCREEN: RANKING -->
-      <section id="ranking" class="screen">
-        <div class="page-head">
-          <span class="eyebrow-tag">ТОП CXRNER</span>
-          <h1>Рейтинг артистов</h1>
-          <p>Лидеры витрины по прослушиваниям, лайкам и релизам.</p>
+        <div class="seg-tabs seg-tabs-4" id="adminTabs">
+          <button class="seg-btn is-active" data-atab="overview" type="button">Бот & Обзор</button>
+          <button class="seg-btn" data-atab="moderation" type="button">Анкеты <span id="admModCount" class="mini-pill-num">0</span></button>
+          <button class="seg-btn" data-atab="users" type="button">Юзеры & ID</button>
+          <button class="seg-btn" data-atab="content" type="button">Контент</button>
         </div>
-        <div class="filter-bar">
-          <select id="rankingSort">
-            <option value="likes">По лайкам</option>
-            <option value="listens">По прослушиваниям</option>
-            <option value="releases">По релизам</option>
-          </select>
-        </div>
-        <div id="rankingContent" class="stack-gap"></div>
-      </section>
-
-      <!-- SUB-SCREEN: CALENDAR -->
-      <section id="calendar" class="screen">
-        <div class="page-head">
-          <span class="eyebrow-tag">ГРАФИК</span>
-          <h1>Календарь релизов</h1>
-          <p>Даты выхода одобренных треков и альбомов.</p>
-        </div>
-        <div id="calendarContent" class="stack-gap"></div>
-      </section>
-
-      <!-- SUB-SCREEN: ACTIVITY -->
-      <section id="activity" class="screen">
-        <div class="page-head">
-          <span class="eyebrow-tag">ЛОГ СОБЫТИЙ</span>
-          <h1>Активность</h1>
-          <p>История отправок, статусов модерации и системных событий.</p>
-        </div>
-        <div id="activityContent" class="stack-gap"></div>
-      </section>
-
-      <!-- SUB-SCREEN: ADMIN CONTROL CENTER -->
-      <section id="admin" class="screen">
-        <div class="page-head">
-          <span class="eyebrow-tag">CONTROL CENTER</span>
-          <h1>Админ-панель</h1>
-          <p>Доступ защищён проверкой Telegram ID администратора.</p>
-        </div>
-        <div id="adminContent" class="stack-gap"></div>
+        <div id="adminTabBody"></div>
       </section>
     </main>
 
-    <nav class="bottom-nav" id="bottomNav">
+    <!-- LIQUID GLASS FLOATING DOCK -->
+    <nav class="bottom-nav" id="bottomNav" aria-label="Навигация">
       <button class="nav-item is-active" data-screen="home" type="button">
         <span class="nav-ico" data-icon="home"></span>
         <span>Главная</span>
@@ -539,32 +537,36 @@
         <span>Каталог</span>
       </button>
       <button class="nav-item nav-release" data-screen="submit" type="button">
-        <span class="nav-ico-fab" data-icon="upload"></span>
+        <span class="nav-ico-fab" data-icon="plus"></span>
         <span>Релиз</span>
+      </button>
+      <button class="nav-item" data-screen="drop" type="button">
+        <span class="nav-ico" data-icon="cube"></span>
+        <span id="dockDropBadge" class="dock-dot is-hidden">1</span>
+        <span>DROP</span>
       </button>
       <button class="nav-item" data-screen="profile" type="button">
         <span class="nav-ico" data-icon="user"></span>
         <span>Профиль</span>
       </button>
-      <button class="nav-item" data-screen="more" type="button">
-        <span class="nav-ico" data-icon="menu"></span>
-        <span>Ещё</span>
-      </button>
     </nav>
   </div>
 
-  <!-- MODAL SHEET -->
-  <div id="releaseModal" class="modal is-hidden" role="dialog" aria-modal="true">
-    <button class="modal-backdrop" data-close-modal type="button" aria-label="Закрыть"></button>
-    <article class="modal-sheet">
-      <div class="sheet-grabber"></div>
-      <button class="modal-close" data-close-modal type="button" aria-label="Закрыть">
-        <span class="svg-icon" data-icon="close"></span>
-      </button>
-      <div id="modalContent" class="modal-scroll"></div>
-    </article>
+  <!-- GPU 60 FPS ROULETTE UNSEALING OVERLAY -->
+  <div id="unsealOverlay" class="unseal-overlay is-hidden" role="dialog" aria-modal="true">
+    <div class="unseal-backdrop"></div>
+    <div class="unseal-stage" id="unsealStage"></div>
   </div>
 
-  <div id="toast" class="toast is-hidden" role="status"></div>
+  <!-- BOTTOM SHEET MODAL -->
+  <div id="releaseModal" class="modal-backdrop is-hidden" role="dialog" aria-modal="true">
+    <div class="modal-sheet">
+      <div class="modal-grabber"></div>
+      <button class="modal-close" id="closeReleaseModal" type="button" aria-label="Закрыть">✕</button>
+      <div id="modalBody"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast is-hidden"></div>
 </body>
 </html>
