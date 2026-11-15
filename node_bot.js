@@ -321,7 +321,7 @@ const FORM_STATUS = {
   APPROVED: 'approved',
   REJECTED: 'rejected'
 };
-const BOT_BUILD_VERSION = '2026-11-15-unpin-v2';
+const BOT_BUILD_VERSION = '2026-11-15-unpin-v3';
 const pollingHealth = {
   ok: null,
   fail_streak: 0,
@@ -1326,7 +1326,7 @@ function buildSupabaseCabinetRows() {
 }
 
 function buildSupabaseFormRows() {
-  const rows = [];
+  const byKey = new Map();
   for (const [uid, listRaw] of Object.entries(db || {})) {
     const list = Array.isArray(listRaw) ? listRaw : [];
     for (let idx = 0; idx < list.length; idx += 1) {
@@ -1335,10 +1335,11 @@ function buildSupabaseFormRows() {
       const row = buildSupabaseFormRow(uid, { username: rel.username || '' }, rel, mapReleaseStatusToFormStatus(rel.status));
       row.form_payload = safeJson(rel) || {};
       row.moderation_message_id = Number(rel.moderation_message_id || 0) || null;
-      rows.push(row);
+      const key = clean(row.submission_key || `${uid}:${idx}`);
+      byKey.set(key, row);
     }
   }
-  return rows;
+  return Array.from(byKey.values());
 }
 
 function buildSupabaseUserRows() {
@@ -1359,7 +1360,7 @@ function buildSupabaseUserRows() {
 }
 
 function buildSupabaseApprovedReleaseRows() {
-  const rows = [];
+  const byFormId = new Map();
   const now = new Date().toISOString();
   for (const [uid, listRaw] of Object.entries(db || {})) {
     const list = Array.isArray(listRaw) ? listRaw : [];
@@ -1368,7 +1369,7 @@ function buildSupabaseApprovedReleaseRows() {
       const st = canonicalStatus(rel.status);
       if (![STATUS.APPROVED, STATUS.PUBLISHED].includes(st)) continue;
       const formId = clean(rel.supabase_form_id || `${uid}:${clean(rel.submission_time || idx)}`);
-      rows.push({
+      byFormId.set(formId, {
         form_id: formId,
         telegram_id: String(uid),
         username: clean(rel.username || ''),
@@ -1383,7 +1384,7 @@ function buildSupabaseApprovedReleaseRows() {
       });
     }
   }
-  return rows;
+  return Array.from(byFormId.values());
 }
 
 async function supabaseUpsertRows(tableName, rows, chunkSize = SUPABASE_SYNC_CHUNK_SIZE) {
@@ -1416,11 +1417,24 @@ async function supabaseUpsertFormRows(tableName, rows, chunkSize = SUPABASE_SYNC
   if (!rows.length) return;
   for (let i = 0; i < rows.length; i += chunkSize) {
     const chunk = rows.slice(i, i + chunkSize);
-    await supabaseRequest(`${tableName}?on_conflict=telegram_id,submission_key`, {
-      method: 'POST',
-      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
-      body: chunk
-    });
+    try {
+      await supabaseRequest(`${tableName}?on_conflict=telegram_id,submission_key`, {
+        method: 'POST',
+        headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+        body: chunk
+      });
+    } catch (e) {
+      const msg = clean(e?.message || e);
+      if (/cxrner_forms_submission_key_key|23505/i.test(msg)) {
+        await supabaseRequest(`${tableName}?on_conflict=submission_key`, {
+          method: 'POST',
+          headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+          body: chunk
+        });
+      } else {
+        throw e;
+      }
+    }
     if (SUPABASE_SYNC_CHUNK_DELAY_MS > 0 && i + chunkSize < rows.length) await delay(SUPABASE_SYNC_CHUNK_DELAY_MS);
   }
 }
@@ -2323,6 +2337,10 @@ function buildCompactModerationOriginal(user, uid, rel) {
   };
   return `${fmtForm(user, uid, compact)}\n\n⚠️ <i>Длинные поля автоматически сокращены для Telegram.</i>`;
 }
+function parseRetryAfterSec(err) {
+  const m = /retry\s+after\s+(\d+)/i.exec(clean(err?.message || err));
+  return m ? Number.parseInt(m[1], 10) : 0;
+}
 function isBenignUnpinError(err) {
   const s = clean(err?.message || err).toLowerCase();
   return (
@@ -2345,7 +2363,7 @@ function isMissingPinRightsError(err) {
 }
 async function pinModerationMessage(messageId, opts = {}) {
   const mid = Number(messageId || 0);
-  if (!mid) return { ok: false, error: 'missing_message_id' };
+  if (!mid) return { ok: false, error: 'missing_message_id', retryAfter: 0 };
   try {
     await tg('pinChatMessage', {
       chat_id: MOD_CHAT,
@@ -2355,18 +2373,19 @@ async function pinModerationMessage(messageId, opts = {}) {
     return { ok: true };
   } catch (e) {
     const errText = shortTgError(e);
+    const retryAfter = parseRetryAfterSec(errText);
     if (isMissingPinRightsError(errText)) {
       moderationHealth.can_pin_messages = false;
     }
     if (!opts.silent) {
       console.warn(`[MODERATION] pin failed msg_id=${mid}: ${errText}`);
     }
-    return { ok: false, error: errText, missingRights: isMissingPinRightsError(errText) };
+    return { ok: false, error: errText, missingRights: isMissingPinRightsError(errText), retryAfter };
   }
 }
 async function unpinModerationMessage(messageId, opts = {}) {
   const mid = Number(messageId || 0);
-  if (!mid) return { ok: false, error: 'missing_message_id' };
+  if (!mid) return { ok: false, error: 'missing_message_id', retryAfter: 0 };
   try {
     await tg('unpinChatMessage', {
       chat_id: MOD_CHAT,
@@ -2375,6 +2394,7 @@ async function unpinModerationMessage(messageId, opts = {}) {
     return { ok: true };
   } catch (e) {
     const errText = shortTgError(e);
+    const retryAfter = parseRetryAfterSec(errText);
     if (isBenignUnpinError(errText)) {
       return { ok: true, alreadyUnpinned: true };
     }
@@ -2384,7 +2404,7 @@ async function unpinModerationMessage(messageId, opts = {}) {
     if (!opts.silent) {
       console.warn(`[MODERATION] unpin failed msg_id=${mid}: ${errText}`);
     }
-    return { ok: false, error: errText, missingRights: isMissingPinRightsError(errText) };
+    return { ok: false, error: errText, missingRights: isMissingPinRightsError(errText), retryAfter };
   }
 }
 async function syncModerationPinForRelease(rel, fallbackMessageId = 0, opts = {}) {
@@ -4512,21 +4532,66 @@ function parseBotCommand(rawText, botUsername = '') {
   };
 }
 
-function replyInChat(msg, text, extra = {}) {
+async function replyInChat(msg, text, extra = {}) {
   const chatId = msg?.chat?.id;
   const threadId = Number(msg?.message_thread_id || 0);
   const payload = { ...extra };
   if (threadId > 0 && payload.message_thread_id === undefined) {
     payload.message_thread_id = threadId;
   }
-  return sendText(chatId, text, payload).catch((err) => {
-    const errStr = clean(err?.message || err).toLowerCase();
-    if (payload.reply_to_message_id && (errStr.includes('replied message not found') || errStr.includes('reply_to_message'))) {
-      delete payload.reply_to_message_id;
-      return sendText(chatId, text, payload);
+  const attemptSend = async (body) => {
+    try {
+      return await sendText(chatId, text, body);
+    } catch (err) {
+      const errStr = clean(err?.message || err).toLowerCase();
+      if (body.reply_to_message_id && (errStr.includes('replied message not found') || errStr.includes('reply_to_message'))) {
+        const nextBody = { ...body };
+        delete nextBody.reply_to_message_id;
+        return await sendText(chatId, text, nextBody);
+      }
+      const waitSec = parseRetryAfterSec(err);
+      if (waitSec > 0 && waitSec <= 45) {
+        await delay((waitSec + 1) * 1000);
+        return await sendText(chatId, text, body);
+      }
+      throw err;
     }
-    throw err;
-  });
+  };
+  return attemptSend(payload);
+}
+
+async function updateStatusReport(statusMsg, msg, text) {
+  const chatId = msg?.chat?.id;
+  if (statusMsg?.message_id) {
+    try {
+      await tg('editMessageText', {
+        chat_id: chatId,
+        message_id: statusMsg.message_id,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true
+      });
+      return;
+    } catch (e) {
+      const errText = clean(e?.message || e);
+      if (errText.includes('message is not modified')) return;
+      const waitSec = parseRetryAfterSec(errText);
+      if (waitSec > 0 && waitSec <= 45) {
+        await delay((waitSec + 1) * 1000);
+        try {
+          await tg('editMessageText', {
+            chat_id: chatId,
+            message_id: statusMsg.message_id,
+            text,
+            parse_mode: 'HTML',
+            disable_web_page_preview: true
+          });
+          return;
+        } catch {}
+      }
+    }
+  }
+  await replyInChat(msg, text, { reply_to_message_id: msg?.message_id }).catch(() => {});
 }
 async function applyModeration(query, action, uid, idx) {
   if (Number(query?.message?.chat?.id || 0) !== Number(MOD_CHAT)) {
@@ -4655,7 +4720,7 @@ async function onMessage(msg) {
   if (!chatId) return;
 
   const parsedCmd = parseBotCommand(text, moderationHealth.bot_username);
-  if (parsedCmd && ['/new', '/unpin', '/unpin_done', '/modtest'].includes(parsedCmd.command)) {
+  if (parsedCmd && ['/new', '/unpin', '/unpin_done', '/unpin_all', '/modtest'].includes(parsedCmd.command)) {
     const cmd = parsedCmd.command;
     if (cmd === '/new') {
       if (Number(chatId) !== Number(MOD_CHAT)) {
@@ -4739,55 +4804,83 @@ async function onMessage(msg) {
         await replyInChat(msg, 'Доступ только участникам группы модерации.');
         return;
       }
+      const argLower = clean(parsedCmd.arg || '').toLowerCase();
+      const forceAll = argLower === 'all' || argLower === 'force';
+      const parsedLimit = Number.parseInt(argLower, 10);
+      const batchLimit = Number.isFinite(parsedLimit) && parsedLimit > 0
+        ? Math.min(200, parsedLimit)
+        : (forceAll ? 200 : 35);
+
       let statusMsg = null;
       try {
         statusMsg = await replyInChat(
           msg,
-          '⏳ Проверяю карточки со статусами «Модерация», «Отклонено», «Принято», «Удалено»...',
+          '⏳ Собираю карточки со статусами «Модерация», «Отклонено», «Принято», «Удалено»...',
           { reply_to_message_id: msg.message_id }
         );
       } catch {}
 
       try {
-        const targets = new Map();
+        const candidates = new Map();
+        const dbMessageStatus = new Map();
         for (const [uKey, listRaw] of Object.entries(db || {})) {
           const list = Array.isArray(listRaw) ? listRaw : [];
           for (let i = 0; i < list.length; i += 1) {
             const r = list[i];
             const mid = Number(r?.moderation_message_id || 0);
-            if (mid && !shouldStatusStayPinned(r?.status)) {
-              targets.set(mid, { uid: uKey, idx: i, rel: r });
-            }
+            if (!mid) continue;
+            dbMessageStatus.set(mid, r);
+            if (shouldStatusStayPinned(r?.status)) continue;
+            if (!forceAll && r.moderation_pinned === false) continue;
+            const sortTs = parseIsoTime(r?.moderation_time || r?.submission_time || '') || 0;
+            candidates.set(mid, { mid, uid: uKey, idx: i, rel: r, sortTs });
           }
         }
         if (SUPABASE_SYNC_ENABLED) {
           try {
-            const rows = await supabaseSelectAll(SUPABASE_FORMS_TABLE, 'id,status,moderation_message_id', 'created_at.desc');
+            const rows = await supabaseSelectAll(SUPABASE_FORMS_TABLE, 'id,status,moderation_message_id,created_at,updated_at', 'created_at.desc');
             for (const row of (rows || [])) {
               const mid = Number(row?.moderation_message_id || 0);
               if (!mid) continue;
               const st = mapFormStatusToReleaseStatus(row?.status || '');
-              if (!shouldStatusStayPinned(st) && !targets.has(mid)) {
-                targets.set(mid, null);
+              if (shouldStatusStayPinned(st)) continue;
+              const knownRel = dbMessageStatus.get(mid);
+              if (!forceAll && knownRel && knownRel.moderation_pinned === false) continue;
+              if (!candidates.has(mid)) {
+                const sortTs = parseIsoTime(row?.updated_at || row?.created_at || '') || 0;
+                candidates.set(mid, { mid, uid: '', idx: 0, rel: knownRel || null, sortTs });
               }
             }
           } catch (e) {
             console.warn('[MODERATION] /unpin_done supabase fetch warning:', shortTgError(e));
           }
         }
+
+        const sorted = Array.from(candidates.values()).sort((a, b) => (b.sortTs - a.sortTs) || (b.mid - a.mid));
+        const batch = sorted.slice(0, batchLimit);
+        const remainingBefore = Math.max(0, sorted.length - batch.length);
+
+        let checked = 0;
         let unpinned = 0;
         let already = 0;
         let failed = 0;
         let missingRights = false;
+        let floodStopped = false;
         let dirtyDb = false;
-        for (const [mid, ref] of targets.entries()) {
-          const res = await unpinModerationMessage(mid, { silent: true });
+
+        for (const item of batch) {
+          let res = await unpinModerationMessage(item.mid, { silent: true });
+          if (!res.ok && res.retryAfter > 0 && res.retryAfter <= 35) {
+            await delay((res.retryAfter + 1) * 1000);
+            res = await unpinModerationMessage(item.mid, { silent: true });
+          }
+          checked += 1;
           if (res.ok) {
             if (res.alreadyUnpinned) already += 1;
             else unpinned += 1;
-            if (ref?.rel && ref.rel.moderation_pinned !== false) {
-              ref.rel.moderation_pinned = false;
-              syncModerationMirror(ref.uid, ref.idx, ref.rel);
+            if (item.rel && item.rel.moderation_pinned !== false) {
+              item.rel.moderation_pinned = false;
+              if (item.uid !== '') syncModerationMirror(item.uid, item.idx, item.rel);
               dirtyDb = true;
             }
           } else {
@@ -4796,46 +4889,107 @@ async function onMessage(msg) {
               missingRights = true;
               break;
             }
+            if (res.retryAfter > 0) {
+              floodStopped = true;
+              break;
+            }
           }
-          await delay(35);
+          await delay(450);
         }
         if (dirtyDb) {
           saveDb();
           saveModDb();
         }
-        const hint = missingRights
-          ? '\n\n⚠️ Остановлено: у бота нет права администратора «Закрепление сообщений» (can_pin_messages) в группе модерации.'
-          : '';
+        const totalLeft = Math.max(0, sorted.length - (unpinned + already));
+        const notes = [];
+        if (missingRights) {
+          notes.push('⚠️ Остановлено: у бота нет права администратора «Закрепление сообщений» (can_pin_messages).');
+        }
+        if (floodStopped) {
+          notes.push('⏳ Сработал лимит Telegram (429). Запустите <code>/unpin_done</code> через ~30 сек или используйте <code>/unpin_all</code> (сбросит все старые закрепы за 1 запрос).');
+        } else if (remainingBefore > 0 || totalLeft > 0) {
+          notes.push(`ℹ️ В очереди осталось ещё: <b>${totalLeft}</b>. Запустите <code>/unpin_done</code> снова или <code>/unpin_all</code> для мгновенной очистки всех закрепов.`);
+        }
         const reportText =
           `🧹 <b>Очистка закрепов завершена</b>\n\n` +
-          `Проверено карточек: <b>${targets.size}</b>\n` +
+          `Проверено (новейшие): <b>${checked}</b> из <b>${sorted.length}</b>\n` +
           `📌 Откреплено: <b>${unpinned}</b>\n` +
           `ℹ️ Уже не закреплено: <b>${already}</b>\n` +
-          `❌ Ошибок: <b>${failed}</b>${hint}`;
+          `❌ Ошибок: <b>${failed}</b>` +
+          (notes.length ? `\n\n${notes.join('\n')}` : '');
 
-        if (statusMsg?.message_id) {
-          await tg('editMessageText', {
-            chat_id: chatId,
-            message_id: statusMsg.message_id,
-            text: reportText,
-            parse_mode: 'HTML',
-            disable_web_page_preview: true
-          }).catch(() => replyInChat(msg, reportText, { reply_to_message_id: msg.message_id }));
-        } else {
-          await replyInChat(msg, reportText, { reply_to_message_id: msg.message_id });
-        }
+        await updateStatusReport(statusMsg, msg, reportText);
       } catch (err) {
         const errReport = `❌ Ошибка /unpin_done: <code>${esc(shortTgError(err))}</code>`;
-        if (statusMsg?.message_id) {
-          await tg('editMessageText', {
-            chat_id: chatId,
-            message_id: statusMsg.message_id,
-            text: errReport,
-            parse_mode: 'HTML'
-          }).catch(() => replyInChat(msg, errReport, { reply_to_message_id: msg.message_id }).catch(() => {}));
-        } else {
-          await replyInChat(msg, errReport, { reply_to_message_id: msg.message_id }).catch(() => {});
+        await updateStatusReport(statusMsg, msg, errReport);
+      }
+      return;
+    }
+
+    if (cmd === '/unpin_all') {
+      if (Number(chatId) !== Number(MOD_CHAT)) {
+        await replyInChat(msg, 'Команда /unpin_all работает только в группе модерации.');
+        return;
+      }
+      if (!(await canModerate(msg.from?.id, msg))) {
+        await replyInChat(msg, 'Доступ только участникам группы модерации.');
+        return;
+      }
+      let statusMsg = null;
+      try {
+        statusMsg = await replyInChat(
+          msg,
+          '🧹 Сбрасываю все старые закрепы и оставляю только актуальные «На отгрузке»...',
+          { reply_to_message_id: msg.message_id }
+        );
+      } catch {}
+
+      try {
+        await tg('unpinAllChatMessages', { chat_id: MOD_CHAT });
+        for (const [uKey, listRaw] of Object.entries(db || {})) {
+          const list = Array.isArray(listRaw) ? listRaw : [];
+          for (let i = 0; i < list.length; i += 1) {
+            if (list[i] && typeof list[i] === 'object') {
+              list[i].moderation_pinned = false;
+              syncModerationMirror(uKey, i, list[i]);
+            }
+          }
         }
+        const onUploadRefs = collectOnUploadReleaseRefs().filter((it) => Number(it.rel?.moderation_message_id || 0) > 0);
+        const toRepin = onUploadRefs.slice(0, 15).reverse();
+        let repinned = 0;
+        for (const item of toRepin) {
+          const mid = Number(item.rel.moderation_message_id || 0);
+          let pRes = await pinModerationMessage(mid, { silent: true });
+          if (!pRes.ok && pRes.retryAfter > 0 && pRes.retryAfter <= 35) {
+            await delay((pRes.retryAfter + 1) * 1000);
+            pRes = await pinModerationMessage(mid, { silent: true });
+          }
+          if (pRes.ok) {
+            item.rel.moderation_pinned = true;
+            syncModerationMirror(item.uid, item.idx, item.rel);
+            repinned += 1;
+          } else if (pRes.retryAfter > 0 || pRes.missingRights) {
+            break;
+          }
+          await delay(450);
+        }
+        saveDb();
+        saveModDb();
+        await updateStatusReport(
+          statusMsg,
+          msg,
+          `✅ <b>Все старые закрепы очищены!</b>\n\n` +
+          `📌 Обратно закреплено активных «На отгрузке»: <b>${repinned}</b> (из ${onUploadRefs.length}).`
+        );
+      } catch (err) {
+        const errText = shortTgError(err);
+        const hint = moderationErrorHint(errText);
+        await updateStatusReport(
+          statusMsg,
+          msg,
+          `❌ Не удалось выполнить /unpin_all: <code>${esc(errText)}</code>${hint ? `\n${esc(hint)}` : ''}`
+        );
       }
       return;
     }
@@ -7433,7 +7587,8 @@ async function loop() {
   try {
     await tg('setMyCommands', {
       commands: [
-        { command: 'unpin_done', description: 'Открепить все карточки со статусом Модерация/Отклонено/Принято' },
+        { command: 'unpin_all', description: 'Сбросить все старые закрепы и оставить только «На отгрузке»' },
+        { command: 'unpin_done', description: 'Открепить последние карточки не в статусе «На отгрузке»' },
         { command: 'unpin', description: 'Открепить сообщение (ответом на карточку)' },
         { command: 'new', description: 'Пометить анкеты «На отгрузке» свободными' },
         { command: 'modtest', description: 'Проверить права бота в группе модерации' }
