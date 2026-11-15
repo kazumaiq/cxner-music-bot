@@ -5,6 +5,7 @@ const path = require('node:path');
 const http = require('node:http');
 const dns = require('node:dns');
 const crypto = require('node:crypto');
+const { execSync } = require('node:child_process');
 
 const ROOT = __dirname;
 const CFG = loadJson('deploy_config.json', {});
@@ -321,7 +322,65 @@ const FORM_STATUS = {
   APPROVED: 'approved',
   REJECTED: 'rejected'
 };
-const BOT_BUILD_VERSION = '2026-11-15-unpin-v3';
+const BOT_BUILD_VERSION = '2026-11-15-status-v4';
+const BOT_STARTED_AT_MS = Date.now();
+const BOT_STARTED_AT = new Date(BOT_STARTED_AT_MS).toISOString();
+
+function readGitDeployMeta() {
+  const envCommit = clean(
+    process.env.GIT_COMMIT ||
+    process.env.SOURCE_COMMIT ||
+    process.env.GITHUB_SHA ||
+    process.env.RAILWAY_GIT_COMMIT_SHA ||
+    process.env.VERCEL_GIT_COMMIT_SHA ||
+    ''
+  );
+  const envBranch = clean(process.env.GIT_BRANCH || process.env.GITHUB_REF_NAME || '');
+  const envMessage = clean(process.env.GIT_COMMIT_MESSAGE || '');
+  try {
+    const out = execSync('git log -1 --format=%h%n%cI%n%s', {
+      cwd: ROOT,
+      timeout: 1500,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).toString('utf8').split(/\r?\n/);
+    const branch = clean(execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd: ROOT,
+      timeout: 1000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).toString('utf8'));
+    if (clean(out[0])) {
+      return {
+        commit: clean(out[0]),
+        commit_date: clean(out[1] || ''),
+        commit_subject: clean(out[2] || '').slice(0, 120),
+        branch: branch || envBranch || 'main',
+        source: 'git'
+      };
+    }
+  } catch {}
+  return {
+    commit: envCommit ? envCommit.slice(0, 12) : '',
+    commit_date: '',
+    commit_subject: envMessage ? envMessage.slice(0, 120) : '',
+    branch: envBranch || '',
+    source: envCommit ? 'env' : 'none'
+  };
+}
+const BOT_DEPLOY_INFO = readGitDeployMeta();
+
+function formatUptimeMs(ms) {
+  const totalSec = Math.max(0, Math.floor(Number(ms || 0) / 1000));
+  const d = Math.floor(totalSec / 86400);
+  const h = Math.floor((totalSec % 86400) / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const parts = [];
+  if (d) parts.push(`${d}д`);
+  if (h || parts.length) parts.push(`${h}ч`);
+  if (m || parts.length) parts.push(`${m}м`);
+  parts.push(`${s}с`);
+  return parts.join(' ');
+}
 const pollingHealth = {
   ok: null,
   fail_streak: 0,
@@ -4720,8 +4779,96 @@ async function onMessage(msg) {
   if (!chatId) return;
 
   const parsedCmd = parseBotCommand(text, moderationHealth.bot_username);
-  if (parsedCmd && ['/new', '/unpin', '/unpin_done', '/unpin_all', '/modtest'].includes(parsedCmd.command)) {
+  if (parsedCmd && ['/status', '/ping', '/ver', '/deploy', '/new', '/unpin', '/unpin_done', '/unpin_all', '/modtest'].includes(parsedCmd.command)) {
     const cmd = parsedCmd.command;
+    if (cmd === '/status' || cmd === '/ping' || cmd === '/ver' || cmd === '/deploy') {
+      const inModChat = Number(chatId) === Number(MOD_CHAT);
+      if (!inModChat && !isAdmin(uid)) {
+        return;
+      }
+      if (inModChat && !(await canModerate(msg.from?.id, msg))) {
+        await replyInChat(msg, 'Доступ только участникам группы модерации.');
+        return;
+      }
+      const receivedAtMs = Date.now();
+      const msgDateSec = Number(msg?.date || 0);
+      const deliveryLagSec = msgDateSec > 0 ? Math.max(0, Math.round((receivedAtMs - msgDateSec * 1000) / 1000)) : null;
+
+      let apiPingMs = null;
+      let apiPingOk = false;
+      const t0 = Date.now();
+      try {
+        await tg('getMe', {});
+        apiPingMs = Date.now() - t0;
+        apiPingOk = true;
+      } catch (e) {
+        apiPingMs = Date.now() - t0;
+      }
+      await ensureModerationHealth(true);
+      const replyBuildMs = Date.now() - receivedAtMs;
+
+      let totalReleases = 0;
+      let onUploadCount = 0;
+      let moderationCount = 0;
+      let approvedCount = 0;
+      let rejectedCount = 0;
+      for (const listRaw of Object.values(db || {})) {
+        const list = Array.isArray(listRaw) ? listRaw : [];
+        for (const r of list) {
+          if (!r || typeof r !== 'object') continue;
+          totalReleases += 1;
+          const st = canonicalStatus(r.status);
+          if (st === STATUS.ON_UPLOAD) onUploadCount += 1;
+          else if (st === STATUS.MODERATION) moderationCount += 1;
+          else if (st === STATUS.APPROVED || st === STATUS.PUBLISHED) approvedCount += 1;
+          else if (st === STATUS.REJECTED) rejectedCount += 1;
+        }
+      }
+
+      const gitLine = BOT_DEPLOY_INFO.commit
+        ? `<code>${esc(BOT_DEPLOY_INFO.commit)}</code>` +
+          (BOT_DEPLOY_INFO.branch ? ` (${esc(BOT_DEPLOY_INFO.branch)})` : '') +
+          (BOT_DEPLOY_INFO.commit_subject ? `\n• Коммит: <i>${esc(BOT_DEPLOY_INFO.commit_subject)}</i>` : '')
+        : '<i>не передан (.git отсутствует в контейнере)</i>';
+
+      const pollLine = pollingHealth.ok === true
+        ? `🟢 активен${pollingHealth.last_poll_ok_at ? ` (${esc(pollingHealth.last_poll_ok_at.slice(11, 19))} UTC)` : ''}`
+        : `🔴 ошибки: ${pollingHealth.fail_streak}${pollingHealth.last_error ? ` (${esc(pollingHealth.last_error.slice(0, 60))})` : ''}`;
+
+      const supabaseBadges = [
+        `forms:${supabaseFeatureState.forms ? '✅' : '❌'}`,
+        `users:${supabaseFeatureState.users ? '✅' : '❌'}`,
+        `public:${supabaseFeatureState.public_releases ? '✅' : '❌'}`,
+        `interactions:${supabaseFeatureState.interactions ? '✅' : '❌'}`
+      ].join(' • ');
+
+      const msgLines = [
+        '🟢 <b>Бот онлайн и отвечает!</b>',
+        '',
+        '🚀 <b>Деплой и версия:</b>',
+        `• Build: <code>${esc(BOT_BUILD_VERSION)}</code>`,
+        `• Git: ${gitLine}`,
+        `• Старт: <code>${esc(BOT_STARTED_AT.replace('T', ' ').slice(0, 19))} UTC</code>`,
+        `• Uptime: <b>${esc(formatUptimeMs(Date.now() - BOT_STARTED_AT_MS))}</b>`,
+        '',
+        '⚡ <b>Реакция и отклик:</b>',
+        `• Telegram API (getMe): ${apiPingOk ? `<b>${apiPingMs} мс</b>` : `❌ ошибка (${apiPingMs} мс)`}`,
+        `• Доставка апдейта → старт ответа: <b>${deliveryLagSec !== null ? `${deliveryLagSec} сек` : '—'}</b> (сбор: ${replyBuildMs} мс)`,
+        `• Long polling: ${pollLine}`,
+        '',
+        '🛡 <b>Группа модерации:</b>',
+        `• Чат: <b>${esc(moderationHealth.chat_title || String(MOD_CHAT))}</b>`,
+        `• Роль: <code>${esc(moderationHealth.bot_status || '-')}</code> (@${esc(moderationHealth.bot_username || '-')})`,
+        `• Права: отправка ${moderationHealth.can_send_messages === true ? '✅' : '❌'} • закреп/откреп ${moderationHealth.can_pin_messages === true ? '✅' : '❌'}`,
+        '',
+        '🗄 <b>База и синк:</b>',
+        `• Релизов: <b>${totalReleases}</b> (отгрузка: ${onUploadCount}, модерация: ${moderationCount}, принято: ${approvedCount}, откл: ${rejectedCount})`,
+        `• Supabase: ${supabaseFeatureState ? supabaseBadges : 'отключен'}`
+      ];
+
+      await replyInChat(msg, msgLines.join('\n'), { reply_to_message_id: msg.message_id });
+      return;
+    }
     if (cmd === '/new') {
       if (Number(chatId) !== Number(MOD_CHAT)) {
         await replyInChat(msg, 'Команда /new работает только в группе модерации.');
@@ -5828,6 +5975,11 @@ function startStaticServer() {
       ok: true,
       service: 'cxrner-music-bot',
       build_version: BOT_BUILD_VERSION,
+      deploy: {
+        ...BOT_DEPLOY_INFO,
+        started_at: BOT_STARTED_AT,
+        uptime_sec: Math.floor((Date.now() - BOT_STARTED_AT_MS) / 1000)
+      },
       now: new Date().toISOString(),
       request: {
         host: clean(req.headers?.host || ''),
@@ -7359,6 +7511,11 @@ function startStaticServer() {
           ok: true,
           service: 'cxrner-music-bot',
           build_version: BOT_BUILD_VERSION,
+          deploy: {
+            ...BOT_DEPLOY_INFO,
+            started_at: BOT_STARTED_AT,
+            uptime_sec: Math.floor((Date.now() - BOT_STARTED_AT_MS) / 1000)
+          },
           webapp: true,
           port: WEB_PORT,
           now: new Date().toISOString()
@@ -7557,7 +7714,7 @@ async function loop() {
   if (SUPABASE_SYNC_ENABLED) {
     await syncSupabaseNow('startup');
   }
-  console.info(`[bot] CXRNER Node fallback bot started build=${BOT_BUILD_VERSION}`);
+  console.info(`[bot] CXRNER Node fallback bot started build=${BOT_BUILD_VERSION} commit=${BOT_DEPLOY_INFO.commit || 'none'}`);
   console.info(`[bot] moderation chat: ${MOD_CHAT}`);
   console.info(`[bot] admin ids: ${ADMIN_IDS.join(', ')}`);
   if (imported.added || imported.merged) {
@@ -7587,6 +7744,7 @@ async function loop() {
   try {
     await tg('setMyCommands', {
       commands: [
+        { command: 'status', description: 'Версия деплоя, отклик и состояние бота' },
         { command: 'unpin_all', description: 'Сбросить все старые закрепы и оставить только «На отгрузке»' },
         { command: 'unpin_done', description: 'Открепить последние карточки не в статусе «На отгрузке»' },
         { command: 'unpin', description: 'Открепить сообщение (ответом на карточку)' },
