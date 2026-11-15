@@ -329,7 +329,8 @@ const moderationHealth = {
   bot_id: '',
   bot_username: '',
   bot_status: '',
-  can_send_messages: null
+  can_send_messages: null,
+  can_pin_messages: null
 };
 let supabaseSyncInProgress = false;
 let supabaseSyncQueued = false;
@@ -1576,8 +1577,11 @@ function moderationErrorHint(errText) {
   if (!src) return '';
   if (src.includes('chat not found')) return 'Проверьте MODERATION_CHAT_ID: бот не видит этот чат.';
   if (src.includes('bot is not a member')) return 'Добавьте бота в группу модерации.';
+  if (src.includes('manage pinned') || src.includes('can_pin_messages') || src.includes('chat_admin_required')) {
+    return 'Выдайте боту права администратора в группе модерации (включая «Закрепление сообщений» / can_pin_messages).';
+  }
   if (src.includes('not enough rights') || src.includes('have no rights') || src.includes('forbidden')) {
-    return 'Выдайте боту права на отправку сообщений в группе модерации.';
+    return 'Выдайте боту права на отправку и закрепление/открепление сообщений в группе модерации.';
   }
   if (src.includes('message thread not found') || src.includes('topic')) {
     return 'Для группы с топиками укажите MODERATION_THREAD_ID (ID нужного топика).';
@@ -1587,21 +1591,34 @@ function moderationErrorHint(errText) {
 
 function describeBotMemberStatus(member) {
   const status = clean(member?.status).toLowerCase();
-  if (!status) return { ok: false, reason: 'не удалось определить статус бота в чате', can_send_messages: null, status: '' };
+  if (!status) return { ok: false, reason: 'не удалось определить статус бота в чате', can_send_messages: null, can_pin_messages: null, status: '' };
   if (status === 'left' || status === 'kicked') {
-    return { ok: false, reason: `бот имеет статус "${status}" в группе модерации`, can_send_messages: false, status };
+    return { ok: false, reason: `бот имеет статус "${status}" в группе модерации`, can_send_messages: false, can_pin_messages: false, status };
   }
   if (status === 'restricted') {
     const canSend = member?.can_send_messages !== false;
+    const canPin = member?.can_pin_messages === true;
     if (!canSend) {
-      return { ok: false, reason: 'бот ограничен и не может отправлять сообщения (can_send_messages=false)', can_send_messages: false, status };
+      return { ok: false, reason: 'бот ограничен и не может отправлять сообщения (can_send_messages=false)', can_send_messages: false, can_pin_messages: canPin, status };
     }
-    return { ok: true, reason: '', can_send_messages: true, status };
+    return { ok: true, reason: '', can_send_messages: true, can_pin_messages: canPin, status };
   }
-  if (status === 'member' || status === 'administrator' || status === 'creator') {
-    return { ok: true, reason: '', can_send_messages: true, status };
+  if (status === 'creator') {
+    return { ok: true, reason: '', can_send_messages: true, can_pin_messages: true, status };
   }
-  return { ok: true, reason: '', can_send_messages: null, status };
+  if (status === 'administrator') {
+    return {
+      ok: true,
+      reason: '',
+      can_send_messages: member?.can_send_messages !== false,
+      can_pin_messages: member?.can_pin_messages !== false,
+      status
+    };
+  }
+  if (status === 'member') {
+    return { ok: true, reason: '', can_send_messages: true, can_pin_messages: null, status };
+  }
+  return { ok: true, reason: '', can_send_messages: null, can_pin_messages: null, status };
 }
 
 async function ensureModerationHealth(force = false) {
@@ -1880,7 +1897,14 @@ function keyboardCommunity() {
     [{ text: '⬅️ Главное меню', callback_data: 'main' }]
   ]};
 }
-function moderationKeyboard(uid, idx) {
+function shouldStatusStayPinned(status) {
+  return canonicalStatus(status || STATUS.ON_UPLOAD) === STATUS.ON_UPLOAD;
+}
+
+function moderationKeyboard(uid, idx, rel = null) {
+  const isPinned = rel && typeof rel === 'object'
+    ? (rel.moderation_pinned !== undefined ? !!rel.moderation_pinned : shouldStatusStayPinned(rel.status))
+    : true;
   return { inline_keyboard: [
     [
       { text: '🕓 На отгрузке', callback_data: `m_upload_${uid}_${idx}` },
@@ -1893,7 +1917,10 @@ function moderationKeyboard(uid, idx) {
       { text: '🗑 Удалено', callback_data: `m_delete_${uid}_${idx}` }
     ],
     [
-      { text: '📦 Присвоить UPC', callback_data: `m_upc_${uid}_${idx}` }
+      { text: '📦 Присвоить UPC', callback_data: `m_upc_${uid}_${idx}` },
+      isPinned
+        ? { text: '📌 Открепить', callback_data: `m_unpin_${uid}_${idx}` }
+        : { text: '📌 Закрепить', callback_data: `m_pin_${uid}_${idx}` }
     ]
   ]};
 }
@@ -2288,6 +2315,90 @@ function buildCompactModerationOriginal(user, uid, rel) {
   };
   return `${fmtForm(user, uid, compact)}\n\n⚠️ <i>Длинные поля автоматически сокращены для Telegram.</i>`;
 }
+function isBenignUnpinError(err) {
+  const s = clean(err?.message || err).toLowerCase();
+  return (
+    s.includes('message to unpin not found') ||
+    s.includes('message not found') ||
+    s.includes('message_id_invalid') ||
+    s.includes('message is not pinned')
+  );
+}
+function isMissingPinRightsError(err) {
+  const s = clean(err?.message || err).toLowerCase();
+  return (
+    s.includes('not enough rights') ||
+    s.includes('have no rights') ||
+    s.includes('chat_admin_required') ||
+    s.includes('right_forbidden') ||
+    s.includes('can_pin_messages') ||
+    s.includes('manage pinned')
+  );
+}
+async function pinModerationMessage(messageId, opts = {}) {
+  const mid = Number(messageId || 0);
+  if (!mid) return { ok: false, error: 'missing_message_id' };
+  try {
+    await tg('pinChatMessage', {
+      chat_id: MOD_CHAT,
+      message_id: mid,
+      disable_notification: opts.disableNotification !== false
+    });
+    return { ok: true };
+  } catch (e) {
+    const errText = shortTgError(e);
+    if (isMissingPinRightsError(errText)) {
+      moderationHealth.can_pin_messages = false;
+    }
+    if (!opts.silent) {
+      console.warn(`[MODERATION] pin failed msg_id=${mid}: ${errText}`);
+    }
+    return { ok: false, error: errText, missingRights: isMissingPinRightsError(errText) };
+  }
+}
+async function unpinModerationMessage(messageId, opts = {}) {
+  const mid = Number(messageId || 0);
+  if (!mid) return { ok: false, error: 'missing_message_id' };
+  try {
+    await tg('unpinChatMessage', {
+      chat_id: MOD_CHAT,
+      message_id: mid
+    });
+    return { ok: true };
+  } catch (e) {
+    const errText = shortTgError(e);
+    if (isBenignUnpinError(errText)) {
+      return { ok: true, alreadyUnpinned: true };
+    }
+    if (isMissingPinRightsError(errText)) {
+      moderationHealth.can_pin_messages = false;
+    }
+    if (!opts.silent) {
+      console.warn(`[MODERATION] unpin failed msg_id=${mid}: ${errText}`);
+    }
+    return { ok: false, error: errText, missingRights: isMissingPinRightsError(errText) };
+  }
+}
+async function syncModerationPinForRelease(rel, fallbackMessageId = 0, opts = {}) {
+  const mid = Number(rel?.moderation_message_id || fallbackMessageId || 0);
+  if (!mid) return { ok: false, skipped: true };
+  const canon = canonicalStatus(rel?.status || STATUS.ON_UPLOAD);
+  if (!shouldStatusStayPinned(canon)) {
+    const res = await unpinModerationMessage(mid, opts);
+    if (res.ok && rel && typeof rel === 'object') {
+      rel.moderation_pinned = false;
+    }
+    return res;
+  }
+  if (opts.pinIfOnUpload) {
+    const res = await pinModerationMessage(mid, opts);
+    if (res.ok && rel && typeof rel === 'object') {
+      rel.moderation_pinned = true;
+    }
+    return res;
+  }
+  return { ok: true, skipped: true };
+}
 async function refreshModerationMessage(uid, idx, rel, fallbackMessageId = 0) {
   const messageId = Number(rel.moderation_message_id || fallbackMessageId || 0);
   if (!messageId) return false;
@@ -2298,7 +2409,7 @@ async function refreshModerationMessage(uid, idx, rel, fallbackMessageId = 0) {
       text: buildModerationText(uid, rel),
       parse_mode: 'HTML',
       disable_web_page_preview: true,
-      reply_markup: moderationKeyboard(uid, idx)
+      reply_markup: moderationKeyboard(uid, idx, rel)
     });
     return true;
   } catch (e) {
@@ -2411,6 +2522,10 @@ async function applyReleaseStatus(uid, idx, status, moderator, opts = {}) {
     });
   }
 
+  const pinResult = await syncModerationPinForRelease(rel, opts.fallbackMessageId, {
+    pinIfOnUpload: canonStatus === STATUS.ON_UPLOAD && (statusChanged || !!opts.restorePin)
+  });
+
   saveDb();
   syncModerationMirror(uid, idx, rel);
   saveModDb();
@@ -2433,12 +2548,13 @@ async function applyReleaseStatus(uid, idx, status, moderator, opts = {}) {
 
   console.info(
     `[MODERATION] status change: user_id=${uid} idx=${idx} ${prevStatus} -> ${canonStatus}` +
-    ` by=${clean(moderator?.username || moderator?.id || '-')}`
+    ` by=${clean(moderator?.username || moderator?.id || '-')}` +
+    (pinResult && !pinResult.skipped ? ` pin=${pinResult.ok ? (shouldStatusStayPinned(canonStatus) ? 'pinned' : 'unpinned') : `err:${pinResult.error}`}` : '')
   );
 
   await refreshModerationMessage(uid, idx, rel, opts.fallbackMessageId);
   await notifyArtistAboutRelease(uid, rel, canonStatus);
-  return { ok: true, rel, uid, idx, status: canonStatus };
+  return { ok: true, rel, uid, idx, status: canonStatus, pin_result: pinResult };
 }
 async function startModerationReplyFlow(query, type, uid, idx) {
   if (Number(query?.message?.chat?.id || 0) !== Number(MOD_CHAT)) {
@@ -2571,7 +2687,10 @@ async function handleModerationReplyMessage(msg) {
       await sendText(msg.chat.id, `❌ ${out.error}`);
       return true;
     }
-    await sendText(msg.chat.id, '✅ Релиз отклонён, причина отправлена артисту.', {
+    const pinNote = out.pin_result && !out.pin_result.ok && out.pin_result.missingRights
+      ? '\n⚠️ Не удалось автоматически открепить сообщение: выдайте боту право «Закрепление сообщений» в настройках администраторов группы.'
+      : '';
+    await sendText(msg.chat.id, `✅ Релиз отклонён, причина отправлена артисту.${pinNote}`, {
       reply_to_message_id: Number(rel.moderation_message_id || fallbackMessageId || 0) || undefined
     });
     return true;
@@ -2786,7 +2905,7 @@ async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_
       text: moderationText,
       parse_mode: 'HTML',
       disable_web_page_preview: true,
-      reply_markup: moderationKeyboard(uid, idx)
+      reply_markup: moderationKeyboard(uid, idx, { ...rel, moderation_pinned: true })
     }));
   } catch (e) {
     const msg = clean(e?.message || e);
@@ -2798,7 +2917,7 @@ async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_
         text: moderationText,
         parse_mode: 'HTML',
         disable_web_page_preview: true,
-        reply_markup: moderationKeyboard(uid, idx)
+        reply_markup: moderationKeyboard(uid, idx, { ...rel, moderation_pinned: true })
       }));
     } else {
       const hint = moderationErrorHint(msg);
@@ -2818,6 +2937,8 @@ async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_
 
   rel.moderation_message_id = sent.message_id;
   rel.moderation_original_text = orig;
+  const pinRes = await pinModerationMessage(sent.message_id);
+  rel.moderation_pinned = !!pinRes.ok;
   db[uid].push(rel);
   saveDb();
 
@@ -2828,13 +2949,12 @@ async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_
   });
 
   console.info(
-    `[WEBAPP] release accepted to moderation: user_id=${uid} idx=${idx} msg_id=${Number(sent.message_id || 0)}`
+    `[WEBAPP] release accepted to moderation: user_id=${uid} idx=${idx} msg_id=${Number(sent.message_id || 0)} pin=${pinRes.ok ? 'ok' : pinRes.error}`
   );
 
   ensureModDbShape();
   modDb.moderation_messages.push({ ...rel, user_id: uid, idx, message_id: sent.message_id });
   saveModDb();
-  try { await tg('pinChatMessage', { chat_id: MOD_CHAT, message_id: sent.message_id }); } catch {}
   return { idx, rel };
 }
 
@@ -3449,7 +3569,7 @@ async function handleCoverMessage(msg) {
         caption,
         parse_mode: 'HTML'
       }));
-      try { await tg('pinChatMessage', { chat_id: MOD_CHAT, message_id: sent.message_id }); } catch {}
+      await pinModerationMessage(sent.message_id);
       await sendText(chatId, '✅ Заказ обложки отправлен в модерацию.');
       resetCoverSession(uid);
     } catch (e) {
@@ -4197,6 +4317,7 @@ async function verifyModerationChatAccess(force = false) {
       moderationHealth.reason = `не удалось получить статус бота в группе: ${shortTgError(memberErr)}`;
       moderationHealth.bot_status = '';
       moderationHealth.can_send_messages = null;
+      moderationHealth.can_pin_messages = null;
       console.error(`[bot] moderation chat access failed: ${moderationHealth.reason}`);
       return false;
     }
@@ -4206,12 +4327,17 @@ async function verifyModerationChatAccess(force = false) {
     moderationHealth.reason = desc.reason || '';
     moderationHealth.bot_status = desc.status || '';
     moderationHealth.can_send_messages = desc.can_send_messages;
+    moderationHealth.can_pin_messages = desc.can_pin_messages;
 
     if (moderationHealth.ok) {
       console.info(
         `[bot] moderation chat access: ok (${title})` +
-        ` status=${desc.status || '-'} thread=${MODERATION_THREAD_ID > 0 ? MODERATION_THREAD_ID : 'default'}`
+        ` status=${desc.status || '-'} can_pin=${desc.can_pin_messages === null ? 'unknown' : desc.can_pin_messages}` +
+        ` thread=${MODERATION_THREAD_ID > 0 ? MODERATION_THREAD_ID : 'default'}`
       );
+      if (desc.can_pin_messages === false) {
+        console.warn('[bot] moderation chat warning: bot lacks can_pin_messages right — auto-pin/unpin will fail until enabled in group admins.');
+      }
       return true;
     }
 
@@ -4225,6 +4351,7 @@ async function verifyModerationChatAccess(force = false) {
     moderationHealth.reason = shortTgError(e);
     moderationHealth.bot_status = '';
     moderationHealth.can_send_messages = null;
+    moderationHealth.can_pin_messages = null;
     console.error(`[bot] moderation chat access failed: ${moderationHealth.reason}`);
     return false;
   }
@@ -4377,13 +4504,17 @@ async function applyModeration(query, action, uid, idx) {
   }
   const out = await applyReleaseStatus(uid, idx, st, query.from, {
     fallbackMessageId: Number(query.message.message_id || 0),
-    clearRejectReason: st !== STATUS.REJECTED
+    clearRejectReason: st !== STATUS.REJECTED,
+    restorePin: st === STATUS.ON_UPLOAD
   });
   if (!out.ok) {
     await sendText(query.message.chat.id, `❌ ${out.error}`);
     return;
   }
-  await sendText(query.message.chat.id, `Статус обновлен: ${statusText(st)}`);
+  const pinWarn = out.pin_result && !out.pin_result.ok && out.pin_result.missingRights
+    ? `\n⚠️ Бот не смог ${shouldStatusStayPinned(st) ? 'закрепить' : 'открепить'} сообщение: выдайте боту право «Закрепление сообщений» в группе модерации.`
+    : '';
+  await sendText(query.message.chat.id, `Статус обновлен: ${statusText(st)}${pinWarn}`);
 }
 
 function collectOnUploadReleaseRefs() {
@@ -4532,6 +4663,117 @@ async function onMessage(msg) {
     return;
   }
 
+  if (/^\/unpin(?:@\w+)?$/i.test(text)) {
+    if (Number(chatId) !== Number(MOD_CHAT)) {
+      await sendText(chatId, 'Команда /unpin работает только в группе модерации.');
+      return;
+    }
+    if (!(await canModerate(msg.from?.id))) {
+      await sendText(chatId, 'Доступ только участникам группы модерации.');
+      return;
+    }
+    const targetMsgId = Number(msg.reply_to_message?.message_id || 0);
+    if (!targetMsgId) {
+      await sendText(chatId, 'Ответьте командой <code>/unpin</code> на сообщение, которое нужно открепить, или используйте <code>/unpin_done</code> для массового открепления.');
+      return;
+    }
+    const res = await unpinModerationMessage(targetMsgId);
+    if (!res.ok) {
+      const hint = moderationErrorHint(res.error);
+      await sendText(chatId, `❌ Не удалось открепить сообщение: <code>${esc(res.error)}</code>${hint ? `\n${esc(hint)}` : ''}`);
+      return;
+    }
+    const ref = findReleaseByModerationMessageId(targetMsgId);
+    if (ref?.rel) {
+      ref.rel.moderation_pinned = false;
+      saveDb();
+      syncModerationMirror(ref.uid, ref.idx, ref.rel);
+      saveModDb();
+      await refreshModerationMessage(ref.uid, ref.idx, ref.rel, targetMsgId);
+    }
+    await sendText(chatId, res.alreadyUnpinned ? 'ℹ️ Сообщение уже откреплено.' : '✅ Сообщение откреплено.', {
+      reply_to_message_id: targetMsgId
+    });
+    return;
+  }
+
+  if (/^\/unpin_done(?:@\w+)?$/i.test(text)) {
+    if (Number(chatId) !== Number(MOD_CHAT)) {
+      await sendText(chatId, 'Команда /unpin_done работает только в группе модерации.');
+      return;
+    }
+    if (!(await canModerate(msg.from?.id))) {
+      await sendText(chatId, 'Доступ только участникам группы модерации.');
+      return;
+    }
+    const targets = new Map();
+    for (const [uKey, listRaw] of Object.entries(db || {})) {
+      const list = Array.isArray(listRaw) ? listRaw : [];
+      for (let i = 0; i < list.length; i += 1) {
+        const r = list[i];
+        const mid = Number(r?.moderation_message_id || 0);
+        if (mid && !shouldStatusStayPinned(r?.status)) {
+          targets.set(mid, { uid: uKey, idx: i, rel: r });
+        }
+      }
+    }
+    if (SUPABASE_SYNC_ENABLED) {
+      try {
+        const rows = await supabaseSelectAll(SUPABASE_FORMS_TABLE, 'id,status,moderation_message_id', 'created_at.desc');
+        for (const row of (rows || [])) {
+          const mid = Number(row?.moderation_message_id || 0);
+          if (!mid) continue;
+          const st = mapFormStatusToReleaseStatus(row?.status || '');
+          if (!shouldStatusStayPinned(st) && !targets.has(mid)) {
+            targets.set(mid, null);
+          }
+        }
+      } catch (e) {
+        console.warn('[MODERATION] /unpin_done supabase fetch warning:', shortTgError(e));
+      }
+    }
+    let unpinned = 0;
+    let already = 0;
+    let failed = 0;
+    let missingRights = false;
+    let dirtyDb = false;
+    for (const [mid, ref] of targets.entries()) {
+      const res = await unpinModerationMessage(mid, { silent: true });
+      if (res.ok) {
+        if (res.alreadyUnpinned) already += 1;
+        else unpinned += 1;
+        if (ref?.rel && ref.rel.moderation_pinned !== false) {
+          ref.rel.moderation_pinned = false;
+          syncModerationMirror(ref.uid, ref.idx, ref.rel);
+          dirtyDb = true;
+        }
+      } else {
+        failed += 1;
+        if (res.missingRights) {
+          missingRights = true;
+          break;
+        }
+      }
+      await delay(35);
+    }
+    if (dirtyDb) {
+      saveDb();
+      saveModDb();
+    }
+    const hint = missingRights
+      ? '\n\n⚠️ Остановлено: у бота нет права администратора «Закрепление сообщений» (can_pin_messages) в группе модерации.'
+      : '';
+    await sendText(
+      chatId,
+      `🧹 <b>Очистка закрепов завершена</b>\n\n` +
+      `Проверено карточек: <b>${targets.size}</b>\n` +
+      `📌 Откреплено: <b>${unpinned}</b>\n` +
+      `ℹ️ Уже не закреплено: <b>${already}</b>\n` +
+      `❌ Ошибок: <b>${failed}</b>${hint}`
+    );
+    return;
+  }
+
   if (isAdmin(uid) && hasBroadcastSession(uid)) {
     if (text === '/cancel') {
       setBroadcastSession(uid, false);
@@ -4580,7 +4822,8 @@ async function onMessage(msg) {
         chatId,
         `✅ Отправка в модерацию работает.\n` +
         `message_id: <code>${esc(String(probe?.message_id || '0'))}</code>\n` +
-        `status бота: <b>${esc(moderationHealth.bot_status || '-')}</b>`
+        `status бота: <b>${esc(moderationHealth.bot_status || '-')}</b>\n` +
+        `права на закреп/откреп: <b>${moderationHealth.can_pin_messages === true ? 'есть' : moderationHealth.can_pin_messages === false ? 'НЕТ (выдайте can_pin_messages)' : 'не определено'}</b>`
       );
     } catch (e) {
       const errText = shortTgError(e);
@@ -4705,7 +4948,10 @@ async function onCallback(query) {
   const data = clean(query.data);
   const chatId = query?.message?.chat?.id;
   if (!data || !chatId) return;
-  try { await tg('answerCallbackQuery', { callback_query_id: query.id }); } catch {}
+  const deferAnswer = /^m_(?:un)?pin_/.test(data);
+  if (!deferAnswer) {
+    try { await tg('answerCallbackQuery', { callback_query_id: query.id }); } catch {}
+  }
 
   if (await handleFormCallback(query, data)) return;
   if (await handlePromoCallback(query, data)) return;
@@ -4962,6 +5208,68 @@ async function onCallback(query) {
       return;
     }
     await refreshModerationMessage(uid, idx, rel, Number(query.message?.message_id || 0));
+    return;
+  }
+  const pinMatch = /^m_(un)?pin_([A-Za-z0-9_-]+)_(\d+)$/.exec(data);
+  if (pinMatch) {
+    const answerPin = async (text, showAlert = false) => {
+      try {
+        await tg('answerCallbackQuery', {
+          callback_query_id: query.id,
+          text: String(text || '').slice(0, 190),
+          show_alert: !!showAlert
+        });
+      } catch {}
+    };
+    if (Number(chatId) !== Number(MOD_CHAT)) {
+      await answerPin('Эти кнопки работают только в группе модерации.', true);
+      return;
+    }
+    if (!(await canModerate(query.from.id))) {
+      await answerPin('Доступ только участникам группы модерации.', true);
+      return;
+    }
+    const wantPin = !pinMatch[1];
+    const uid = pinMatch[2];
+    const idx = Number.parseInt(pinMatch[3], 10);
+    const msgId = Number(query.message?.message_id || 0);
+    const ref = resolveReleaseRef(uid, idx, msgId);
+    const targetMsgId = Number(ref?.rel?.moderation_message_id || msgId || 0);
+    const pinRes = wantPin
+      ? await pinModerationMessage(targetMsgId)
+      : await unpinModerationMessage(targetMsgId);
+    if (!pinRes.ok) {
+      const hint = moderationErrorHint(pinRes.error);
+      await answerPin(
+        `Не удалось ${wantPin ? 'закрепить' : 'открепить'}: ${pinRes.error}${hint ? `\n\n${hint}` : ''}`,
+        true
+      );
+      return;
+    }
+    if (ref?.rel) {
+      ref.rel.moderation_pinned = wantPin;
+      saveDb();
+      syncModerationMirror(ref.uid, ref.idx, ref.rel);
+      saveModDb();
+      await supabasePatchFormByRelease(ref.uid, ref.rel, {
+        moderation_message_id: Number(ref.rel.moderation_message_id || targetMsgId || 0) || null,
+        form_payload: safeJson(ref.rel) || {}
+      });
+      await refreshModerationMessage(ref.uid, ref.idx, ref.rel, msgId);
+    } else if (msgId) {
+      try {
+        await tg('editMessageReplyMarkup', {
+          chat_id: MOD_CHAT,
+          message_id: msgId,
+          reply_markup: moderationKeyboard(uid, idx, { moderation_pinned: wantPin })
+        });
+      } catch {}
+    }
+    await answerPin(
+      wantPin
+        ? '📌 Сообщение закреплено'
+        : (pinRes.alreadyUnpinned ? 'ℹ️ Сообщение уже откреплено' : '✅ Сообщение откреплено')
+    );
     return;
   }
   const m = /^m_(upload|moderate|approve|reject|needfix|delete|upc)_([A-Za-z0-9_-]+)_(\d+)$/.exec(data);
@@ -6659,7 +6967,14 @@ function startStaticServer() {
                   moderation_message_id: msgId || 0
                 };
 
-                // 1. Edit Telegram card in moderation group
+                // 1. Sync pin state and edit/send Telegram card in moderation group
+                const pinHintId = Number(msgId || 0);
+                if (pinHintId) {
+                  await syncModerationPinForRelease(relData, pinHintId, {
+                    pinIfOnUpload: targetStatus === STATUS.ON_UPLOAD && canonicalStatus(formRow.status || p.status) !== STATUS.ON_UPLOAD
+                  });
+                }
+
                 if (msgId) {
                   try {
                     await tg('editMessageText', {
@@ -6668,7 +6983,7 @@ function startStaticServer() {
                       text: buildModerationText(uid || 'web', relData),
                       parse_mode: 'HTML',
                       disable_web_page_preview: true,
-                      reply_markup: moderationKeyboard(uid || 'web', 0)
+                      reply_markup: moderationKeyboard(uid || 'web', 0, relData)
                     });
                   } catch (err) {
                     console.warn('[api/moderation/action] editMessageText notice:', err?.message || err);
@@ -6679,10 +6994,16 @@ function startStaticServer() {
                       text: buildModerationText(uid || 'web', relData),
                       parse_mode: 'HTML',
                       disable_web_page_preview: true,
-                      reply_markup: moderationKeyboard(uid || 'web', 0)
+                      reply_markup: moderationKeyboard(uid || 'web', 0, relData)
                     }));
                     if (sent?.message_id) {
                       relData.moderation_message_id = sent.message_id;
+                      if (shouldStatusStayPinned(targetStatus)) {
+                        const pinRes = await pinModerationMessage(sent.message_id);
+                        relData.moderation_pinned = !!pinRes.ok;
+                      } else {
+                        relData.moderation_pinned = false;
+                      }
                     }
                   } catch (err) {
                     console.warn('[api/moderation/action] sendMessage notice:', err?.message || err);
