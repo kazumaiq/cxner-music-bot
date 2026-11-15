@@ -322,8 +322,8 @@ const FORM_STATUS = {
   APPROVED: 'approved',
   REJECTED: 'rejected'
 };
-const BOT_BUILD_VERSION = '2026-11-15-status-v5';
-const BOT_BUILD_RELEASE_NOTE = 'быстрая регистрация команд и старт поллинга, topic-safe /modtest и авторазбор .git';
+const BOT_BUILD_VERSION = '2026-11-15-ui-v6';
+const BOT_BUILD_RELEASE_NOTE = 'цветные кнопки Bot API 9.4, 2-кол. клавиатуры, компактные карточки, пресеты отказов/правок, /queue, /find, фикс 429 и топиков';
 const BOT_STARTED_AT_MS = Date.now();
 const BOT_STARTED_AT = new Date(BOT_STARTED_AT_MS).toISOString();
 
@@ -503,10 +503,65 @@ function classifyFetchError(err) {
   };
 }
 
-async function tg(method, payload = {}) {
+function stripInlineButtonStyles(payload) {
+  if (!payload || typeof payload !== 'object' || !payload.reply_markup || !Array.isArray(payload.reply_markup.inline_keyboard)) {
+    return payload;
+  }
+  return {
+    ...payload,
+    reply_markup: {
+      ...payload.reply_markup,
+      inline_keyboard: payload.reply_markup.inline_keyboard.map((row) =>
+        Array.isArray(row)
+          ? row.map((btn) => {
+              if (!btn || typeof btn !== 'object') return btn;
+              const copy = { ...btn };
+              delete copy.style;
+              delete copy.icon_custom_emoji_id;
+              return copy;
+            })
+          : row
+      )
+    }
+  };
+}
+
+function buildModerationMessageLink(messageId) {
+  const mid = Number(messageId || 0);
+  const raw = String(MOD_CHAT || '');
+  if (!mid || !raw.startsWith('-100')) return '';
+  return `https://t.me/c/${raw.slice(4)}/${mid}`;
+}
+
+function tryDeleteMessageSafe(chatId, messageId, delayMs = 0) {
+  const cid = clean(chatId);
+  const mid = Number(messageId || 0);
+  if (!cid || !mid) return;
+  const run = () => tg('deleteMessage', { chat_id: cid, message_id: mid }, { noRateLimitRetry: true }).catch(() => {});
+  if (delayMs > 0) {
+    setTimeout(run, delayMs);
+  } else {
+    run();
+  }
+}
+
+async function safeAnswerCallback(callbackQueryId, opts = {}) {
+  if (!callbackQueryId) return;
+  const payload = { callback_query_id: callbackQueryId };
+  if (opts.text) payload.text = String(opts.text).slice(0, 190);
+  if (opts.show_alert) payload.show_alert = true;
+  try {
+    await tg('answerCallbackQuery', payload, { noRateLimitRetry: true });
+  } catch {}
+}
+
+async function tg(method, payload = {}, opts = {}) {
   const url = `${API}/${method}`;
   const retries = Math.max(0, Number(TG_FETCH_RETRIES) || 0);
   let lastErr = null;
+  let activePayload = payload;
+  let strippedStyles = false;
+  let rateLimitRetries = 0;
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     const controller = typeof AbortController === 'function' ? new AbortController() : null;
@@ -519,12 +574,36 @@ async function tg(method, payload = {}) {
       const r = await fetch(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(activePayload),
         signal: controller ? controller.signal : undefined
       });
       if (timeoutRef) clearTimeout(timeoutRef);
       const j = await r.json().catch(() => ({}));
-      if (!r.ok || !j.ok) throw new Error(`[${method}] ${j.description || r.statusText}`);
+      if (!r.ok || !j.ok) {
+        const desc = clean(j.description || r.statusText);
+        if (
+          !strippedStyles &&
+          activePayload?.reply_markup?.inline_keyboard &&
+          (r.status === 400 || /\bstyle\b|icon_custom_emoji_id|button_type|unknown field/i.test(desc)) &&
+          /\bstyle\b|icon_custom_emoji_id|button/i.test(desc)
+        ) {
+          strippedStyles = true;
+          activePayload = stripInlineButtonStyles(activePayload);
+          attempt -= 1;
+          continue;
+        }
+        const retrySec = Number(j?.parameters?.retry_after || 0) || (() => {
+          const m = /retry\s+after\s+(\d+)/i.exec(desc);
+          return m ? Number.parseInt(m[1], 10) : 0;
+        })();
+        if (!opts.noRateLimitRetry && method !== 'getUpdates' && retrySec > 0 && retrySec <= 25 && rateLimitRetries < 1) {
+          rateLimitRetries += 1;
+          await delay((retrySec + 1) * 1000);
+          attempt -= 1;
+          continue;
+        }
+        throw new Error(`[${method}] ${desc}`);
+      }
       return j.result;
     } catch (err) {
       if (timeoutRef) clearTimeout(timeoutRef);
@@ -1768,23 +1847,32 @@ function sendModerationText(text, extra = {}) {
 
 function keyboardMain() {
   return { inline_keyboard: [
-    [{ text: '📀 Дистрибуция', callback_data: 'menu_distribution' }],
-    [{ text: '💼 Сервисы', callback_data: 'menu_services' }],
-    [{ text: '🧑‍💻 Кабинет', callback_data: 'menu_cabinet' }],
-    [{ text: '🌐 Комьюнити', callback_data: 'menu_community' }]
+    ...(hasValidWebAppUrl() ? [[{ text: '🚀 Открыть CXRNER Mini App', web_app: { url: WEBAPP_URL }, style: 'primary' }]] : []),
+    [
+      { text: '📀 Дистрибуция', callback_data: 'menu_distribution', style: 'primary' },
+      { text: '📁 Мои релизы', callback_data: 'my_releases' }
+    ],
+    [
+      { text: '💼 Сервисы', callback_data: 'menu_services' },
+      { text: '🧑‍💻 Кабинет', callback_data: 'menu_cabinet' }
+    ],
+    [{ text: '🌐 Комьюнити CXRNER', callback_data: 'menu_community' }]
   ]};
 }
 function keyboardDist() {
   return { inline_keyboard: [
-    [{ text: 'Загрузить релиз (анкета в боте)', callback_data: 'report_text' }],
-    [{ text: 'Мои релизы', callback_data: 'my_releases' }],
-    [{ text: '⬅️ Главное меню', callback_data: 'main' }]
+    [{ text: '🎵 Отправить релиз (анкета)', callback_data: 'report_text', style: 'success' }],
+    ...(hasValidWebAppUrl() ? [[{ text: '📱 Отправить в Mini App', web_app: { url: WEBAPP_URL }, style: 'primary' }]] : []),
+    [
+      { text: '📁 Мои релизы', callback_data: 'my_releases' },
+      { text: '⬅️ Меню', callback_data: 'main' }
+    ]
   ]};
 }
 function keyboardServices() {
   return { inline_keyboard: [
-    [{ text: 'Заказать обложку (500р)', callback_data: 'service_cover' }],
-    [{ text: 'Промо-текст под релиз', callback_data: 'service_promo' }],
+    [{ text: '🎨 Заказать обложку (500₽)', callback_data: 'service_cover', style: 'primary' }],
+    [{ text: '✍️ Промо-текст под релиз', callback_data: 'service_promo' }],
     [{ text: '⬅️ Главное меню', callback_data: 'main' }]
   ]};
 }
@@ -2010,17 +2098,21 @@ async function linkTelegramToWebCabinet(chatId, uid, from, codeOrToken) {
 
 function keyboardCabinet() {
   return { inline_keyboard: [
-    [{ text: '📁 Мои релизы', callback_data: 'my_releases' }],
-    [{ text: '🔗 Привязать аккаунт сайта', callback_data: 'cabinet_sync_site' }],
-    ...(hasValidWebAppUrl() ? [[{ text: '📱 Открыть Mini App', web_app: { url: WEBAPP_URL } }]] : []),
+    ...(hasValidWebAppUrl() ? [[{ text: '📱 Открыть Mini App', web_app: { url: WEBAPP_URL }, style: 'primary' }]] : []),
+    [
+      { text: '📁 Мои релизы', callback_data: 'my_releases' },
+      { text: '🔗 Привязать сайт', callback_data: 'cabinet_sync_site', style: 'primary' }
+    ],
     [{ text: '⬅️ Главное меню', callback_data: 'main' }]
   ]};
 }
 function keyboardCommunity() {
   return { inline_keyboard: [
-    [{ text: 'Канал CXRNER MUSIC', url: 'https://t.me/cxrnermusic' }],
-    [{ text: 'Чат артистов', url: 'https://t.me/+oVmX3_dkyWJhNjJi' }],
-    [{ text: 'Официальный сайт', url: WEBAPP_URL || 'https://bot-1787153410-6782-kazumaiq.bothost.tech/' }],
+    [{ text: '📣 Канал CXRNER MUSIC', url: 'https://t.me/cxrnermusic', style: 'primary' }],
+    [
+      { text: '💬 Чат артистов', url: 'https://t.me/+oVmX3_dkyWJhNjJi' },
+      { text: '🌐 Сайт', url: WEBAPP_URL || 'https://cxrnermusic.vercel.app' }
+    ],
     [{ text: '⬅️ Главное меню', callback_data: 'main' }]
   ]};
 }
@@ -2028,26 +2120,63 @@ function shouldStatusStayPinned(status) {
   return canonicalStatus(status || STATUS.ON_UPLOAD) === STATUS.ON_UPLOAD;
 }
 
+const MOD_REASON_PRESETS = {
+  reject: {
+    cov: { label: '🖼 Обложка', text: 'Обложка не соответствует требованиям площадок (размер, качество или текст).' },
+    snd: { label: '🎧 Звук / микс', text: 'Технические проблемы с аудиофайлом, клиппинг или низкое качество мастера.' },
+    rig: { label: '©️ Права / сэмплы', text: 'Не подтверждены авторские права или обнаружены неочищенные сэмплы/биты.' },
+    meta: { label: '📝 Метаданные', text: 'Ошибка в метаданных, ФИО, нике артиста или несоответствие требованиям DSP.' }
+  },
+  needfix: {
+    cov: { label: '🖼 Обложка 3000×3000', text: 'Замените обложку: нужен квадрат 3000×3000 JPG/PNG без рамок и лишнего текста.' },
+    meta: { label: '📝 Ник / ФИО / текст', text: 'Уточните или поправьте метаданные: название трека, ник или ФИО исполнителя.' },
+    wav: { label: '🔗 Файлы / WAV', text: 'Обновите ссылку на аудиофайл (нужен чистый WAV 16/24-bit 44.1 kHz) и обложку.' },
+    date: { label: '📅 Дата релиза', text: 'Сдвиньте дату релиза вперёд (минимум за 3 дня для сингла и 7 дней для альбома).' }
+  }
+};
+
+function moderationReplyPromptKeyboard(kind, uid, idx) {
+  const presets = MOD_REASON_PRESETS[kind] || {};
+  const tag = kind === 'reject' ? 'r' : 'f';
+  const style = kind === 'reject' ? 'danger' : 'primary';
+  const entries = Object.entries(presets);
+  const rows = [];
+  for (let i = 0; i < entries.length; i += 2) {
+    const chunk = entries.slice(i, i + 2).map(([code, item]) => ({
+      text: item.label,
+      callback_data: `m_pr_${tag}_${code}_${uid}_${idx}`,
+      style
+    }));
+    rows.push(chunk);
+  }
+  rows.push([{ text: '✖️ Отменить ввод', callback_data: `m_pc_${uid}_${idx}` }]);
+  return { inline_keyboard: rows };
+}
+
 function moderationKeyboard(uid, idx, rel = null) {
   const isPinned = rel && typeof rel === 'object'
     ? (rel.moderation_pinned !== undefined ? !!rel.moderation_pinned : shouldStatusStayPinned(rel.status))
     : true;
+  const canon = rel && typeof rel === 'object' ? canonicalStatus(rel.status) : STATUS.ON_UPLOAD;
+  const mark = (st, label) => (canon === st ? `${label} •` : label);
   return { inline_keyboard: [
     [
-      { text: '🕓 На отгрузке', callback_data: `m_upload_${uid}_${idx}` },
-      { text: '🧠 Модерация', callback_data: `m_moderate_${uid}_${idx}` },
-      { text: '✅ Принято', callback_data: `m_approve_${uid}_${idx}` }
+      { text: mark(STATUS.APPROVED, '✅ Принять'), callback_data: `m_approve_${uid}_${idx}`, style: 'success' },
+      { text: mark(STATUS.REJECTED, '❌ Отклонить'), callback_data: `m_reject_${uid}_${idx}`, style: 'danger' }
     ],
     [
-      { text: '❌ Отклонить', callback_data: `m_reject_${uid}_${idx}` },
-      { text: '✏️ На исправлении', callback_data: `m_needfix_${uid}_${idx}` },
-      { text: '🗑 Удалено', callback_data: `m_delete_${uid}_${idx}` }
+      { text: mark(STATUS.ON_UPLOAD, '🕓 На отгрузку'), callback_data: `m_upload_${uid}_${idx}`, style: 'primary' },
+      { text: mark(STATUS.MODERATION, '🧠 В работу'), callback_data: `m_moderate_${uid}_${idx}` }
     ],
     [
-      { text: '📦 Присвоить UPC', callback_data: `m_upc_${uid}_${idx}` },
+      { text: mark(STATUS.NEEDS_FIX, '✏️ Правки'), callback_data: `m_needfix_${uid}_${idx}` },
+      { text: clean(rel?.upc) ? '📦 Сменить UPC' : '📦 Задать UPC', callback_data: `m_upc_${uid}_${idx}`, style: clean(rel?.upc) ? undefined : 'primary' }
+    ],
+    [
       isPinned
         ? { text: '📌 Открепить', callback_data: `m_unpin_${uid}_${idx}` }
-        : { text: '📌 Закрепить', callback_data: `m_pin_${uid}_${idx}` }
+        : { text: '📌 Закрепить', callback_data: `m_pin_${uid}_${idx}` },
+      { text: mark(STATUS.DELETED, '🗑 Удалить'), callback_data: `m_delete_${uid}_${idx}`, style: 'danger' }
     ]
   ]};
 }
@@ -2104,7 +2233,11 @@ async function sendDocument(chatId, filePath, caption = '') {
   throw lastErr || new Error('[sendDocument] unknown error');
 }
 function welcomeText() {
-  return 'Добро пожаловать в систему дистрибуции CXRNER MUSIC.\nУправляй релизами. Загружай треки. Масштабируй звук.';
+  return (
+    '⚡ <b>CXRNER MUSIC</b>\n' +
+    '<i>Экосистема дистрибуции, модерации и релизов.</i>\n\n' +
+    'Отправляй треки через Mini App или прямо в боте, отслеживай статусы модерации и получай UPC.'
+  );
 }
 
 function normalizeType(v) {
@@ -2130,41 +2263,74 @@ function normalizeImageUrl(value) {
   const drive = /drive\.google\.com\/file\/d\/([^/]+)/i.exec(url);
   return drive ? `https://drive.google.com/uc?export=view&id=${encodeURIComponent(drive[1])}` : url;
 }
+function formatCardUrl(rawUrl, maxLabel = 44) {
+  const src = clean(rawUrl);
+  if (!src || src === '.' || src === '-') return esc(src || '—');
+  if (isHttpUrl(src)) {
+    const label = src.replace(/^https?:\/\//i, '');
+    return `<a href="${esc(src)}">${esc(truncateMiddle(label, maxLabel))}</a>`;
+  }
+  return esc(src);
+}
+
 function fmtForm(user, uid, r) {
   const u = user?.username ? `@${user.username}` : 'нет';
   const src = clean(r.source || '');
-  let sourceLine = 'Источник: 🤖 TELEGRAM';
-  if (src === 'web') {
-    sourceLine = 'Источник: 🌐 САЙТ';
-  }
-  const yandexText = r.yandex === 'create_new_card' ? 'Создать новую карточку' : (r.yandex || '.');
+  let sourceLabel = '🤖 TELEGRAM';
+  if (src === 'web') sourceLabel = '🌐 САЙТ';
+  else if (src === 'mini_app') sourceLabel = '📱 MINI APP';
+
+  const yandexRaw = clean(r.yandex || '');
+  const yandexDisplay = yandexRaw === 'create_new_card'
+    ? 'Создать новую карточку'
+    : (yandexRaw && yandexRaw !== '.' ? formatCardUrl(yandexRaw, 42) : '—');
+
   const lines = [
-    '🎵 <b>НОВАЯ АНКЕТА!</b>',
-    esc(sourceLine),
-    `От: ${esc(u)}`,
-    `ID: <code>${esc(r.telegram_id || uid || '—')}</code>`,
-    `Тип: ${esc(r.type || '—')}`,
+    `🎵 <b>${esc(r.name || 'Без названия')}</b> <i>(${esc(r.type || 'сингл')} • ${esc(r.genre || '—')})</i>`,
+    `${esc(sourceLabel)} • От: ${esc(u)} (<code>${esc(r.telegram_id || uid || '—')}</code>)`,
     '',
-    `🎵 <b>Название:</b> ${esc(r.name || '—')}`,
-    `✨ <b>Саб-название:</b> ${esc(r.subname || '.')}`,
-    `🎤 <b>Ник:</b> ${esc(r.nick || '—')}`,
-    `🪪 <b>ФИО:</b> ${esc(r.fio || '—')}`,
-    `📅 <b>Дата:</b> ${esc(r.date || '—')}`,
-    `🧩 <b>Версия:</b> ${esc(r.version || 'Оригинал')}`,
-    `🏷 <b>Жанр:</b> ${esc(r.genre || '—')}`,
-    `🔗 <b>Ссылка:</b> ${esc(r.link || '—')}`,
-    `🟡 <b>Яндекс Музыка:</b> ${esc(yandexText)}`,
-    `⚠️ <b>Мат:</b> ${esc(r.mat || '—')}`,
-    `📢 <b>Промо:</b> ${esc(r.promo || '.')}`,
-    `💬 <b>Комментарий:</b> ${esc(r.comment || '.')}`
+    `🎤 <b>Артист:</b> ${esc(r.nick || '—')} <i>(${esc(r.fio || '—')})</i>`,
+    `📅 <b>Релиз:</b> ${esc(r.date || '—')} • <b>Версия:</b> ${esc(r.version || 'Оригинал')} • <b>Мат:</b> ${esc(r.mat || '—')}`,
+    `🎧 <b>Файлы:</b> ${formatCardUrl(r.link)}`,
+    `🟡 <b>Яндекс:</b> ${yandexDisplay}`,
+    `📱 <b>Контакт:</b> ${esc(r.tg || '—')}`
   ];
-  if (r.type === 'альбом') lines.push(`📋 <b>Tracklist:</b> ${esc(r.tracklist || '.')}`);
-  lines.push(`📱 <b>Tg:</b> ${esc(r.tg || '—')}`);
+
+  const extraFields = [];
+  const sub = clean(r.subname || '');
+  if (sub && sub !== '.' && sub !== '-') extraFields.push(`✨ <b>Саб-название:</b> ${esc(sub)}`);
+  const promo = clean(r.promo || '');
+  if (promo && promo !== '.' && promo !== '-') extraFields.push(`📢 <b>Промо:</b> ${esc(promo)}`);
+  const comment = clean(r.comment || '');
+  if (comment && comment !== '.' && comment !== '-') extraFields.push(`💬 <b>Комментарий:</b> ${esc(comment)}`);
+  const tracklist = clean(r.tracklist || '');
+  if (r.type === 'альбом' && tracklist && tracklist !== '.' && tracklist !== '-') {
+    extraFields.push(`📋 <b>Tracklist:</b>\n${esc(tracklist)}`);
+  }
+
+  if (extraFields.length) {
+    const joinedExtra = extraFields.join('\n');
+    if (extraFields.length > 1 || joinedExtra.length > 90) {
+      lines.push('', `<blockquote expandable>${joinedExtra}</blockquote>`);
+    } else {
+      lines.push('', joinedExtra);
+    }
+  }
   return lines.join('\n');
 }
-function withStatus(status, original) {
+function moderationActorTag(rel) {
+  if (!rel || typeof rel !== 'object') return '';
+  const uname = clean(rel.last_actor_username || rel.moderator_username || '');
+  if (uname) return uname.startsWith('@') ? uname : (uname.includes(' ') ? uname : `@${uname}`);
+  const name = clean(rel.last_actor_name || '');
+  if (name) return name;
+  return '';
+}
+function withStatus(status, original, rel = null) {
   const canon = canonicalStatus(status);
-  return `${STATUS_EMOJI[canon] || '⏳'} <b>СТАТУС: ${esc(STATUS_TEXT[canon] || canon)}</b>\n\n${original || ''}`;
+  const actor = canon === STATUS.MODERATION ? moderationActorTag(rel) : '';
+  const actorNote = actor ? ` • <i>ведёт ${esc(actor)}</i>` : '';
+  return `${STATUS_EMOJI[canon] || '⏳'} <b>СТАТУС: ${esc(STATUS_TEXT[canon] || canon)}</b>${actorNote}\n\n${original || ''}`;
 }
 function canonicalStatus(status) {
   const raw = clean(status).toLowerCase();
@@ -2252,6 +2418,10 @@ function interactionActionLabel(ev) {
     const reason = shortenForInteraction(ev?.reason || ev?.note, 100);
     return reason ? `указал причину: ${reason}` : 'указал причину отклонения';
   }
+  if (type === 'needfix_comment') {
+    const note = shortenForInteraction(ev?.note || ev?.reason, 100);
+    return note ? `направил на правки: ${note}` : 'направил на правки';
+  }
   return shortenForInteraction(ev?.note || type || 'действие', 120) || 'действие';
 }
 function pushReleaseInteraction(rel, type, actor, payload = {}) {
@@ -2292,25 +2462,26 @@ function buildModerationActionsBlock(rel) {
     const fallbackId = clean(rel?.moderator || '');
     if (!fallbackUsername && !fallbackId) return '';
     const actor = fallbackUsername
-      ? (fallbackUsername.includes(' ') ? fallbackUsername : `@${fallbackUsername}`)
+      ? (fallbackUsername.includes(' ') ? fallbackUsername : (fallbackUsername.startsWith('@') ? fallbackUsername : `@${fallbackUsername}`))
       : `ID ${fallbackId}`;
     const when = formatInteractionTime(rel?.moderation_time || '');
     const statusLabel = statusText(rel?.status || STATUS.ON_UPLOAD);
     const line = when
-      ? `• <i>${esc(when)}</i> — ${esc(actor)}: ${esc(`статус: ${statusLabel}`)}`
-      : `• ${esc(actor)}: ${esc(`статус: ${statusLabel}`)}`;
-    return ['👤 <b>Действия:</b>', line].join('\n');
+      ? `<i>${esc(when)}</i> — ${esc(actor)}: ${esc(`статус: ${statusLabel}`)}`
+      : `${esc(actor)}: ${esc(`статус: ${statusLabel}`)}`;
+    return `👤 <b>Последнее:</b> ${line}`;
   }
   const tail = list.slice(-MODERATION_HISTORY_LIMIT).reverse();
-  const lines = ['👤 <b>Действия:</b>'];
-  for (const ev of tail) {
+  const formatLine = (ev) => {
     const when = formatInteractionTime(ev.at);
     const actor = interactionActorLabel(ev);
     const action = interactionActionLabel(ev);
-    if (when) lines.push(`• <i>${esc(when)}</i> — ${esc(actor)}: ${esc(action)}`);
-    else lines.push(`• ${esc(actor)}: ${esc(action)}`);
-  }
-  return lines.join('\n');
+    return when ? `<i>${esc(when)}</i> — ${esc(actor)}: ${esc(action)}` : `${esc(actor)}: ${esc(action)}`;
+  };
+  const latestLine = `👤 <b>Последнее:</b> ${formatLine(tail[0])}`;
+  if (tail.length === 1) return latestLine;
+  const older = tail.slice(1).map((ev) => `• ${formatLine(ev)}`).join('\n');
+  return `${latestLine}\n<blockquote expandable>📋 История (${tail.length}):\n${older}</blockquote>`;
 }
 function ensureModDbShape() {
   modDb = modDb && typeof modDb === 'object' ? modDb : {};
@@ -2398,10 +2569,12 @@ function syncModerationMirror(uid, idx, rel) {
 }
 function buildModerationText(uid, rel) {
   const orig = rel.moderation_original_text || fmtForm({ username: rel.username || '' }, uid, rel);
+  const canon = canonicalStatus(rel.status || STATUS.ON_UPLOAD);
   const details = [];
   if (rel.upc) details.push(`📦 <b>UPC:</b> <code>${esc(rel.upc)}</code>`);
-  if (canonicalStatus(rel.status) === STATUS.REJECTED && rel.reject_reason) details.push(`❌ <b>Причина:</b> ${esc(rel.reject_reason)}`);
-  if (canonicalStatus(rel.status) === STATUS.ON_UPLOAD && rel.available_for_upload) {
+  if (canon === STATUS.REJECTED && rel.reject_reason) details.push(`❌ <b>Причина отказа:</b> ${esc(rel.reject_reason)}`);
+  if (canon === STATUS.NEEDS_FIX && rel.moderator_comment) details.push(`✏️ <b>Правки:</b> ${esc(rel.moderator_comment)}`);
+  if (canon === STATUS.ON_UPLOAD && rel.available_for_upload) {
     const whoUsername = clean(rel.available_marked_by_username || rel.last_actor_username || '');
     const whoName = clean(rel.available_marked_by_name || rel.last_actor_name || '');
     const markedAt = formatInteractionTime(rel.available_marked_at || rel.last_action_at || '');
@@ -2414,7 +2587,7 @@ function buildModerationText(uid, rel) {
   const actionsBlock = buildModerationActionsBlock(rel);
   if (actionsBlock) details.push(actionsBlock);
   const body = details.length ? `${orig}\n\n${details.join('\n')}` : orig;
-  return withStatus(rel.status || STATUS.ON_UPLOAD, body);
+  return withStatus(canon, body, rel);
 }
 
 function truncateMiddle(text, maxLen = 280) {
@@ -2474,7 +2647,7 @@ async function pinModerationMessage(messageId, opts = {}) {
       chat_id: MOD_CHAT,
       message_id: mid,
       disable_notification: opts.disableNotification !== false
-    });
+    }, { noRateLimitRetry: opts.silent === true });
     return { ok: true };
   } catch (e) {
     const errText = shortTgError(e);
@@ -2495,7 +2668,7 @@ async function unpinModerationMessage(messageId, opts = {}) {
     await tg('unpinChatMessage', {
       chat_id: MOD_CHAT,
       message_id: mid
-    });
+    }, { noRateLimitRetry: opts.silent === true });
     return { ok: true };
   } catch (e) {
     const errText = shortTgError(e);
@@ -2593,6 +2766,8 @@ function parseModerationReplyShortcut(text) {
   if (upcMatch) return { type: 'upc', value: clean(upcMatch[1]) };
   const rejectMatch = /^(?:reject|отклон|причина)\s*[:\-]\s*(.+)$/i.exec(src);
   if (rejectMatch) return { type: 'reject_reason', value: clean(rejectMatch[1]) };
+  const fixMatch = /^(?:fix|правк[аи]?|коммент(?:арий)?|comment)\s*[:\-]\s*(.+)$/i.exec(src);
+  if (fixMatch) return { type: 'needfix_comment', value: clean(fixMatch[1]) };
   return null;
 }
 async function notifyArtistAboutRelease(uid, rel, status) {
@@ -2605,7 +2780,21 @@ async function notifyArtistAboutRelease(uid, rel, status) {
     note += `🎵 <b>${esc(rel.name || 'Релиз')}</b>\n👤 ${esc(rel.nick || '—')}\n📅 ${esc(rel.date || '—')}`;
     if (rel.upc) note += `\n📦 UPC: <code>${esc(rel.upc)}</code>`;
     if (canon === STATUS.REJECTED && rel.reject_reason) note += `\n❌ Причина: ${esc(rel.reject_reason)}`;
-    await sendText(Number(uid), note);
+    if (canon === STATUS.NEEDS_FIX && rel.moderator_comment) note += `\n✏️ Правки: ${esc(rel.moderator_comment)}`;
+
+    const rows = [];
+    if (hasValidWebAppUrl()) {
+      rows.push([{ text: '📱 Открыть Mini App', web_app: { url: WEBAPP_URL }, style: 'primary' }]);
+    }
+    if (canon === STATUS.REJECTED || canon === STATUS.NEEDS_FIX) {
+      rows.push([
+        { text: '🔁 Отправить заново', callback_data: 'report_text', style: 'primary' },
+        { text: '📁 Мои релизы', callback_data: 'my_releases' }
+      ]);
+    } else {
+      rows.push([{ text: '📁 Мои релизы', callback_data: 'my_releases' }]);
+    }
+    await sendText(Number(uid), note, { reply_markup: { inline_keyboard: rows } });
   } catch (e) {
     console.error('[MODERATION] notify failed:', clean(e?.message || e));
   }
@@ -2618,7 +2807,15 @@ async function applyReleaseStatus(uid, idx, status, moderator, opts = {}) {
   idx = ref.idx;
   const rel = ref.rel;
   const prevStatus = canonicalStatus(rel.status || STATUS.ON_UPLOAD);
+  const prevModeratorId = clean(rel.moderator || '');
+  const prevModeratorUsername = clean(rel.moderator_username || '');
   const canonStatus = canonicalStatus(status);
+  const hadDifferentModerator = Boolean(
+    prevStatus === STATUS.MODERATION &&
+    prevModeratorId &&
+    String(moderator?.id || '') !== prevModeratorId &&
+    canonStatus !== prevStatus
+  );
 
   rel.status = canonStatus;
   rel.moderation_time = new Date().toISOString();
@@ -2631,7 +2828,13 @@ async function applyReleaseStatus(uid, idx, status, moderator, opts = {}) {
   if (canonStatus !== STATUS.REJECTED && opts.clearRejectReason) {
     rel.reject_reason = '';
   }
-  if (canonStatus === STATUS.NEEDS_FIX && !rel.moderator_comment) rel.moderator_comment = 'Нужны правки перед публикацией';
+  if (canonStatus === STATUS.NEEDS_FIX) {
+    const fixComment = clean(opts.moderatorComment || rel.moderator_comment || 'Нужны правки перед публикацией');
+    rel.moderator_comment = fixComment;
+  }
+  if (canonStatus !== STATUS.NEEDS_FIX && opts.clearModeratorComment) {
+    rel.moderator_comment = '';
+  }
   if (canonStatus === STATUS.DELETED) rel.user_deleted = true;
   if (canonStatus !== STATUS.DELETED && opts.restoreFromDelete) rel.user_deleted = false;
   if (canonStatus === STATUS.ON_UPLOAD) {
@@ -2646,11 +2849,14 @@ async function applyReleaseStatus(uid, idx, status, moderator, opts = {}) {
 
   const statusChanged = prevStatus !== canonStatus;
   const reasonChanged = canonStatus === STATUS.REJECTED && clean(opts.rejectReason || '') !== '';
-  if (statusChanged || reasonChanged) {
+  const commentChanged = canonStatus === STATUS.NEEDS_FIX && clean(opts.moderatorComment || '') !== '';
+  if (statusChanged || reasonChanged || commentChanged) {
     pushReleaseInteraction(rel, 'status_change', moderator, {
       status_from: prevStatus,
       status_to: canonStatus,
-      reason: canonStatus === STATUS.REJECTED ? rel.reject_reason : '',
+      reason: canonStatus === STATUS.REJECTED
+        ? rel.reject_reason
+        : (canonStatus === STATUS.NEEDS_FIX ? rel.moderator_comment : ''),
       note: clean(opts.note || '')
     });
   }
@@ -2687,30 +2893,50 @@ async function applyReleaseStatus(uid, idx, status, moderator, opts = {}) {
 
   await refreshModerationMessage(uid, idx, rel, opts.fallbackMessageId);
   await notifyArtistAboutRelease(uid, rel, canonStatus);
-  return { ok: true, rel, uid, idx, status: canonStatus, pin_result: pinResult };
+  return {
+    ok: true,
+    rel,
+    uid,
+    idx,
+    status: canonStatus,
+    pin_result: pinResult,
+    prev_moderator: hadDifferentModerator ? (prevModeratorUsername || prevModeratorId) : ''
+  };
 }
 async function startModerationReplyFlow(query, type, uid, idx) {
   if (Number(query?.message?.chat?.id || 0) !== Number(MOD_CHAT)) {
-    await sendText(query.message.chat.id, 'Эти кнопки работают только в группе модерации.');
+    await safeAnswerCallback(query.id, { text: 'Эти кнопки работают только в группе модерации.', show_alert: true });
     return;
   }
-  if (!(await canModerate(query.from.id))) {
-    await sendText(query.message.chat.id, 'Доступ только участникам группы модерации.');
+  if (!(await canModerate(query.from?.id, query.message))) {
+    await safeAnswerCallback(query.id, { text: 'Доступ только участникам группы модерации.', show_alert: true });
     return;
   }
   const ref = resolveReleaseRef(uid, idx, Number(query?.message?.message_id || 0));
   if (!ref || !ref.rel) {
-    await sendText(query.message.chat.id, 'Релиз не найден.');
+    await safeAnswerCallback(query.id, { text: 'Релиз не найден.', show_alert: true });
     return;
   }
   uid = ref.uid;
   idx = ref.idx;
   const rel = ref.rel;
   const replyTo = Number(rel.moderation_message_id || query.message.message_id || 0);
-  const text = type === 'upc'
-    ? '📦 Отправьте UPC код <b>ответом</b> на это сообщение (или на анкету релиза).'
-    : '❌ Отправьте причину отклонения <b>ответом</b> на это сообщение (или на анкету релиза).';
-  const prompt = await sendText(query.message.chat.id, text, { reply_to_message_id: replyTo });
+  let text = '';
+  let replyMarkup = null;
+  if (type === 'upc') {
+    text = '📦 Отправьте UPC код <b>ответом</b> на это сообщение (или на анкету релиза).';
+    replyMarkup = { inline_keyboard: [[{ text: '✖️ Отменить ввод', callback_data: `m_pc_${uid}_${idx}` }]] };
+  } else if (type === 'needfix_comment') {
+    text = '✏️ Выберите шаблон правок ниже или отправьте комментарий <b>ответом</b> на это сообщение (или на анкету релиза).';
+    replyMarkup = moderationReplyPromptKeyboard('needfix', uid, idx);
+  } else {
+    text = '❌ Выберите причину отклонения ниже или напишите свою <b>ответом</b> на это сообщение (или на анкету релиза).';
+    replyMarkup = moderationReplyPromptKeyboard('reject', uid, idx);
+  }
+  const prompt = await replyInChat(query.message, text, {
+    reply_to_message_id: replyTo || undefined,
+    reply_markup: replyMarkup
+  });
   rememberPendingAction({
     type,
     uid: String(uid),
@@ -2720,13 +2946,17 @@ async function startModerationReplyFlow(query, type, uid, idx) {
     prompt_message_id: Number(prompt?.message_id || 0),
     created_at: new Date().toISOString()
   });
+  const toast = type === 'upc'
+    ? 'Жду UPC ответом на сообщение'
+    : (type === 'needfix_comment' ? 'Выберите шаблон правок или ответьте текстом' : 'Выберите причину или ответьте текстом');
+  await safeAnswerCallback(query.id, { text: toast });
 }
 async function handleModerationReplyMessage(msg) {
   if (Number(msg?.chat?.id || 0) !== Number(MOD_CHAT)) return false;
   const text = clean(msg.text);
   const replyToId = Number(msg.reply_to_message?.message_id || 0);
   if (!text || !replyToId) return false;
-  if (!(await canModerate(msg.from?.id))) return false;
+  if (!(await canModerate(msg.from?.id, msg))) return false;
 
   const pending = findPendingActionForReply(msg.from.id, replyToId);
   let actionType = '';
@@ -2735,6 +2965,7 @@ async function handleModerationReplyMessage(msg) {
   let idx = 0;
   let rel = null;
   let pendingIndex = -1;
+  let promptMessageId = 0;
   let fallbackMessageId = replyToId;
 
   if (pending) {
@@ -2743,6 +2974,7 @@ async function handleModerationReplyMessage(msg) {
     actionType = String(action.type || '');
     uid = String(action.uid || '');
     idx = Number(action.idx || 0);
+    promptMessageId = Number(action.prompt_message_id || 0);
     fallbackMessageId = Number(action.release_message_id || replyToId || 0);
     const ref = resolveReleaseRef(uid, idx, fallbackMessageId);
     rel = ref?.rel || null;
@@ -2753,7 +2985,8 @@ async function handleModerationReplyMessage(msg) {
     }
     if (!rel) {
       removePendingActionByIndex(index);
-      await sendText(msg.chat.id, '❌ Релиз для этого действия не найден.');
+      if (promptMessageId) tryDeleteMessageSafe(msg.chat.id, promptMessageId);
+      await replyInChat(msg, '❌ Релиз для этого действия не найден.');
       return true;
     }
   } else {
@@ -2772,7 +3005,9 @@ async function handleModerationReplyMessage(msg) {
   if (actionType === 'upc') {
     const upc = normalizeUpcCode(actionValue);
     if (!upc) {
-      await sendText(msg.chat.id, '❌ Неверный UPC. Допустимо 4-40 символов: A-Z, 0-9, ".", "-", "_".');
+      await replyInChat(msg, '❌ Неверный UPC. Допустимо 4-40 символов: A-Z, 0-9, ".", "-", "_".', {
+        reply_to_message_id: msg.message_id
+      });
       return true;
     }
     rel.upc = upc;
@@ -2791,7 +3026,8 @@ async function handleModerationReplyMessage(msg) {
     saveModDb();
     await refreshModerationMessage(uid, idx, rel, fallbackMessageId);
     if (pendingIndex >= 0) removePendingActionByIndex(pendingIndex);
-    await sendText(msg.chat.id, `✅ UPC присвоен: <code>${esc(upc)}</code>`, {
+    if (promptMessageId) tryDeleteMessageSafe(msg.chat.id, promptMessageId);
+    await replyInChat(msg, `✅ UPC присвоен: <code>${esc(upc)}</code>`, {
       reply_to_message_id: Number(rel.moderation_message_id || fallbackMessageId || 0) || undefined
     });
     try {
@@ -2804,26 +3040,59 @@ async function handleModerationReplyMessage(msg) {
     return true;
   }
 
-  if (actionType === 'reject_reason') {
-    const reason = clean(actionValue);
-    if (reason.length < 3) {
-      await sendText(msg.chat.id, '❌ Причина слишком короткая. Укажите подробнее.');
+  if (actionType === 'needfix_comment') {
+    const comment = clean(actionValue);
+    if (comment.length < 3) {
+      await replyInChat(msg, '❌ Комментарий по правкам слишком короткий. Укажите подробнее.', {
+        reply_to_message_id: msg.message_id
+      });
       return true;
     }
     if (pendingIndex >= 0) removePendingActionByIndex(pendingIndex);
-    const out = await applyReleaseStatus(uid, idx, STATUS.REJECTED, msg.from, {
-      rejectReason: reason,
+    if (promptMessageId) tryDeleteMessageSafe(msg.chat.id, promptMessageId);
+    const out = await applyReleaseStatus(uid, idx, STATUS.NEEDS_FIX, msg.from, {
+      moderatorComment: comment,
+      clearRejectReason: true,
       fallbackMessageId,
-      note: 'Причина отклонения добавлена ответом на анкету'
+      note: 'Комментарий по правкам добавлен в модерации'
     });
     if (!out.ok) {
-      await sendText(msg.chat.id, `❌ ${out.error}`);
+      await replyInChat(msg, `❌ ${out.error}`, { reply_to_message_id: msg.message_id });
       return true;
     }
     const pinNote = out.pin_result && !out.pin_result.ok && out.pin_result.missingRights
       ? '\n⚠️ Не удалось автоматически открепить сообщение: выдайте боту право «Закрепление сообщений» в настройках администраторов группы.'
       : '';
-    await sendText(msg.chat.id, `✅ Релиз отклонён, причина отправлена артисту.${pinNote}`, {
+    await replyInChat(msg, `✏️ Статус «На исправление» обновлён, комментарий отправлен артисту.${pinNote}`, {
+      reply_to_message_id: Number(rel.moderation_message_id || fallbackMessageId || 0) || undefined
+    });
+    return true;
+  }
+
+  if (actionType === 'reject_reason') {
+    const reason = clean(actionValue);
+    if (reason.length < 3) {
+      await replyInChat(msg, '❌ Причина слишком короткая. Укажите подробнее.', {
+        reply_to_message_id: msg.message_id
+      });
+      return true;
+    }
+    if (pendingIndex >= 0) removePendingActionByIndex(pendingIndex);
+    if (promptMessageId) tryDeleteMessageSafe(msg.chat.id, promptMessageId);
+    const out = await applyReleaseStatus(uid, idx, STATUS.REJECTED, msg.from, {
+      rejectReason: reason,
+      clearModeratorComment: true,
+      fallbackMessageId,
+      note: 'Причина отклонения добавлена ответом на анкету'
+    });
+    if (!out.ok) {
+      await replyInChat(msg, `❌ ${out.error}`, { reply_to_message_id: msg.message_id });
+      return true;
+    }
+    const pinNote = out.pin_result && !out.pin_result.ok && out.pin_result.missingRights
+      ? '\n⚠️ Не удалось автоматически открепить сообщение: выдайте боту право «Закрепление сообщений» в настройках администраторов группы.'
+      : '';
+    await replyInChat(msg, `✅ Релиз отклонён, причина отправлена артисту.${pinNote}`, {
       reply_to_message_id: Number(rel.moderation_message_id || fallbackMessageId || 0) || undefined
     });
     return true;
@@ -3919,11 +4188,18 @@ async function handlePromoCallback(query, data) {
 }
 
 async function sendWebappButton(chatId) {
-  let text = '🎵 Mini App открывается через системную кнопку «Приложение» внизу чата (настроено через BotFather).';
+  let text = '🎵 Mini App открывается кнопкой ниже или через системную кнопку «Приложение» внизу чата.';
+  const extra = {};
   if (hasValidWebAppUrl()) {
-    text += `\n\nРучная ссылка: ${esc(WEBAPP_URL)}`;
+    text += `\n\nСсылка: ${esc(WEBAPP_URL)}`;
+    extra.reply_markup = {
+      inline_keyboard: [
+        [{ text: '🚀 Открыть Mini App', web_app: { url: WEBAPP_URL }, style: 'primary' }],
+        [{ text: '⬅️ Главное меню', callback_data: 'main' }]
+      ]
+    };
   }
-  await sendText(chatId, text);
+  await sendText(chatId, text, extra);
 }
 function getUserReleaseEntries(uid, includeDeleted = false) {
   const list = Array.isArray(db?.[uid]) ? db[uid] : [];
@@ -3961,8 +4237,9 @@ function buildMyCabinetView(uid, requestedPage = 0) {
         'Нажмите «➕ Новый», чтобы отправить первую анкету.',
       keyboard: {
         inline_keyboard: [
+          ...(hasValidWebAppUrl() ? [[{ text: '📱 Открыть Mini App', web_app: { url: WEBAPP_URL }, style: 'primary' }]] : []),
           [
-            { text: '➕ Новый', callback_data: 'report_text' },
+            { text: '➕ Новый', callback_data: 'report_text', style: 'primary' },
             { text: '◀️ Меню', callback_data: 'main' }
           ],
           [{ text: '🔄 Обновить', callback_data: 'my_back' }]
@@ -4013,6 +4290,9 @@ function buildMyCabinetView(uid, requestedPage = 0) {
   if (status === STATUS.REJECTED && clean(rel?.reject_reason)) {
     text += `❌ Причина: ${esc(rel.reject_reason)}\n`;
   }
+  if (status === STATUS.NEEDS_FIX && clean(rel?.moderator_comment)) {
+    text += `✏️ Правки: ${esc(rel.moderator_comment)}\n`;
+  }
 
   text += `\n🗂 Карточка <b>${page + 1}</b> из <b>${total}</b>`;
 
@@ -4032,10 +4312,10 @@ function buildMyCabinetView(uid, requestedPage = 0) {
 
   rows.push([
     { text: '📄 Детали', callback_data: `release_details_${uid}_${current.idx}_${page}` },
-    { text: '🗑 Удалить', callback_data: `delete_release_${uid}_${current.idx}_${page}` }
+    { text: '🗑 Удалить', callback_data: `delete_release_${uid}_${current.idx}_${page}`, style: 'danger' }
   ]);
   rows.push([
-    { text: '➕ Новый', callback_data: 'report_text' },
+    { text: '➕ Новый', callback_data: 'report_text', style: 'primary' },
     { text: '◀️ Меню', callback_data: 'main' }
   ]);
 
@@ -4169,16 +4449,16 @@ function adminPanelKeyboard() {
         { text: '🗂 Архив мод.', callback_data: 'admin_moderation_backup' }
       ],
       [
-        { text: '📊 Статистика', callback_data: 'admin_stats' },
-        { text: '⏳ Ожидают', callback_data: 'admin_pending' }
+        { text: '📊 Статистика', callback_data: 'admin_stats', style: 'primary' },
+        { text: '⏳ Ожидают', callback_data: 'admin_pending', style: 'primary' }
       ],
       [
         { text: '🔄 Очистка', callback_data: 'admin_cleanup' },
-        { text: '📢 Рассылка', callback_data: 'admin_broadcast' }
+        { text: '📢 Рассылка', callback_data: 'admin_broadcast', style: 'primary' }
       ],
       [
         { text: '📋 Все релизы', callback_data: 'admin_all_releases' },
-        { text: '⚠️ УДАЛИТЬ ВСЁ', callback_data: 'admin_cleanbase_confirm' }
+        { text: '⚠️ УДАЛИТЬ ВСЁ', callback_data: 'admin_cleanbase_confirm', style: 'danger' }
       ],
       [{ text: '🔁 Обновить', callback_data: 'admin_back' }]
     ]
@@ -4187,8 +4467,8 @@ function adminPanelKeyboard() {
 
 function statsPeriodKeyboard(showBackToAdmin = true) {
   const rows = [
-    [{ text: '📅 Неделя', callback_data: 'stats_period_week' }],
-    [{ text: '📅 Месяц', callback_data: 'stats_period_month' }],
+    [{ text: '📅 Неделя', callback_data: 'stats_period_week', style: 'primary' }],
+    [{ text: '📅 Месяц', callback_data: 'stats_period_month', style: 'primary' }],
     [{ text: '📅 Всё время', callback_data: 'stats_period_all' }]
   ];
   if (showBackToAdmin) rows.push([{ text: '🔙 В админ', callback_data: 'admin_back' }]);
@@ -4421,12 +4701,20 @@ async function runCleanbase() {
   }
 }
 
-async function sendAdminPanel(chatId) {
-  await sendText(chatId, buildAdminPanelText(), { reply_markup: adminPanelKeyboard() });
+async function sendAdminPanel(target) {
+  if (target && typeof target === 'object' && target.chat?.id) {
+    await replyInChat(target, buildAdminPanelText(), { reply_markup: adminPanelKeyboard() });
+    return;
+  }
+  await sendText(target, buildAdminPanelText(), { reply_markup: adminPanelKeyboard() });
 }
 
-async function sendStatsPicker(chatId) {
-  await sendText(chatId, '📊 Выберите период для статистики:', { reply_markup: statsPeriodKeyboard(true) });
+async function sendStatsPicker(target) {
+  if (target && typeof target === 'object' && target.chat?.id) {
+    await replyInChat(target, '📊 Выберите период для статистики:', { reply_markup: statsPeriodKeyboard(true) });
+    return;
+  }
+  await sendText(target, '📊 Выберите период для статистики:', { reply_markup: statsPeriodKeyboard(true) });
 }
 
 async function verifyModerationChatAccess(force = false) {
@@ -4705,16 +4993,16 @@ async function updateStatusReport(statusMsg, msg, text) {
 }
 async function applyModeration(query, action, uid, idx) {
   if (Number(query?.message?.chat?.id || 0) !== Number(MOD_CHAT)) {
-    await sendText(query.message.chat.id, 'Эти кнопки работают только в группе модерации.');
+    await safeAnswerCallback(query.id, { text: 'Эти кнопки работают только в группе модерации.', show_alert: true });
     return;
   }
-  if (!(await canModerate(query.from.id))) {
-    await sendText(query.message.chat.id, 'Доступ только участникам группы модерации.');
+  if (!(await canModerate(query.from?.id, query.message))) {
+    await safeAnswerCallback(query.id, { text: 'Доступ только участникам группы модерации.', show_alert: true });
     return;
   }
   const ref = resolveReleaseRef(uid, idx, Number(query?.message?.message_id || 0));
   if (!ref || !ref.rel) {
-    await sendText(query.message.chat.id, 'Релиз не найден.');
+    await safeAnswerCallback(query.id, { text: 'Релиз не найден.', show_alert: true });
     return;
   }
   uid = ref.uid;
@@ -4728,22 +5016,31 @@ async function applyModeration(query, action, uid, idx) {
   };
   const st = map[action];
   if (!st) {
-    await sendText(query.message.chat.id, 'Неизвестное действие модерации.');
+    await safeAnswerCallback(query.id, { text: 'Неизвестное действие модерации.', show_alert: true });
     return;
   }
   const out = await applyReleaseStatus(uid, idx, st, query.from, {
     fallbackMessageId: Number(query.message.message_id || 0),
     clearRejectReason: st !== STATUS.REJECTED,
+    clearModeratorComment: st !== STATUS.NEEDS_FIX,
     restorePin: st === STATUS.ON_UPLOAD
   });
   if (!out.ok) {
-    await sendText(query.message.chat.id, `❌ ${out.error}`);
+    await safeAnswerCallback(query.id, { text: `❌ ${out.error}`, show_alert: true });
     return;
   }
-  const pinWarn = out.pin_result && !out.pin_result.ok && out.pin_result.missingRights
-    ? `\n⚠️ Бот не смог ${shouldStatusStayPinned(st) ? 'закрепить' : 'открепить'} сообщение: выдайте боту право «Закрепление сообщений» в группе модерации.`
+  if (out.pin_result && !out.pin_result.ok && out.pin_result.missingRights) {
+    await safeAnswerCallback(query.id, {
+      text: `${statusEmoji(st)} ${statusText(st)} (нет права на ${shouldStatusStayPinned(st) ? 'закреп' : 'откреп'})`,
+      show_alert: true
+    });
+    return;
+  }
+  const lockNote = out.prev_moderator ? ` • перехвачено у @${out.prev_moderator}` : '';
+  const pinNote = out.pin_result && !out.pin_result.skipped && out.pin_result.ok
+    ? (shouldStatusStayPinned(st) ? ' • закреплено' : ' • откреплено')
     : '';
-  await sendText(query.message.chat.id, `Статус обновлен: ${statusText(st)}${pinWarn}`);
+  await safeAnswerCallback(query.id, { text: `${statusEmoji(st)} ${statusText(st)}${pinNote}${lockNote}` });
 }
 
 function collectOnUploadReleaseRefs() {
@@ -4830,7 +5127,7 @@ async function onMessage(msg) {
   if (!chatId) return;
 
   const parsedCmd = parseBotCommand(text, moderationHealth.bot_username);
-  if (parsedCmd && ['/status', '/ping', '/ver', '/deploy', '/new', '/unpin', '/unpin_done', '/unpin_all', '/modtest'].includes(parsedCmd.command)) {
+  if (parsedCmd && ['/status', '/ping', '/ver', '/deploy', '/queue', '/pending', '/find', '/new', '/unpin', '/unpin_done', '/unpin_all', '/modtest'].includes(parsedCmd.command)) {
     const cmd = parsedCmd.command;
     pollingHealth.last_command = cmd;
     pollingHealth.last_command_at = new Date().toISOString();
@@ -5210,6 +5507,171 @@ async function onMessage(msg) {
       return;
     }
 
+    if (cmd === '/queue' || cmd === '/pending') {
+      const inModChat = Number(chatId) === Number(MOD_CHAT);
+      if (!inModChat && !isAdmin(uid)) {
+        pollingHealth.last_command_result = 'ignored_chat';
+        return;
+      }
+      if (inModChat && !(await canModerate(msg.from?.id, msg))) {
+        await replyInChat(msg, 'Доступ только участникам группы модерации.');
+        pollingHealth.last_command_result = 'denied';
+        return;
+      }
+      const onUpload = [];
+      const inWork = [];
+      const needFix = [];
+      let approvedCount = 0;
+      let rejectedCount = 0;
+      for (const [ownerId, listRaw] of Object.entries(db || {})) {
+        const list = Array.isArray(listRaw) ? listRaw : [];
+        for (let idx = 0; idx < list.length; idx += 1) {
+          const rel = list[idx];
+          if (!rel || typeof rel !== 'object' || rel.user_deleted) continue;
+          const st = canonicalStatus(rel.status);
+          if (st === STATUS.DELETED) continue;
+          const entry = { ownerId: String(ownerId), idx, rel, st };
+          if (st === STATUS.ON_UPLOAD) onUpload.push(entry);
+          else if (st === STATUS.MODERATION) inWork.push(entry);
+          else if (st === STATUS.NEEDS_FIX) needFix.push(entry);
+          else if (st === STATUS.APPROVED || st === STATUS.PUBLISHED) approvedCount += 1;
+          else if (st === STATUS.REJECTED) rejectedCount += 1;
+        }
+      }
+      const sortNewest = (a, b) => {
+        const ta = parseIsoTime(a.rel?.submission_time || a.rel?.moderation_time || '');
+        const tb = parseIsoTime(b.rel?.submission_time || b.rel?.moderation_time || '');
+        if (tb !== ta) return tb - ta;
+        return b.idx - a.idx;
+      };
+      onUpload.sort(sortNewest);
+      inWork.sort(sortNewest);
+      needFix.sort(sortNewest);
+
+      const formatEntryLink = (entry) => {
+        const link = buildModerationMessageLink(entry.rel?.moderation_message_id);
+        const title = esc(shortTitle(entry.rel?.name || 'Без названия', 26));
+        return link ? `<a href="${esc(link)}">${title}</a>` : `<b>${title}</b>`;
+      };
+
+      const lines = [
+        '📋 <b>Очередь модерации</b>',
+        '',
+        `• 🕓 На отгрузке: <b>${onUpload.length}</b> • 🧠 В работе: <b>${inWork.length}</b> • ✏️ Правки: <b>${needFix.length}</b>`,
+        `• ✅ Принято: <b>${approvedCount}</b> • ❌ Отклонено: <b>${rejectedCount}</b>`
+      ];
+      if (!onUpload.length && !inWork.length && !needFix.length) {
+        lines.push('', '✅ Очередь чистая — активных релизов на проверку нет.');
+      } else {
+        if (onUpload.length) {
+          lines.push('', `🕓 <b>На отгрузке (${onUpload.length}):</b>`);
+          for (let i = 0; i < Math.min(10, onUpload.length); i += 1) {
+            const it = onUpload[i];
+            const nick = esc(shortTitle(it.rel?.nick || '—', 18));
+            const date = esc(clean(it.rel?.date || '—'));
+            const upcTag = clean(it.rel?.upc) ? ` • <code>${esc(it.rel.upc)}</code>` : '';
+            lines.push(`${i + 1}. ${formatEntryLink(it)} — ${nick} (📅 ${date})${upcTag}`);
+          }
+          if (onUpload.length > 10) lines.push(`<i>…и ещё ${onUpload.length - 10} в очереди</i>`);
+        }
+        if (inWork.length) {
+          lines.push('', `🧠 <b>В работе сейчас (${inWork.length}):</b>`);
+          for (const it of inWork.slice(0, 6)) {
+            const nick = esc(shortTitle(it.rel?.nick || '—', 18));
+            const actor = moderationActorTag(it.rel);
+            const actorPart = actor ? ` • <i>ведёт ${esc(actor)}</i>` : '';
+            lines.push(`• ${formatEntryLink(it)} — ${nick}${actorPart}`);
+          }
+          if (inWork.length > 6) lines.push(`<i>…и ещё ${inWork.length - 6}</i>`);
+        }
+        if (needFix.length) {
+          lines.push('', `✏️ <b>Ждут правок (${needFix.length}):</b>`);
+          for (const it of needFix.slice(0, 5)) {
+            const nick = esc(shortTitle(it.rel?.nick || '—', 18));
+            lines.push(`• ${formatEntryLink(it)} — ${nick}`);
+          }
+          if (needFix.length > 5) lines.push(`<i>…и ещё ${needFix.length - 5}</i>`);
+        }
+      }
+      pollingHealth.last_command_result = 'ok';
+      await replyInChat(msg, lines.join('\n'), { reply_to_message_id: msg.message_id });
+      return;
+    }
+
+    if (cmd === '/find') {
+      const inModChat = Number(chatId) === Number(MOD_CHAT);
+      if (!inModChat && !isAdmin(uid)) {
+        pollingHealth.last_command_result = 'ignored_chat';
+        return;
+      }
+      if (inModChat && !(await canModerate(msg.from?.id, msg))) {
+        await replyInChat(msg, 'Доступ только участникам группы модерации.');
+        pollingHealth.last_command_result = 'denied';
+        return;
+      }
+      const queryRaw = clean(parsedCmd.arg);
+      if (queryRaw.length < 2) {
+        pollingHealth.last_command_result = 'ok';
+        await replyInChat(msg, '🔎 Использование: <code>/find название / ник / UPC / ID</code>', {
+          reply_to_message_id: msg.message_id
+        });
+        return;
+      }
+      const tokens = queryRaw.toLowerCase().split(/\s+/).filter(Boolean);
+      const matches = [];
+      for (const [ownerId, listRaw] of Object.entries(db || {})) {
+        const list = Array.isArray(listRaw) ? listRaw : [];
+        for (let idx = 0; idx < list.length; idx += 1) {
+          const rel = list[idx];
+          if (!rel || typeof rel !== 'object') continue;
+          const haystack = [
+            rel.name,
+            rel.nick,
+            rel.fio,
+            rel.upc,
+            rel.genre,
+            rel.tg,
+            rel.moderator_username,
+            ownerId
+          ].map((v) => clean(v).toLowerCase()).join(' ');
+          if (tokens.every((t) => haystack.includes(t))) {
+            matches.push({ ownerId: String(ownerId), idx, rel, st: canonicalStatus(rel.status) });
+          }
+        }
+      }
+      matches.sort((a, b) => {
+        const delA = a.rel?.user_deleted || a.st === STATUS.DELETED ? 1 : 0;
+        const delB = b.rel?.user_deleted || b.st === STATUS.DELETED ? 1 : 0;
+        if (delA !== delB) return delA - delB;
+        const ta = parseIsoTime(a.rel?.submission_time || a.rel?.moderation_time || '');
+        const tb = parseIsoTime(b.rel?.submission_time || b.rel?.moderation_time || '');
+        if (tb !== ta) return tb - ta;
+        return b.idx - a.idx;
+      });
+      if (!matches.length) {
+        pollingHealth.last_command_result = 'ok';
+        await replyInChat(msg, `🔎 По запросу <code>${esc(queryRaw)}</code> ничего не найдено.`, {
+          reply_to_message_id: msg.message_id
+        });
+        return;
+      }
+      const lines = [`🔎 <b>Найдено: ${matches.length}</b> (запрос: <code>${esc(queryRaw)}</code>)`, ''];
+      for (const it of matches.slice(0, 12)) {
+        const link = buildModerationMessageLink(it.rel?.moderation_message_id);
+        const title = esc(shortTitle(it.rel?.name || 'Без названия', 26));
+        const label = link ? `<a href="${esc(link)}">${title}</a>` : `<b>${title}</b>`;
+        const nick = esc(shortTitle(it.rel?.nick || '—', 18));
+        const upcPart = clean(it.rel?.upc) ? ` • <code>${esc(it.rel.upc)}</code>` : '';
+        lines.push(`${statusEmoji(it.st)} ${label} — ${nick} • <i>${esc(statusText(it.st))}</i>${upcPart}`);
+      }
+      if (matches.length > 12) {
+        lines.push('', `<i>Показаны первые 12 из ${matches.length}. Уточните запрос.</i>`);
+      }
+      pollingHealth.last_command_result = 'ok';
+      await replyInChat(msg, lines.join('\n'), { reply_to_message_id: msg.message_id });
+      return;
+    }
+
     if (cmd === '/modtest') {
       const inModChat = Number(chatId) === Number(MOD_CHAT);
       const allowedMod = isAdmin(uid) || (inModChat && await canModerate(msg.from?.id, msg));
@@ -5319,18 +5781,18 @@ async function onMessage(msg) {
   }
   if (/^\/admin(?:@\w+)?$/i.test(text)) {
     if (!isAdmin(uid)) {
-      await sendText(chatId, '❌ Доступ запрещён.');
+      await replyInChat(msg, '❌ Доступ запрещён.');
       return;
     }
-    await sendAdminPanel(chatId);
+    await sendAdminPanel(msg);
     return;
   }
   if (/^\/statss(?:@\w+)?$/i.test(text) || /^\/stats(?:@\w+)?$/i.test(text)) {
     if (!isAdmin(uid)) {
-      await sendText(chatId, '❌ Команда доступна только администраторам.');
+      await replyInChat(msg, '❌ Команда доступна только администраторам.');
       return;
     }
-    await sendStatsPicker(chatId);
+    await sendStatsPicker(msg);
     return;
   }
   if (/^\/backup(?:@\w+)?$/i.test(text)) {
@@ -5436,9 +5898,9 @@ async function onCallback(query) {
   const data = clean(query.data);
   const chatId = query?.message?.chat?.id;
   if (!data || !chatId) return;
-  const deferAnswer = /^m_(?:un)?pin_/.test(data);
+  const deferAnswer = /^m_/.test(data);
   if (!deferAnswer) {
-    try { await tg('answerCallbackQuery', { callback_query_id: query.id }); } catch {}
+    try { await tg('answerCallbackQuery', { callback_query_id: query.id }, { noRateLimitRetry: true }); } catch {}
   }
 
   if (await handleFormCallback(query, data)) return;
@@ -5543,7 +6005,7 @@ async function onCallback(query) {
       {
         inline_keyboard: [
           [
-            { text: '✅ Да, удалить всё', callback_data: 'admin_cleanbase_yes' },
+            { text: '✅ Да, удалить всё', callback_data: 'admin_cleanbase_yes', style: 'danger' },
             { text: '❌ Отмена', callback_data: 'admin_back' }
           ]
         ]
@@ -5629,11 +6091,28 @@ async function onCallback(query) {
       return;
     }
     if (!rel.user_deleted) {
+      const prevStatus = canonicalStatus(rel.status || STATUS.ON_UPLOAD);
       rel.user_deleted = true;
       rel.deleted_at = new Date().toISOString();
+      rel.status = STATUS.DELETED;
+      rel.available_for_upload = false;
+      pushReleaseInteraction(rel, 'status_change', query.from, {
+        status_from: prevStatus,
+        status_to: STATUS.DELETED,
+        note: 'Удалено артистом из кабинета'
+      });
+      await syncModerationPinForRelease(rel, Number(rel.moderation_message_id || 0), { silent: true }).catch(() => {});
       saveDb();
       syncModerationMirror(ownerId, idx, rel);
       saveModDb();
+      await refreshModerationMessage(ownerId, idx, rel).catch(() => {});
+      await supabasePatchFormByRelease(ownerId, rel, {
+        status: mapReleaseStatusToFormStatus(STATUS.DELETED),
+        reject_reason: 'Удалено артистом',
+        user_deleted: true,
+        form_payload: safeJson(rel) || {}
+      }).catch(() => {});
+      await supabaseDeleteApprovedRelease(ownerId, rel).catch(() => {});
       try {
         await sendModerationText(
           `🗑 <b>Релиз удалён артистом из кабинета</b>\n\n🎵 ${esc(rel.name || 'Релиз')}\n👤 ${esc(rel.nick || '—')}\nID: <code>${esc(ownerId)}</code>`
@@ -5666,8 +6145,8 @@ async function onCallback(query) {
       'После привязки вы сможете в один клик возвращаться в бот или Mini App.';
     const kb = {
       inline_keyboard: [
-        [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }],
-        ...(hasValidWebAppUrl() ? [[{ text: '📱 Открыть Mini App', web_app: { url: WEBAPP_URL } }]] : []),
+        [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard', style: 'primary' }],
+        ...(hasValidWebAppUrl() ? [[{ text: '📱 Открыть Mini App', web_app: { url: WEBAPP_URL }, style: 'primary' }]] : []),
         [{ text: '⬅️ Назад в кабинет', callback_data: 'menu_cabinet' }]
       ]
     };
@@ -5676,7 +6155,7 @@ async function onCallback(query) {
   }
   if (data === 'menu_community') { await edit('<b>Комьюнити</b>\n\nОфициальные площадки CXRNER MUSIC:', keyboardCommunity()); return; }
   if (data === 'open_app' || data === 'report_app') {
-    await sendText(chatId, 'Mini App открывается через кнопку «Приложение» внизу чата.');
+    await sendWebappButton(chatId);
     return;
   }
   if (data === 'report' || data === 'report_text') {
@@ -5686,34 +6165,123 @@ async function onCallback(query) {
   if (data === 'my_releases') { await sendMy(chatId, String(query.from.id)); return; }
   if (data === 'service_cover') { await startCoverFlow(chatId, String(query.from.id), query.from); return; }
   if (data === 'service_promo') { await startPromoFlow(chatId, String(query.from.id), query.from); return; }
-  const restoreMatch = /^m_restore_buttons_(\d+)_(\d+)$/.exec(data);
+  const restoreMatch = /^m_restore_buttons_([A-Za-z0-9_-]+)_(\d+)$/.exec(data);
   if (restoreMatch) {
-    const uid = restoreMatch[1];
-    const idx = Number.parseInt(restoreMatch[2], 10);
-    const rel = findRelease(uid, idx);
-    if (!rel) {
-      await sendText(chatId, '❌ Релиз не найден.');
+    if (Number(chatId) !== Number(MOD_CHAT)) {
+      await safeAnswerCallback(query.id, { text: 'Эти кнопки работают только в группе модерации.', show_alert: true });
       return;
     }
-    await refreshModerationMessage(uid, idx, rel, Number(query.message?.message_id || 0));
+    if (!(await canModerate(query.from?.id, query.message))) {
+      await safeAnswerCallback(query.id, { text: 'Доступ только участникам группы модерации.', show_alert: true });
+      return;
+    }
+    const uid = restoreMatch[1];
+    const idx = Number.parseInt(restoreMatch[2], 10);
+    const ref = resolveReleaseRef(uid, idx, Number(query.message?.message_id || 0));
+    if (!ref || !ref.rel) {
+      await safeAnswerCallback(query.id, { text: '❌ Релиз не найден.', show_alert: true });
+      return;
+    }
+    await refreshModerationMessage(ref.uid, ref.idx, ref.rel, Number(query.message?.message_id || 0));
+    await safeAnswerCallback(query.id, { text: '🔘 Кнопки обновлены' });
+    return;
+  }
+  const cancelPromptMatch = /^m_pc_([A-Za-z0-9_-]+)_(\d+)$/.exec(data);
+  if (cancelPromptMatch) {
+    if (Number(chatId) !== Number(MOD_CHAT)) {
+      await safeAnswerCallback(query.id, { text: 'Эти кнопки работают только в группе модерации.', show_alert: true });
+      return;
+    }
+    if (!(await canModerate(query.from?.id, query.message))) {
+      await safeAnswerCallback(query.id, { text: 'Доступ только участникам группы модерации.', show_alert: true });
+      return;
+    }
+    const targetUid = cancelPromptMatch[1];
+    const targetIdx = Number.parseInt(cancelPromptMatch[2], 10);
+    const promptMsgId = Number(query.message?.message_id || 0);
+    ensureModDbShape();
+    modDb.pending_actions = modDb.pending_actions.filter((it) => !(
+      (promptMsgId && Number(it.prompt_message_id) === promptMsgId) ||
+      (String(it.moderator_id) === String(query.from.id) && String(it.uid) === String(targetUid) && Number(it.idx) === targetIdx)
+    ));
+    saveModDb();
+    if (promptMsgId) tryDeleteMessageSafe(chatId, promptMsgId);
+    await safeAnswerCallback(query.id, { text: 'Ввод отменён' });
+    return;
+  }
+  const presetMatch = /^m_pr_(r|f)_([a-z0-9]+)_([A-Za-z0-9_-]+)_(\d+)$/.exec(data);
+  if (presetMatch) {
+    if (Number(chatId) !== Number(MOD_CHAT)) {
+      await safeAnswerCallback(query.id, { text: 'Эти кнопки работают только в группе модерации.', show_alert: true });
+      return;
+    }
+    if (!(await canModerate(query.from?.id, query.message))) {
+      await safeAnswerCallback(query.id, { text: 'Доступ только участникам группы модерации.', show_alert: true });
+      return;
+    }
+    const kind = presetMatch[1] === 'r' ? 'reject' : 'needfix';
+    const preset = MOD_REASON_PRESETS[kind]?.[presetMatch[2]];
+    if (!preset) {
+      await safeAnswerCallback(query.id, { text: 'Шаблон не найден.', show_alert: true });
+      return;
+    }
+    const targetUid = presetMatch[3];
+    const targetIdx = Number.parseInt(presetMatch[4], 10);
+    const promptMsgId = Number(query.message?.message_id || 0);
+    const fallbackId = Number(query.message?.reply_to_message?.message_id || 0);
+    const ref = resolveReleaseRef(targetUid, targetIdx, fallbackId);
+    if (!ref || !ref.rel) {
+      if (promptMsgId) tryDeleteMessageSafe(chatId, promptMsgId);
+      await safeAnswerCallback(query.id, { text: 'Релиз не найден.', show_alert: true });
+      return;
+    }
+    ensureModDbShape();
+    modDb.pending_actions = modDb.pending_actions.filter((it) => !(
+      (promptMsgId && Number(it.prompt_message_id) === promptMsgId) ||
+      (String(it.moderator_id) === String(query.from.id) && String(it.uid) === String(ref.uid) && Number(it.idx) === ref.idx)
+    ));
+    saveModDb();
+    if (promptMsgId) tryDeleteMessageSafe(chatId, promptMsgId);
+
+    const out = kind === 'reject'
+      ? await applyReleaseStatus(ref.uid, ref.idx, STATUS.REJECTED, query.from, {
+          rejectReason: preset.text,
+          clearModeratorComment: true,
+          fallbackMessageId: Number(ref.rel.moderation_message_id || fallbackId || 0),
+          note: `Причина (${preset.label}) выбрана шаблоном`
+        })
+      : await applyReleaseStatus(ref.uid, ref.idx, STATUS.NEEDS_FIX, query.from, {
+          moderatorComment: preset.text,
+          clearRejectReason: true,
+          fallbackMessageId: Number(ref.rel.moderation_message_id || fallbackId || 0),
+          note: `Правки (${preset.label}) выбраны шаблоном`
+        });
+
+    if (!out.ok) {
+      await safeAnswerCallback(query.id, { text: `❌ ${out.error}`, show_alert: true });
+      return;
+    }
+    if (out.pin_result && !out.pin_result.ok && out.pin_result.missingRights) {
+      await safeAnswerCallback(query.id, {
+        text: `${kind === 'reject' ? '❌ Отклонено' : '✏️ Правки'}: ${preset.label} (нет права на откреп)`,
+        show_alert: true
+      });
+      return;
+    }
+    const pinNote = out.pin_result && !out.pin_result.skipped && out.pin_result.ok ? ' • откреплено' : '';
+    await safeAnswerCallback(query.id, {
+      text: `${kind === 'reject' ? '❌ Отклонено' : '✏️ Правки'}: ${preset.label}${pinNote}`
+    });
     return;
   }
   const pinMatch = /^m_(un)?pin_([A-Za-z0-9_-]+)_(\d+)$/.exec(data);
   if (pinMatch) {
-    const answerPin = async (text, showAlert = false) => {
-      try {
-        await tg('answerCallbackQuery', {
-          callback_query_id: query.id,
-          text: String(text || '').slice(0, 190),
-          show_alert: !!showAlert
-        });
-      } catch {}
-    };
+    const answerPin = (text, showAlert = false) => safeAnswerCallback(query.id, { text, show_alert: showAlert });
     if (Number(chatId) !== Number(MOD_CHAT)) {
       await answerPin('Эти кнопки работают только в группе модерации.', true);
       return;
     }
-    if (!(await canModerate(query.from.id))) {
+    if (!(await canModerate(query.from?.id, query.message))) {
       await answerPin('Доступ только участникам группы модерации.', true);
       return;
     }
@@ -5766,11 +6334,19 @@ async function onCallback(query) {
       await startModerationReplyFlow(query, 'reject_reason', m[2], Number.parseInt(m[3], 10));
       return;
     }
+    if (m[1] === 'needfix') {
+      await startModerationReplyFlow(query, 'needfix_comment', m[2], Number.parseInt(m[3], 10));
+      return;
+    }
     if (m[1] === 'upc') {
       await startModerationReplyFlow(query, 'upc', m[2], Number.parseInt(m[3], 10));
       return;
     }
     await applyModeration(query, m[1], m[2], Number.parseInt(m[3], 10));
+    return;
+  }
+  if (deferAnswer) {
+    await safeAnswerCallback(query.id);
   }
 }
 
@@ -7788,6 +8364,8 @@ async function loop() {
 
 async function registerModerationCommands() {
   const modCommands = [
+    { command: 'queue', description: 'Очередь релизов на отгрузку и модерацию' },
+    { command: 'find', description: 'Поиск релиза по названию, нику или UPC' },
     { command: 'status', description: 'Версия деплоя, отклик и состояние бота' },
     { command: 'unpin_all', description: 'Сбросить все старые закрепы и оставить только «На отгрузке»' },
     { command: 'unpin_done', description: 'Открепить последние карточки не в статусе «На отгрузке»' },
