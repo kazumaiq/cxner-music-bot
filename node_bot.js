@@ -322,9 +322,38 @@ const FORM_STATUS = {
   APPROVED: 'approved',
   REJECTED: 'rejected'
 };
-const BOT_BUILD_VERSION = '2026-11-15-status-v4';
+const BOT_BUILD_VERSION = '2026-11-15-status-v5';
+const BOT_BUILD_RELEASE_NOTE = 'добавлен /stats, быстрая регистрация команд до синка Supabase, topic-safe /modtest';
 const BOT_STARTED_AT_MS = Date.now();
 const BOT_STARTED_AT = new Date(BOT_STARTED_AT_MS).toISOString();
+
+function readDotGitHeadMeta(rootDir) {
+  try {
+    const gitDir = path.join(rootDir, '.git');
+    const headRaw = clean(fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8'));
+    if (!headRaw) return null;
+    if (!headRaw.startsWith('ref:')) {
+      return { commit: headRaw.slice(0, 7), branch: '', source: 'dotgit' };
+    }
+    const refPath = clean(headRaw.slice(4));
+    const branch = refPath.replace(/^refs\/heads\//, '');
+    const looseRefFile = path.join(gitDir, ...refPath.split('/'));
+    if (fs.existsSync(looseRefFile)) {
+      const sha = clean(fs.readFileSync(looseRefFile, 'utf8'));
+      if (sha) return { commit: sha.slice(0, 7), branch, source: 'dotgit' };
+    }
+    const packedRefsFile = path.join(gitDir, 'packed-refs');
+    if (fs.existsSync(packedRefsFile)) {
+      const lines = fs.readFileSync(packedRefsFile, 'utf8').split(/\r?\n/);
+      for (const line of lines) {
+        if (!line || line.startsWith('#') || line.startsWith('^')) continue;
+        const [sha, ref] = line.trim().split(/\s+/);
+        if (ref === refPath && sha) return { commit: sha.slice(0, 7), branch, source: 'dotgit' };
+      }
+    }
+  } catch {}
+  return null;
+}
 
 function readGitDeployMeta() {
   const envCommit = clean(
@@ -333,17 +362,20 @@ function readGitDeployMeta() {
     process.env.GITHUB_SHA ||
     process.env.RAILWAY_GIT_COMMIT_SHA ||
     process.env.VERCEL_GIT_COMMIT_SHA ||
+    process.env.RENDER_GIT_COMMIT ||
+    process.env.COMMIT_SHA ||
+    process.env.SOURCE_VERSION ||
     ''
   );
   const envBranch = clean(process.env.GIT_BRANCH || process.env.GITHUB_REF_NAME || '');
   const envMessage = clean(process.env.GIT_COMMIT_MESSAGE || '');
   try {
-    const out = execSync('git log -1 --format=%h%n%cI%n%s', {
+    const out = execSync('git -c safe.directory=* log -1 --format=%h%n%cI%n%s', {
       cwd: ROOT,
       timeout: 1500,
       stdio: ['ignore', 'pipe', 'ignore']
     }).toString('utf8').split(/\r?\n/);
-    const branch = clean(execSync('git rev-parse --abbrev-ref HEAD', {
+    const branch = clean(execSync('git -c safe.directory=* rev-parse --abbrev-ref HEAD', {
       cwd: ROOT,
       timeout: 1000,
       stdio: ['ignore', 'pipe', 'ignore']
@@ -358,12 +390,22 @@ function readGitDeployMeta() {
       };
     }
   } catch {}
+  const dotGit = readDotGitHeadMeta(ROOT);
+  if (dotGit && dotGit.commit) {
+    return {
+      commit: dotGit.commit,
+      commit_date: '',
+      commit_subject: envMessage ? envMessage.slice(0, 120) : BOT_BUILD_RELEASE_NOTE,
+      branch: dotGit.branch || envBranch || 'main',
+      source: dotGit.source
+    };
+  }
   return {
     commit: envCommit ? envCommit.slice(0, 12) : '',
     commit_date: '',
-    commit_subject: envMessage ? envMessage.slice(0, 120) : '',
-    branch: envBranch || '',
-    source: envCommit ? 'env' : 'none'
+    commit_subject: envMessage ? envMessage.slice(0, 120) : BOT_BUILD_RELEASE_NOTE,
+    branch: envBranch || 'main',
+    source: envCommit ? 'env' : 'build_tag'
   };
 }
 const BOT_DEPLOY_INFO = readGitDeployMeta();
@@ -386,7 +428,11 @@ const pollingHealth = {
   fail_streak: 0,
   last_poll_ok_at: null,
   last_update_at: null,
-  last_error: ''
+  last_error: '',
+  last_command: '',
+  last_command_at: null,
+  last_command_result: '',
+  last_command_error: ''
 };
 const moderationHealth = {
   ok: null,
@@ -4606,7 +4652,12 @@ async function replyInChat(msg, text, extra = {}) {
       if (body.reply_to_message_id && (errStr.includes('replied message not found') || errStr.includes('reply_to_message'))) {
         const nextBody = { ...body };
         delete nextBody.reply_to_message_id;
-        return await sendText(chatId, text, nextBody);
+        return await attemptSend(nextBody);
+      }
+      if (body.message_thread_id && errStr.includes('message thread not found')) {
+        const nextBody = { ...body };
+        delete nextBody.message_thread_id;
+        return await attemptSend(nextBody);
       }
       const waitSec = parseRetryAfterSec(err);
       if (waitSec > 0 && waitSec <= 45) {
@@ -4779,94 +4830,112 @@ async function onMessage(msg) {
   if (!chatId) return;
 
   const parsedCmd = parseBotCommand(text, moderationHealth.bot_username);
-  if (parsedCmd && ['/status', '/ping', '/ver', '/deploy', '/new', '/unpin', '/unpin_done', '/unpin_all', '/modtest'].includes(parsedCmd.command)) {
+  if (parsedCmd && ['/status', '/stats', '/ping', '/ver', '/deploy', '/new', '/unpin', '/unpin_done', '/unpin_all', '/modtest'].includes(parsedCmd.command)) {
     const cmd = parsedCmd.command;
-    if (cmd === '/status' || cmd === '/ping' || cmd === '/ver' || cmd === '/deploy') {
+    pollingHealth.last_command = cmd;
+    pollingHealth.last_command_at = new Date().toISOString();
+    pollingHealth.last_command_result = 'handling';
+    pollingHealth.last_command_error = '';
+
+    if (cmd === '/status' || cmd === '/stats' || cmd === '/ping' || cmd === '/ver' || cmd === '/deploy') {
       const inModChat = Number(chatId) === Number(MOD_CHAT);
       if (!inModChat && !isAdmin(uid)) {
+        pollingHealth.last_command_result = 'ignored_chat';
         return;
       }
       if (inModChat && !(await canModerate(msg.from?.id, msg))) {
         await replyInChat(msg, 'Доступ только участникам группы модерации.');
+        pollingHealth.last_command_result = 'denied';
         return;
       }
-      const receivedAtMs = Date.now();
-      const msgDateSec = Number(msg?.date || 0);
-      const deliveryLagSec = msgDateSec > 0 ? Math.max(0, Math.round((receivedAtMs - msgDateSec * 1000) / 1000)) : null;
-
-      let apiPingMs = null;
-      let apiPingOk = false;
-      const t0 = Date.now();
       try {
-        await tg('getMe', {});
-        apiPingMs = Date.now() - t0;
-        apiPingOk = true;
-      } catch (e) {
-        apiPingMs = Date.now() - t0;
-      }
-      await ensureModerationHealth(true);
-      const replyBuildMs = Date.now() - receivedAtMs;
+        const receivedAtMs = Date.now();
+        const msgDateSec = Number(msg?.date || 0);
+        const deliveryLagSec = msgDateSec > 0 ? Math.max(0, Math.round((receivedAtMs - msgDateSec * 1000) / 1000)) : null;
 
-      let totalReleases = 0;
-      let onUploadCount = 0;
-      let moderationCount = 0;
-      let approvedCount = 0;
-      let rejectedCount = 0;
-      for (const listRaw of Object.values(db || {})) {
-        const list = Array.isArray(listRaw) ? listRaw : [];
-        for (const r of list) {
-          if (!r || typeof r !== 'object') continue;
-          totalReleases += 1;
-          const st = canonicalStatus(r.status);
-          if (st === STATUS.ON_UPLOAD) onUploadCount += 1;
-          else if (st === STATUS.MODERATION) moderationCount += 1;
-          else if (st === STATUS.APPROVED || st === STATUS.PUBLISHED) approvedCount += 1;
-          else if (st === STATUS.REJECTED) rejectedCount += 1;
+        let apiPingMs = null;
+        let apiPingOk = false;
+        const t0 = Date.now();
+        try {
+          await tg('getMe', {});
+          apiPingMs = Date.now() - t0;
+          apiPingOk = true;
+        } catch (e) {
+          apiPingMs = Date.now() - t0;
         }
+        await ensureModerationHealth(true);
+        const replyBuildMs = Date.now() - receivedAtMs;
+
+        let totalReleases = 0;
+        let onUploadCount = 0;
+        let moderationCount = 0;
+        let approvedCount = 0;
+        let rejectedCount = 0;
+        for (const listRaw of Object.values(db || {})) {
+          const list = Array.isArray(listRaw) ? listRaw : [];
+          for (const r of list) {
+            if (!r || typeof r !== 'object') continue;
+            totalReleases += 1;
+            const st = canonicalStatus(r.status);
+            if (st === STATUS.ON_UPLOAD) onUploadCount += 1;
+            else if (st === STATUS.MODERATION) moderationCount += 1;
+            else if (st === STATUS.APPROVED || st === STATUS.PUBLISHED) approvedCount += 1;
+            else if (st === STATUS.REJECTED) rejectedCount += 1;
+          }
+        }
+
+        const gitLine = BOT_DEPLOY_INFO.commit
+          ? `<code>${esc(BOT_DEPLOY_INFO.commit)}</code>` +
+            (BOT_DEPLOY_INFO.branch ? ` (${esc(BOT_DEPLOY_INFO.branch)})` : '') +
+            (BOT_DEPLOY_INFO.commit_subject ? `\n• Коммит: <i>${esc(BOT_DEPLOY_INFO.commit_subject)}</i>` : '')
+          : `<i>build_tag (${esc(BOT_DEPLOY_INFO.branch || 'main')}, без .git)</i>` +
+            (BOT_DEPLOY_INFO.commit_subject ? `\n• Релиз: <i>${esc(BOT_DEPLOY_INFO.commit_subject)}</i>` : '');
+
+        const pollLine = pollingHealth.ok === true
+          ? `🟢 активен${pollingHealth.last_poll_ok_at ? ` (${esc(pollingHealth.last_poll_ok_at.slice(11, 19))} UTC)` : ''}`
+          : `🔴 ошибки: ${pollingHealth.fail_streak}${pollingHealth.last_error ? ` (${esc(pollingHealth.last_error.slice(0, 60))})` : ''}`;
+
+        const supabaseBadges = [
+          `forms:${supabaseFeatureState.forms ? '✅' : '❌'}`,
+          `users:${supabaseFeatureState.users ? '✅' : '❌'}`,
+          `public:${supabaseFeatureState.public_releases ? '✅' : '❌'}`,
+          `interactions:${supabaseFeatureState.interactions ? '✅' : '❌'}`
+        ].join(' • ');
+
+        const msgLines = [
+          '🟢 <b>Бот онлайн и отвечает!</b>',
+          '',
+          '🚀 <b>Деплой и версия:</b>',
+          `• Build: <code>${esc(BOT_BUILD_VERSION)}</code>`,
+          `• Git: ${gitLine}`,
+          `• Старт: <code>${esc(BOT_STARTED_AT.replace('T', ' ').slice(0, 19))} UTC</code>`,
+          `• Uptime: <b>${esc(formatUptimeMs(Date.now() - BOT_STARTED_AT_MS))}</b>`,
+          '',
+          '⚡ <b>Реакция и отклик:</b>',
+          `• Telegram API (getMe): ${apiPingOk ? `<b>${apiPingMs} мс</b>` : `❌ ошибка (${apiPingMs} мс)`}`,
+          `• Доставка апдейта → старт ответа: <b>${deliveryLagSec !== null ? `${deliveryLagSec} сек` : '—'}</b> (сбор: ${replyBuildMs} мс)`,
+          `• Long polling: ${pollLine}`,
+          '',
+          '🛡 <b>Группа модерации:</b>',
+          `• Чат: <b>${esc(moderationHealth.chat_title || String(MOD_CHAT))}</b>`,
+          `• Роль: <code>${esc(moderationHealth.bot_status || '-')}</code> (@${esc(moderationHealth.bot_username || '-')})`,
+          `• Топик: <code>${MODERATION_THREAD_ID > 0 ? MODERATION_THREAD_ID : (msg?.message_thread_id ? `текущий (${msg.message_thread_id})` : 'default')}</code>`,
+          `• Права: отправка ${moderationHealth.can_send_messages === true ? '✅' : '❌'} • закреп/откреп ${moderationHealth.can_pin_messages === true ? '✅' : '❌'}`,
+          '',
+          '🗄 <b>База и синк:</b>',
+          `• Релизов: <b>${totalReleases}</b> (отгрузка: ${onUploadCount}, модерация: ${moderationCount}, принято: ${approvedCount}, откл: ${rejectedCount})`,
+          `• Supabase: ${supabaseFeatureState ? supabaseBadges : 'отключен'}`
+        ];
+
+        await replyInChat(msg, msgLines.join('\n'), { reply_to_message_id: msg.message_id });
+        pollingHealth.last_command_result = 'ok';
+      } catch (err) {
+        const errText = shortTgError(err);
+        pollingHealth.last_command_result = 'error';
+        pollingHealth.last_command_error = errText;
+        console.error('[bot] /status error:', errText);
+        await replyInChat(msg, `❌ Ошибка ${esc(cmd)}: <code>${esc(errText)}</code>`).catch(() => {});
       }
-
-      const gitLine = BOT_DEPLOY_INFO.commit
-        ? `<code>${esc(BOT_DEPLOY_INFO.commit)}</code>` +
-          (BOT_DEPLOY_INFO.branch ? ` (${esc(BOT_DEPLOY_INFO.branch)})` : '') +
-          (BOT_DEPLOY_INFO.commit_subject ? `\n• Коммит: <i>${esc(BOT_DEPLOY_INFO.commit_subject)}</i>` : '')
-        : '<i>не передан (.git отсутствует в контейнере)</i>';
-
-      const pollLine = pollingHealth.ok === true
-        ? `🟢 активен${pollingHealth.last_poll_ok_at ? ` (${esc(pollingHealth.last_poll_ok_at.slice(11, 19))} UTC)` : ''}`
-        : `🔴 ошибки: ${pollingHealth.fail_streak}${pollingHealth.last_error ? ` (${esc(pollingHealth.last_error.slice(0, 60))})` : ''}`;
-
-      const supabaseBadges = [
-        `forms:${supabaseFeatureState.forms ? '✅' : '❌'}`,
-        `users:${supabaseFeatureState.users ? '✅' : '❌'}`,
-        `public:${supabaseFeatureState.public_releases ? '✅' : '❌'}`,
-        `interactions:${supabaseFeatureState.interactions ? '✅' : '❌'}`
-      ].join(' • ');
-
-      const msgLines = [
-        '🟢 <b>Бот онлайн и отвечает!</b>',
-        '',
-        '🚀 <b>Деплой и версия:</b>',
-        `• Build: <code>${esc(BOT_BUILD_VERSION)}</code>`,
-        `• Git: ${gitLine}`,
-        `• Старт: <code>${esc(BOT_STARTED_AT.replace('T', ' ').slice(0, 19))} UTC</code>`,
-        `• Uptime: <b>${esc(formatUptimeMs(Date.now() - BOT_STARTED_AT_MS))}</b>`,
-        '',
-        '⚡ <b>Реакция и отклик:</b>',
-        `• Telegram API (getMe): ${apiPingOk ? `<b>${apiPingMs} мс</b>` : `❌ ошибка (${apiPingMs} мс)`}`,
-        `• Доставка апдейта → старт ответа: <b>${deliveryLagSec !== null ? `${deliveryLagSec} сек` : '—'}</b> (сбор: ${replyBuildMs} мс)`,
-        `• Long polling: ${pollLine}`,
-        '',
-        '🛡 <b>Группа модерации:</b>',
-        `• Чат: <b>${esc(moderationHealth.chat_title || String(MOD_CHAT))}</b>`,
-        `• Роль: <code>${esc(moderationHealth.bot_status || '-')}</code> (@${esc(moderationHealth.bot_username || '-')})`,
-        `• Права: отправка ${moderationHealth.can_send_messages === true ? '✅' : '❌'} • закреп/откреп ${moderationHealth.can_pin_messages === true ? '✅' : '❌'}`,
-        '',
-        '🗄 <b>База и синк:</b>',
-        `• Релизов: <b>${totalReleases}</b> (отгрузка: ${onUploadCount}, модерация: ${moderationCount}, принято: ${approvedCount}, откл: ${rejectedCount})`,
-        `• Supabase: ${supabaseFeatureState ? supabaseBadges : 'отключен'}`
-      ];
-
-      await replyInChat(msg, msgLines.join('\n'), { reply_to_message_id: msg.message_id });
       return;
     }
     if (cmd === '/new') {
@@ -5142,17 +5211,24 @@ async function onMessage(msg) {
     }
 
     if (cmd === '/modtest') {
-      if (!isAdmin(uid) && !(msg?.sender_chat?.id && Number(msg.sender_chat.id) === Number(MOD_CHAT))) {
-        await replyInChat(msg, '❌ Команда доступна только администраторам.');
+      const inModChat = Number(chatId) === Number(MOD_CHAT);
+      const allowedMod = isAdmin(uid) || (inModChat && await canModerate(msg.from?.id, msg));
+      if (!allowedMod) {
+        await replyInChat(msg, '❌ Команда доступна только участникам группы модерации или администраторам.');
+        pollingHealth.last_command_result = 'denied';
         return;
       }
       await ensureModerationHealth(true);
       try {
+        const probeExtra = MODERATION_THREAD_ID <= 0 && Number(msg?.message_thread_id || 0) > 0
+          ? { message_thread_id: Number(msg.message_thread_id) }
+          : {};
         const probe = await sendModerationText(
           `🧪 <b>Проверка модерации</b>\n` +
           `Build: <code>${esc(BOT_BUILD_VERSION)}</code>\n` +
           `Время: <code>${esc(new Date().toISOString())}</code>\n` +
-          `Проверка отправки из node_bot.js`
+          `Проверка отправки из node_bot.js`,
+          probeExtra
         );
         await replyInChat(
           msg,
@@ -5162,15 +5238,18 @@ async function onMessage(msg) {
           `status бота: <b>${esc(moderationHealth.bot_status || '-')}</b>\n` +
           `права на закреп/откреп: <b>${moderationHealth.can_pin_messages === true ? 'есть' : moderationHealth.can_pin_messages === false ? 'НЕТ (выдайте can_pin_messages)' : 'не определено'}</b>`
         );
+        pollingHealth.last_command_result = 'ok';
       } catch (e) {
         const errText = shortTgError(e);
         const hint = moderationErrorHint(errText);
+        pollingHealth.last_command_result = 'error';
+        pollingHealth.last_command_error = errText;
         await replyInChat(
           msg,
           `❌ Отправка в модерацию не работает.\n` +
           `Причина: <code>${esc(errText)}</code>` +
           (hint ? `\nПодсказка: ${esc(hint)}` : '')
-        );
+        ).catch(() => {});
       }
       return;
     }
@@ -6477,9 +6556,11 @@ function startStaticServer() {
               list[localIndex].user_deleted = true;
               list[localIndex].deleted_at = now;
               list[localIndex].status = STATUS.DELETED;
+              await syncModerationPinForRelease(list[localIndex]).catch(() => {});
               saveDb();
               syncModerationMirror(auth.uid, localIndex, list[localIndex]);
               saveModDb();
+              await refreshModerationMessage(auth.uid, localIndex, list[localIndex]).catch(() => {});
             }
             console.info(`[PLATFORM] release deleted: user_id=${auth.uid} form_id=${releaseId}`);
             sendJson(res, 200, { ok: true, deleted: true, release_id: releaseId });
@@ -7674,7 +7755,12 @@ async function loop() {
           if (u.message) await onMessage(u.message);
           else if (u.callback_query) await onCallback(u.callback_query);
         } catch (e) {
-          console.error('[bot] update error:', e.message || e);
+          const errMsg = clean(e?.message || e);
+          if (pollingHealth.last_command_result === 'handling') {
+            pollingHealth.last_command_result = 'error';
+            pollingHealth.last_command_error = errMsg;
+          }
+          console.error('[bot] update error:', errMsg);
         }
       }
     } catch (e) {
@@ -7700,20 +7786,34 @@ async function loop() {
   }
 }
 
+async function registerModerationCommands() {
+  const modCommands = [
+    { command: 'status', description: 'Версия деплоя, отклик и состояние бота (/stats)' },
+    { command: 'stats', description: 'Статус деплоя, пинг и состояние модерации' },
+    { command: 'unpin_all', description: 'Сбросить все старые закрепы и оставить только «На отгрузке»' },
+    { command: 'unpin_done', description: 'Открепить последние карточки не в статусе «На отгрузке»' },
+    { command: 'unpin', description: 'Открепить сообщение (ответом на карточку)' },
+    { command: 'new', description: 'Пометить анкеты «На отгрузке» свободными' },
+    { command: 'modtest', description: 'Проверить права бота в группе модерации' }
+  ];
+  for (const scope of [
+    { type: 'chat', chat_id: MOD_CHAT },
+    { type: 'chat_administrators', chat_id: MOD_CHAT }
+  ]) {
+    try {
+      await tg('setMyCommands', { commands: modCommands, scope });
+    } catch (err) {
+      console.warn(`[bot] setMyCommands (${scope.type}) warning: ${shortTgError(err)}`);
+    }
+  }
+}
+
 (async () => {
   fs.mkdirSync(path.resolve(ROOT, 'webapp/data'), { recursive: true });
   // Start the Mini App before optional remote hydration so a Supabase DNS
   // outage cannot prevent the web interface and health checks from opening.
   startStaticServer();
   const imported = importBackupsIntoDb();
-  if (SUPABASE_SYNC_ENABLED) {
-    await hydrateFromSupabase();
-  }
-  exportReleases();
-  exportCabinet();
-  if (SUPABASE_SYNC_ENABLED) {
-    await syncSupabaseNow('startup');
-  }
   console.info(`[bot] CXRNER Node fallback bot started build=${BOT_BUILD_VERSION} commit=${BOT_DEPLOY_INFO.commit || 'none'}`);
   console.info(`[bot] moderation chat: ${MOD_CHAT}`);
   console.info(`[bot] admin ids: ${ADMIN_IDS.join(', ')}`);
@@ -7740,21 +7840,24 @@ async function loop() {
   console.info(`[bot] tg fetch: timeout=${TG_FETCH_TIMEOUT_MS}ms retries=${TG_FETCH_RETRIES}`);
   console.info(`[bot] moderation thread: ${MODERATION_THREAD_ID > 0 ? MODERATION_THREAD_ID : 'default'}`);
   if (WEBAPP_URL) console.info(`[bot] webapp url: ${WEBAPP_URL}`);
+
+  // Register commands & verify chat access BEFORE slower Supabase sync so the
+  // Telegram / command menu and health state update within ~1s of boot.
   await verifyModerationChatAccess();
-  try {
-    await tg('setMyCommands', {
-      commands: [
-        { command: 'status', description: 'Версия деплоя, отклик и состояние бота' },
-        { command: 'unpin_all', description: 'Сбросить все старые закрепы и оставить только «На отгрузке»' },
-        { command: 'unpin_done', description: 'Открепить последние карточки не в статусе «На отгрузке»' },
-        { command: 'unpin', description: 'Открепить сообщение (ответом на карточку)' },
-        { command: 'new', description: 'Пометить анкеты «На отгрузке» свободными' },
-        { command: 'modtest', description: 'Проверить права бота в группе модерации' }
-      ],
-      scope: { type: 'chat', chat_id: MOD_CHAT }
+  await registerModerationCommands();
+  if (SUPABASE_SYNC_ENABLED) {
+    await hydrateFromSupabase();
+  }
+  exportReleases();
+  exportCabinet();
+  if (SUPABASE_SYNC_ENABLED) {
+    void syncSupabaseNow('startup').catch((err) => {
+      console.warn(`[bot] background startup supabase sync warning: ${shortTgError(err)}`);
     });
-  } catch {}
-  try { await tg('deleteWebhook', { drop_pending_updates: false }); } catch {}
+  }
+  try { await tg('deleteWebhook', { drop_pending_updates: false }); } catch (err) {
+    console.warn(`[bot] deleteWebhook warning: ${shortTgError(err)}`);
+  }
   process.on('SIGINT', () => { stopping = true; process.exit(0); });
   process.on('SIGTERM', () => { stopping = true; process.exit(0); });
   await loop();
