@@ -322,8 +322,8 @@ const FORM_STATUS = {
   APPROVED: 'approved',
   REJECTED: 'rejected'
 };
-const BOT_BUILD_VERSION = '2026-11-15-ui-v6';
-const BOT_BUILD_RELEASE_NOTE = 'цветные кнопки Bot API 9.4, 2-кол. клавиатуры, компактные карточки, пресеты отказов/правок, /queue, /find, фикс 429 и топиков';
+const BOT_BUILD_VERSION = '2026-11-15-ui-v7';
+const BOT_BUILD_RELEASE_NOTE = 'цветные кнопки Bot API 9.4, автозакрепление анкет (сайт/бот/Mini App), 2-кол. карточки, пресеты, /queue, /find, фикс 429 и топиков';
 const BOT_STARTED_AT_MS = Date.now();
 const BOT_STARTED_AT = new Date(BOT_STARTED_AT_MS).toISOString();
 
@@ -718,6 +718,9 @@ function normalizeRelease(relRaw) {
   if (rel.reject_reason) rel.reject_reason = clean(rel.reject_reason);
   if (rel.upc) rel.upc = clean(rel.upc).toUpperCase();
   if (rel.moderation_message_id) rel.moderation_message_id = Number(rel.moderation_message_id) || 0;
+  if (rel.moderation_pinned !== undefined) rel.moderation_pinned = !!rel.moderation_pinned;
+  rel.pin_pending = !!rel.pin_pending;
+  rel.manual_unpinned = !!rel.manual_unpinned;
   rel.available_for_upload = !!rel.available_for_upload;
   if (rel.available_marked_at) rel.available_marked_at = clean(rel.available_marked_at);
   if (rel.available_marked_by) rel.available_marked_by = clean(rel.available_marked_by);
@@ -2685,6 +2688,235 @@ async function unpinModerationMessage(messageId, opts = {}) {
     return { ok: false, error: errText, missingRights: isMissingPinRightsError(errText), retryAfter };
   }
 }
+const pendingPinRetryTimers = new Map();
+let autoPinSweepRunning = false;
+
+function clearScheduledModerationPinRetry(uid, idx, messageId = 0) {
+  const prefix = `${String(uid)}:${Number(idx)}:`;
+  const exact = `${prefix}${Number(messageId || 0)}`;
+  if (pendingPinRetryTimers.has(exact)) {
+    clearTimeout(pendingPinRetryTimers.get(exact));
+    pendingPinRetryTimers.delete(exact);
+  }
+  for (const [k, timer] of pendingPinRetryTimers.entries()) {
+    if (k.startsWith(prefix)) {
+      clearTimeout(timer);
+      pendingPinRetryTimers.delete(k);
+    }
+  }
+}
+
+async function pinModerationMessageNow(messageId, opts = {}) {
+  let res = await pinModerationMessage(messageId, opts);
+  if (!res.ok && !res.missingRights && opts.retryOnRateLimit !== false) {
+    if (res.retryAfter > 0 && res.retryAfter <= 12) {
+      await delay((res.retryAfter + 1) * 1000);
+      res = await pinModerationMessage(messageId, opts);
+    } else if (opts.immediateRetry) {
+      await delay(1200);
+      res = await pinModerationMessage(messageId, opts);
+    }
+  }
+  return res;
+}
+
+function scheduleModerationPinRetry(uid, idx, messageId, delaySec = 6, attempt = 1) {
+  const mid = Number(messageId || 0);
+  if (!mid || attempt > 4) return;
+  const key = `${String(uid)}:${Number(idx)}:${mid}`;
+  if (pendingPinRetryTimers.has(key)) {
+    clearTimeout(pendingPinRetryTimers.get(key));
+    pendingPinRetryTimers.delete(key);
+  }
+  const waitMs = Math.max(2000, Math.min(60000, Number(delaySec || 6) * 1000));
+  const timer = setTimeout(async () => {
+    pendingPinRetryTimers.delete(key);
+    try {
+      const ref = resolveReleaseRef(uid, idx, mid);
+      const rel = ref?.rel;
+      if (!rel || rel.user_deleted || rel.manual_unpinned) return;
+      if (!shouldStatusStayPinned(rel.status)) {
+        rel.pin_pending = false;
+        return;
+      }
+      if (rel.moderation_pinned) {
+        rel.pin_pending = false;
+        return;
+      }
+      const targetMid = Number(rel.moderation_message_id || mid || 0);
+      if (!targetMid) return;
+      const res = await pinModerationMessage(targetMid, { silent: true });
+      if (res.ok) {
+        rel.moderation_pinned = true;
+        rel.pin_pending = false;
+        rel.manual_unpinned = false;
+        saveDb();
+        syncModerationMirror(ref.uid, ref.idx, rel);
+        saveModDb();
+        await refreshModerationMessage(ref.uid, ref.idx, rel, targetMid).catch(() => {});
+        await supabasePatchFormByRelease(ref.uid, rel, { form_payload: safeJson(rel) || {} }).catch(() => {});
+        console.info(`[MODERATION] delayed auto-pin succeeded: user_id=${ref.uid} idx=${ref.idx} msg_id=${targetMid}`);
+        return;
+      }
+      if (res.missingRights) {
+        rel.pin_pending = false;
+        saveDb();
+        return;
+      }
+      const nextDelay = res.retryAfter > 0 ? Math.min(60, res.retryAfter + 2) : Math.min(45, attempt * 10);
+      scheduleModerationPinRetry(ref.uid, ref.idx, targetMid, nextDelay, attempt + 1);
+    } catch {}
+  }, waitMs);
+  if (typeof timer?.unref === 'function') timer.unref();
+  pendingPinRetryTimers.set(key, timer);
+}
+
+function findExistingReleaseByFormOrSubmission(uid, formId = '', submissionKey = '', moderationMsgId = 0) {
+  const cleanFormId = clean(formId);
+  const cleanSub = clean(submissionKey);
+  const targetMid = Number(moderationMsgId || 0);
+  const tryScanList = (ownerUid, list) => {
+    for (let idx = 0; idx < list.length; idx += 1) {
+      const rel = list[idx];
+      if (!rel || typeof rel !== 'object') continue;
+      if (cleanFormId && clean(rel.supabase_form_id) === cleanFormId) return { uid: ownerUid, idx, rel };
+      if (cleanSub && clean(rel.submission_time) === cleanSub && (!uid || String(ownerUid) === String(uid))) {
+        return { uid: ownerUid, idx, rel };
+      }
+      if (targetMid && Number(rel.moderation_message_id || 0) === targetMid) return { uid: ownerUid, idx, rel };
+    }
+    return null;
+  };
+  if (uid && Array.isArray(db?.[uid])) {
+    const hit = tryScanList(String(uid), db[uid]);
+    if (hit) return hit;
+  }
+  if (cleanFormId || targetMid) {
+    for (const [ownerUid, listRaw] of Object.entries(db || {})) {
+      if (!Array.isArray(listRaw)) continue;
+      const hit = tryScanList(String(ownerUid), listRaw);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+async function reconcilePendingWebFormsAndPins() {
+  if (stopping || autoPinSweepRunning) return;
+  autoPinSweepRunning = true;
+  try {
+    // 1. Retry pinning any recent / pending local ON_UPLOAD cards that aren't pinned yet
+    let localChanged = false;
+    for (const [ownerId, listRaw] of Object.entries(db || {})) {
+      const list = Array.isArray(listRaw) ? listRaw : [];
+      for (let idx = 0; idx < list.length; idx += 1) {
+        const rel = list[idx];
+        if (!rel || typeof rel !== 'object' || rel.user_deleted || rel.manual_unpinned) continue;
+        if (!shouldStatusStayPinned(rel.status)) continue;
+        const mid = Number(rel.moderation_message_id || 0);
+        if (!mid || rel.moderation_pinned) continue;
+        const isRecent = parseIsoTime(rel.submission_time || '') >= BOT_STARTED_AT_MS;
+        if (!rel.pin_pending && !isRecent) continue;
+
+        const pRes = await pinModerationMessage(mid, { silent: true });
+        if (pRes.ok) {
+          rel.moderation_pinned = true;
+          rel.pin_pending = false;
+          localChanged = true;
+          syncModerationMirror(ownerId, idx, rel);
+          await refreshModerationMessage(ownerId, idx, rel, mid).catch(() => {});
+          await supabasePatchFormByRelease(ownerId, rel, { form_payload: safeJson(rel) || {} }).catch(() => {});
+        } else if (pRes.missingRights || pRes.retryAfter > 0) {
+          if (pRes.missingRights) {
+            rel.pin_pending = false;
+            localChanged = true;
+          }
+          break;
+        }
+      }
+    }
+    if (localChanged) {
+      saveDb();
+      saveModDb();
+    }
+
+    // 2. Catch any brand-new website forms (created after bot boot) that need posting or pinning
+    if (SUPABASE_SYNC_ENABLED && supabaseFeatureState.forms) {
+      const rows = await supabaseSelectWhere(
+        SUPABASE_FORMS_TABLE,
+        'id,telegram_id,username,artist_name,track_name,genre,release_type,status,upc,moderation_message_id,submission_key,source,created_at,updated_at,form_payload',
+        [
+          { key: 'status', value: FORM_STATUS.PENDING },
+          { key: 'created_at', op: 'gte', value: BOT_STARTED_AT }
+        ],
+        'created_at.asc',
+        25
+      ).catch(() => []);
+
+      for (const row of rows || []) {
+        const uid = clean(row?.telegram_id || '');
+        if (!uid) continue;
+        const formId = clean(row?.id || '');
+        const msgId = Number(row?.moderation_message_id || 0);
+        const payloadForm = row?.form_payload && typeof row.form_payload === 'object' ? row.form_payload : {};
+        const existing = findExistingReleaseByFormOrSubmission(uid, formId, row?.submission_key || '', msgId);
+
+        if (!existing && !msgId) {
+          const releaseData = normalizeRelease({
+            ...payloadForm,
+            type: normalizeType(payloadForm.type || row.release_type) || 'сингл',
+            name: clean(payloadForm.name || row.track_name || ''),
+            nick: clean(payloadForm.nick || row.artist_name || ''),
+            genre: clean(payloadForm.genre || row.genre || ''),
+            tg: clean(payloadForm.tg || payloadForm.telegram_contact || ''),
+            status: STATUS.ON_UPLOAD,
+            submission_time: clean(row.submission_key || row.created_at || payloadForm.submission_time || ''),
+            source: clean(row.source || payloadForm.source || 'web'),
+            username: clean(row.username || payloadForm.username || '')
+          });
+          const fakeUser = { id: Number(uid) || 0, username: releaseData.username || releaseData.tg || '' };
+          try {
+            await submitReleaseToModeration(fakeUser, uid, releaseData, releaseData.source || 'web', {
+              existing_form_id: formId
+            });
+          } catch (e) {
+            console.warn(`[MODERATION] web sync submit warning form_id=${formId}:`, clean(e?.message || e));
+          }
+          continue;
+        }
+
+        if (msgId > 0 && !payloadForm.manual_unpinned) {
+          const alreadyPinnedInDb = Boolean(existing?.rel?.moderation_pinned);
+          const alreadyPinnedInPayload = Boolean(payloadForm.moderation_pinned);
+          if (existing?.rel?.manual_unpinned) continue;
+          if (!alreadyPinnedInDb && !alreadyPinnedInPayload) {
+            const pRes = await pinModerationMessage(msgId, { silent: true });
+            if (pRes.ok) {
+              if (existing?.rel) {
+                existing.rel.moderation_pinned = true;
+                existing.rel.pin_pending = false;
+                saveDb();
+                syncModerationMirror(existing.uid, existing.idx, existing.rel);
+                saveModDb();
+                await refreshModerationMessage(existing.uid, existing.idx, existing.rel, msgId).catch(() => {});
+              }
+              await supabasePatchFormByRelease(uid, { ...(existing?.rel || payloadForm), supabase_form_id: formId }, {
+                moderation_message_id: msgId,
+                form_payload: safeJson({ ...(existing?.rel || payloadForm), moderation_pinned: true, manual_unpinned: false }) || {}
+              }).catch(() => {});
+              console.info(`[MODERATION] pinned web fallback form_id=${formId} msg_id=${msgId}`);
+            } else if (pRes.missingRights || pRes.retryAfter > 0) {
+              break;
+            }
+          }
+        }
+      }
+    }
+  } finally {
+    autoPinSweepRunning = false;
+  }
+}
+
 async function syncModerationPinForRelease(rel, fallbackMessageId = 0, opts = {}) {
   const mid = Number(rel?.moderation_message_id || fallbackMessageId || 0);
   if (!mid) return { ok: false, skipped: true };
@@ -2693,13 +2925,19 @@ async function syncModerationPinForRelease(rel, fallbackMessageId = 0, opts = {}
     const res = await unpinModerationMessage(mid, opts);
     if (res.ok && rel && typeof rel === 'object') {
       rel.moderation_pinned = false;
+      rel.pin_pending = false;
     }
     return res;
   }
-  if (opts.pinIfOnUpload) {
-    const res = await pinModerationMessage(mid, opts);
+  if (opts.pinIfOnUpload || (rel?.pin_pending && !rel?.manual_unpinned)) {
+    const res = await pinModerationMessageNow(mid, opts);
     if (res.ok && rel && typeof rel === 'object') {
       rel.moderation_pinned = true;
+      rel.pin_pending = false;
+      rel.manual_unpinned = false;
+    } else if (rel && typeof rel === 'object' && !res.missingRights) {
+      rel.moderation_pinned = false;
+      rel.pin_pending = true;
     }
     return res;
   }
@@ -2839,12 +3077,15 @@ async function applyReleaseStatus(uid, idx, status, moderator, opts = {}) {
   if (canonStatus !== STATUS.DELETED && opts.restoreFromDelete) rel.user_deleted = false;
   if (canonStatus === STATUS.ON_UPLOAD) {
     rel.available_for_upload = true;
+    rel.manual_unpinned = false;
     rel.available_marked_at = rel.moderation_time;
     rel.available_marked_by = String(moderator?.id || '');
     rel.available_marked_by_username = clean(moderator?.username || '');
     rel.available_marked_by_name = clean([moderator?.first_name || '', moderator?.last_name || ''].filter(Boolean).join(' '));
   } else {
     rel.available_for_upload = false;
+    rel.pin_pending = false;
+    clearScheduledModerationPinRetry(uid, idx, rel.moderation_message_id);
   }
 
   const statusChanged = prevStatus !== canonStatus;
@@ -2862,8 +3103,16 @@ async function applyReleaseStatus(uid, idx, status, moderator, opts = {}) {
   }
 
   const pinResult = await syncModerationPinForRelease(rel, opts.fallbackMessageId, {
-    pinIfOnUpload: canonStatus === STATUS.ON_UPLOAD && (statusChanged || !!opts.restorePin)
+    pinIfOnUpload: canonStatus === STATUS.ON_UPLOAD && (statusChanged || !!opts.restorePin || (!rel.moderation_pinned && !rel.manual_unpinned))
   });
+  if (canonStatus === STATUS.ON_UPLOAD && rel.pin_pending && !pinResult?.missingRights) {
+    scheduleModerationPinRetry(
+      uid,
+      idx,
+      Number(rel.moderation_message_id || opts.fallbackMessageId || 0),
+      Math.max(5, (pinResult?.retryAfter || 4) + 1)
+    );
+  }
 
   saveDb();
   syncModerationMirror(uid, idx, rel);
@@ -3278,14 +3527,16 @@ async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_
   await ensureModerationHealth(false);
   db[uid] = Array.isArray(db[uid]) ? db[uid] : [];
   const idx = db[uid].length;
-  const submissionTime = new Date().toISOString();
+  const submissionTime = clean(releaseData?.submission_time) || new Date().toISOString();
   const rel = {
     ...releaseData,
     release_idx: idx,
     status: STATUS.ON_UPLOAD,
     source,
     submission_time: submissionTime,
-    username: user?.username || ''
+    manual_unpinned: false,
+    pin_pending: false,
+    username: user?.username || clean(releaseData?.username || '')
   };
 
   if (SUPABASE_SYNC_ENABLED) {
@@ -3339,19 +3590,32 @@ async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_
 
   rel.moderation_message_id = sent.message_id;
   rel.moderation_original_text = orig;
-  const pinRes = await pinModerationMessage(sent.message_id);
+  const pinRes = await pinModerationMessageNow(sent.message_id, { immediateRetry: true });
   rel.moderation_pinned = !!pinRes.ok;
+  rel.pin_pending = !pinRes.ok && !pinRes.missingRights;
   db[uid].push(rel);
   saveDb();
 
+  if (!pinRes.ok) {
+    await refreshModerationMessage(uid, idx, rel, sent.message_id).catch(() => {});
+    if (rel.pin_pending) {
+      scheduleModerationPinRetry(
+        uid,
+        idx,
+        sent.message_id,
+        Math.max(5, (pinRes.retryAfter || 4) + 1)
+      );
+    }
+  }
+
   await supabasePatchFormByRelease(uid, rel, {
-    status: FORM_STATUS.ON_MODERATION,
+    status: mapReleaseStatusToFormStatus(rel.status),
     moderation_message_id: Number(sent.message_id || 0) || null,
     form_payload: safeJson(rel) || {}
   });
 
   console.info(
-    `[WEBAPP] release accepted to moderation: user_id=${uid} idx=${idx} msg_id=${Number(sent.message_id || 0)} pin=${pinRes.ok ? 'ok' : pinRes.error}`
+    `[WEBAPP] release accepted to moderation: source=${source} user_id=${uid} idx=${idx} msg_id=${Number(sent.message_id || 0)} pin=${pinRes.ok ? 'ok' : pinRes.error}`
   );
 
   ensureModDbShape();
@@ -5292,6 +5556,9 @@ async function onMessage(msg) {
         const ref = findReleaseByModerationMessageId(targetMsgId);
         if (ref?.rel) {
           ref.rel.moderation_pinned = false;
+          ref.rel.manual_unpinned = true;
+          ref.rel.pin_pending = false;
+          clearScheduledModerationPinRetry(ref.uid, ref.idx, targetMsgId);
           saveDb();
           syncModerationMirror(ref.uid, ref.idx, ref.rel);
           saveModDb();
@@ -6304,6 +6571,11 @@ async function onCallback(query) {
     }
     if (ref?.rel) {
       ref.rel.moderation_pinned = wantPin;
+      ref.rel.manual_unpinned = !wantPin;
+      ref.rel.pin_pending = false;
+      if (!wantPin) {
+        clearScheduledModerationPinRetry(ref.uid, ref.idx, targetMsgId);
+      }
       saveDb();
       syncModerationMirror(ref.uid, ref.idx, ref.rel);
       saveModDb();
@@ -6696,7 +6968,7 @@ function startStaticServer() {
         return;
       }
       if (u.pathname === '/api/webapp/submit' && req.method === 'POST') {
-        readJsonBody(req, WEBAPP_MAX_PAYLOAD_BYTES).then(async (body) => {
+        readJsonBody(req, Math.max(32768, WEBAPP_MAX_PAYLOAD_BYTES)).then(async (body) => {
           const initData = clean(body.initData || body.init_data || '');
           const check = verifyTelegramInitData(initData);
           if (!check.ok || !check.user?.id) {
@@ -6769,7 +7041,7 @@ function startStaticServer() {
 
             const rows = await supabaseSelectWhere(
               SUPABASE_FORMS_TABLE,
-              'id,telegram_id,username,artist_name,track_name,genre,release_type,status,reject_reason,upc,submission_key,source,created_at,updated_at,form_payload',
+              'id,telegram_id,username,artist_name,track_name,genre,release_type,status,reject_reason,upc,moderation_message_id,submission_key,source,created_at,updated_at,form_payload',
               [{ key: 'id', value: formId }],
               '',
               1
@@ -6803,13 +7075,82 @@ function startStaticServer() {
               username: clean(formRow.username || payloadForm.username || '')
             });
 
+            const existing = findExistingReleaseByFormOrSubmission(
+              uid,
+              formId,
+              formRow.submission_key || '',
+              Number(formRow.moderation_message_id || 0)
+            );
+            if (existing?.rel) {
+              const exRel = existing.rel;
+              const exMid = Number(exRel.moderation_message_id || formRow.moderation_message_id || 0);
+              if (exMid && shouldStatusStayPinned(exRel.status) && !exRel.moderation_pinned && !exRel.manual_unpinned) {
+                const pRes = await pinModerationMessageNow(exMid, { immediateRetry: true });
+                exRel.moderation_pinned = !!pRes.ok;
+                exRel.pin_pending = !pRes.ok && !pRes.missingRights;
+                saveDb();
+                syncModerationMirror(existing.uid, existing.idx, exRel);
+                saveModDb();
+                await refreshModerationMessage(existing.uid, existing.idx, exRel, exMid).catch(() => {});
+              }
+              sendJson(res, 200, {
+                ok: true,
+                duplicate: true,
+                user_id: existing.uid,
+                idx: existing.idx,
+                moderation_message_id: exMid || null,
+                moderation_pinned: !!exRel.moderation_pinned
+              });
+              return;
+            }
+
+            const existingMsgId = Number(formRow.moderation_message_id || payloadForm.moderation_message_id || 0);
+            if (existingMsgId > 0) {
+              db[uid] = Array.isArray(db[uid]) ? db[uid] : [];
+              const idx = db[uid].length;
+              const importedRel = {
+                ...releaseData,
+                release_idx: idx,
+                supabase_form_id: formId,
+                moderation_message_id: existingMsgId,
+                manual_unpinned: !!payloadForm.manual_unpinned
+              };
+              let pinRes = { ok: !!payloadForm.moderation_pinned };
+              if (shouldStatusStayPinned(importedRel.status) && !importedRel.manual_unpinned && !pinRes.ok) {
+                pinRes = await pinModerationMessageNow(existingMsgId, { immediateRetry: true });
+              }
+              importedRel.moderation_pinned = !!pinRes.ok;
+              importedRel.pin_pending = !pinRes.ok && !pinRes.missingRights && shouldStatusStayPinned(importedRel.status);
+              db[uid].push(importedRel);
+              saveDb();
+              syncModerationMirror(uid, idx, importedRel);
+              saveModDb();
+              await refreshModerationMessage(uid, idx, importedRel, existingMsgId).catch(() => {});
+              if (importedRel.pin_pending) {
+                scheduleModerationPinRetry(uid, idx, existingMsgId, Math.max(5, (pinRes.retryAfter || 4) + 1));
+              }
+              await supabasePatchFormByRelease(uid, importedRel, {
+                status: mapReleaseStatusToFormStatus(importedRel.status),
+                moderation_message_id: existingMsgId,
+                form_payload: safeJson(importedRel) || {}
+              });
+              sendJson(res, 200, {
+                ok: true,
+                user_id: uid,
+                idx,
+                moderation_message_id: existingMsgId,
+                moderation_pinned: !!importedRel.moderation_pinned
+              });
+              return;
+            }
+
             const fakeUser = { id: Number(uid) || 0, username: releaseData.username || releaseData.tg || '' };
             const out = await submitReleaseToModeration(fakeUser, uid, releaseData, releaseData.source || 'web', {
               existing_form_id: formId
             });
 
-            await supabasePatchFormByRelease(uid, { ...releaseData, supabase_form_id: formId }, {
-              status: FORM_STATUS.ON_MODERATION,
+            await supabasePatchFormByRelease(uid, { ...(out?.rel || releaseData), supabase_form_id: formId }, {
+              status: mapReleaseStatusToFormStatus(out?.rel?.status || STATUS.ON_UPLOAD),
               moderation_message_id: Number(out?.rel?.moderation_message_id || 0) || null,
               form_payload: safeJson(out?.rel || releaseData) || {}
             });
@@ -6818,7 +7159,8 @@ function startStaticServer() {
               ok: true,
               user_id: uid,
               idx: out?.idx ?? null,
-              moderation_message_id: out?.rel?.moderation_message_id ?? null
+              moderation_message_id: out?.rel?.moderation_message_id ?? null,
+              moderation_pinned: !!out?.rel?.moderation_pinned
             });
           } catch (e) {
             console.error('[api/new-release] failed:', clean(e?.message || e));
@@ -7935,6 +8277,7 @@ function startStaticServer() {
                   moderatorComment,
                   clearRejectReason: targetStatus !== STATUS.REJECTED,
                   restoreFromDelete: targetStatus !== STATUS.DELETED,
+                  restorePin: targetStatus === STATUS.ON_UPLOAD,
                   note: `Изменено через Web CMS (${moderatorName})`
                 }
               );
@@ -8054,7 +8397,7 @@ function startStaticServer() {
                 const pinHintId = Number(msgId || 0);
                 if (pinHintId) {
                   await syncModerationPinForRelease(relData, pinHintId, {
-                    pinIfOnUpload: targetStatus === STATUS.ON_UPLOAD && canonicalStatus(formRow.status || p.status) !== STATUS.ON_UPLOAD
+                    pinIfOnUpload: targetStatus === STATUS.ON_UPLOAD && (canonicalStatus(formRow.status || p.status) !== STATUS.ON_UPLOAD || !p.moderation_pinned)
                   });
                 }
 
@@ -8082,7 +8425,7 @@ function startStaticServer() {
                     if (sent?.message_id) {
                       relData.moderation_message_id = sent.message_id;
                       if (shouldStatusStayPinned(targetStatus)) {
-                        const pinRes = await pinModerationMessage(sent.message_id);
+                        const pinRes = await pinModerationMessageNow(sent.message_id, { immediateRetry: true });
                         relData.moderation_pinned = !!pinRes.ok;
                       } else {
                         relData.moderation_pinned = false;
@@ -8435,6 +8778,10 @@ async function registerModerationCommands() {
   try { await tg('deleteWebhook', { drop_pending_updates: false }); } catch (err) {
     console.warn(`[bot] deleteWebhook warning: ${shortTgError(err)}`);
   }
+  const bootAutoPinTimer = setTimeout(() => void reconcilePendingWebFormsAndPins().catch(() => {}), 4000);
+  if (typeof bootAutoPinTimer?.unref === 'function') bootAutoPinTimer.unref();
+  const periodicAutoPinTimer = setInterval(() => void reconcilePendingWebFormsAndPins().catch(() => {}), 45000);
+  if (typeof periodicAutoPinTimer?.unref === 'function') periodicAutoPinTimer.unref();
   process.on('SIGINT', () => { stopping = true; process.exit(0); });
   process.on('SIGTERM', () => { stopping = true; process.exit(0); });
   await loop();
