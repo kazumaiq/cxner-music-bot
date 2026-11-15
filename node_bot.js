@@ -323,7 +323,7 @@ const FORM_STATUS = {
   REJECTED: 'rejected'
 };
 const BOT_BUILD_VERSION = '2026-11-15-status-v5';
-const BOT_BUILD_RELEASE_NOTE = 'добавлен /stats, быстрая регистрация команд до синка Supabase, topic-safe /modtest';
+const BOT_BUILD_RELEASE_NOTE = 'быстрая регистрация команд и старт поллинга, topic-safe /modtest и авторазбор .git';
 const BOT_STARTED_AT_MS = Date.now();
 const BOT_STARTED_AT = new Date(BOT_STARTED_AT_MS).toISOString();
 
@@ -4830,14 +4830,14 @@ async function onMessage(msg) {
   if (!chatId) return;
 
   const parsedCmd = parseBotCommand(text, moderationHealth.bot_username);
-  if (parsedCmd && ['/status', '/stats', '/ping', '/ver', '/deploy', '/new', '/unpin', '/unpin_done', '/unpin_all', '/modtest'].includes(parsedCmd.command)) {
+  if (parsedCmd && ['/status', '/ping', '/ver', '/deploy', '/new', '/unpin', '/unpin_done', '/unpin_all', '/modtest'].includes(parsedCmd.command)) {
     const cmd = parsedCmd.command;
     pollingHealth.last_command = cmd;
     pollingHealth.last_command_at = new Date().toISOString();
     pollingHealth.last_command_result = 'handling';
     pollingHealth.last_command_error = '';
 
-    if (cmd === '/status' || cmd === '/stats' || cmd === '/ping' || cmd === '/ver' || cmd === '/deploy') {
+    if (cmd === '/status' || cmd === '/ping' || cmd === '/ver' || cmd === '/deploy') {
       const inModChat = Number(chatId) === Number(MOD_CHAT);
       if (!inModChat && !isAdmin(uid)) {
         pollingHealth.last_command_result = 'ignored_chat';
@@ -7788,8 +7788,7 @@ async function loop() {
 
 async function registerModerationCommands() {
   const modCommands = [
-    { command: 'status', description: 'Версия деплоя, отклик и состояние бота (/stats)' },
-    { command: 'stats', description: 'Статус деплоя, пинг и состояние модерации' },
+    { command: 'status', description: 'Версия деплоя, отклик и состояние бота' },
     { command: 'unpin_all', description: 'Сбросить все старые закрепы и оставить только «На отгрузке»' },
     { command: 'unpin_done', description: 'Открепить последние карточки не в статусе «На отгрузке»' },
     { command: 'unpin', description: 'Открепить сообщение (ответом на карточку)' },
