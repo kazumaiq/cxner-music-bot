@@ -322,7 +322,7 @@ const FORM_STATUS = {
   APPROVED: 'approved',
   REJECTED: 'rejected'
 };
-const BOT_BUILD_VERSION = '2026-11-16-ui-v9';
+const BOT_BUILD_VERSION = '2026-11-16-ui-v10';
 const BOT_BUILD_RELEASE_NOTE = 'Mini App 4.0 (Liquid Glass, 60 FPS DROP roulette, Путь чемпиона / друзья, Admin Control Center), автозакрепление и кэш-синхронизация';
 const BOT_STARTED_AT_MS = Date.now();
 const BOT_STARTED_AT = new Date(BOT_STARTED_AT_MS).toISOString();
@@ -2819,18 +2819,39 @@ function findExistingReleaseByFormOrSubmission(uid, formId = '', submissionKey =
 async function reconcilePendingWebFormsAndPins() {
   if (stopping || autoPinSweepRunning) return;
   autoPinSweepRunning = true;
+  const recentCutoffMs = Date.now() - 7 * 24 * 3600 * 1000;
+  const recentCutoffIso = new Date(recentCutoffMs).toISOString();
   try {
-    // 1. Retry pinning any recent / pending local ON_UPLOAD cards that aren't pinned yet
+    // 1. Retry pinning any recent (7d) / pending local ON_UPLOAD cards that aren't pinned yet
+    // and auto-unpin up to 3 resolved cards per sweep so only live ON_UPLOAD stay pinned at top.
     let localChanged = false;
+    let autoUnpinnedCount = 0;
     for (const [ownerId, listRaw] of Object.entries(db || {})) {
       const list = Array.isArray(listRaw) ? listRaw : [];
       for (let idx = 0; idx < list.length; idx += 1) {
         const rel = list[idx];
-        if (!rel || typeof rel !== 'object' || rel.user_deleted || rel.manual_unpinned) continue;
-        if (!shouldStatusStayPinned(rel.status)) continue;
+        if (!rel || typeof rel !== 'object') continue;
         const mid = Number(rel.moderation_message_id || 0);
-        if (!mid || rel.moderation_pinned) continue;
-        const isRecent = parseIsoTime(rel.submission_time || '') >= BOT_STARTED_AT_MS;
+        if (!mid) continue;
+
+        if (!shouldStatusStayPinned(rel.status) || rel.user_deleted) {
+          if (rel.moderation_pinned && autoUnpinnedCount < 3) {
+            const uRes = await unpinModerationMessage(mid, { silent: true });
+            if (uRes.ok) {
+              rel.moderation_pinned = false;
+              rel.pin_pending = false;
+              autoUnpinnedCount += 1;
+              localChanged = true;
+              syncModerationMirror(ownerId, idx, rel);
+              await supabasePatchFormByRelease(ownerId, rel, { form_payload: safeJson(rel) || {} }).catch(() => {});
+            }
+          }
+          continue;
+        }
+
+        if (rel.manual_unpinned || rel.moderation_pinned) continue;
+        const subMs = parseIsoTime(rel.submission_time || rel.moderation_time || '');
+        const isRecent = !subMs || subMs >= recentCutoffMs;
         if (!rel.pin_pending && !isRecent) continue;
 
         const pRes = await pinModerationMessage(mid, { silent: true });
@@ -2855,28 +2876,28 @@ async function reconcilePendingWebFormsAndPins() {
       saveModDb();
     }
 
-    // 2. Catch any brand-new website forms (created after bot boot) that need posting or pinning
+    // 2. Catch any recent website/pending forms (including forms created before bot restart) that need posting or pinning
     if (SUPABASE_SYNC_ENABLED && supabaseFeatureState.forms) {
       const rows = await supabaseSelectWhere(
         SUPABASE_FORMS_TABLE,
         'id,telegram_id,username,artist_name,track_name,genre,release_type,status,upc,moderation_message_id,submission_key,source,created_at,updated_at,form_payload',
         [
           { key: 'status', value: FORM_STATUS.PENDING },
-          { key: 'created_at', op: 'gte', value: BOT_STARTED_AT }
+          { key: 'created_at', op: 'gte', value: recentCutoffIso }
         ],
-        'created_at.asc',
-        25
+        'created_at.desc',
+        30
       ).catch(() => []);
 
-      for (const row of rows || []) {
+      for (const row of (rows || []).slice().reverse()) {
         const uid = clean(row?.telegram_id || '');
         if (!uid) continue;
         const formId = clean(row?.id || '');
-        const msgId = Number(row?.moderation_message_id || 0);
         const payloadForm = row?.form_payload && typeof row.form_payload === 'object' ? row.form_payload : {};
-        const existing = findExistingReleaseByFormOrSubmission(uid, formId, row?.submission_key || '', msgId);
+        const existing = findExistingReleaseByFormOrSubmission(uid, formId, row?.submission_key || '', Number(row?.moderation_message_id || 0));
+        const msgId = Number(row?.moderation_message_id || payloadForm.moderation_message_id || existing?.rel?.moderation_message_id || 0);
 
-        if (!existing && !msgId) {
+        if (!msgId) {
           const releaseData = normalizeRelease({
             ...payloadForm,
             type: normalizeType(payloadForm.type || row.release_type) || 'сингл',
@@ -2892,7 +2913,8 @@ async function reconcilePendingWebFormsAndPins() {
           const fakeUser = { id: Number(uid) || 0, username: releaseData.username || releaseData.tg || '' };
           try {
             await submitReleaseToModeration(fakeUser, uid, releaseData, releaseData.source || 'web', {
-              existing_form_id: formId
+              existing_form_id: formId,
+              existing_idx: existing ? existing.idx : undefined
             });
           } catch (e) {
             console.warn(`[MODERATION] web sync submit warning form_id=${formId}:`, clean(e?.message || e));
@@ -2900,10 +2922,9 @@ async function reconcilePendingWebFormsAndPins() {
           continue;
         }
 
-        if (msgId > 0 && !payloadForm.manual_unpinned) {
+        if (msgId > 0 && !payloadForm.manual_unpinned && !existing?.rel?.manual_unpinned) {
           const alreadyPinnedInDb = Boolean(existing?.rel?.moderation_pinned);
           const alreadyPinnedInPayload = Boolean(payloadForm.moderation_pinned);
-          if (existing?.rel?.manual_unpinned) continue;
           if (!alreadyPinnedInDb && !alreadyPinnedInPayload) {
             const pRes = await pinModerationMessage(msgId, { silent: true });
             if (pRes.ok) {
@@ -3541,9 +3562,11 @@ function validateForm(form, envelope = {}) {
 async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_app', options = {}) {
   await ensureModerationHealth(false);
   db[uid] = Array.isArray(db[uid]) ? db[uid] : [];
-  const idx = db[uid].length;
+  const reuseExisting = Number.isInteger(options.existing_idx) && options.existing_idx >= 0 && db[uid][options.existing_idx];
+  const idx = reuseExisting ? options.existing_idx : db[uid].length;
   const submissionTime = clean(releaseData?.submission_time) || new Date().toISOString();
   const rel = {
+    ...(reuseExisting ? db[uid][idx] : {}),
     ...releaseData,
     release_idx: idx,
     status: STATUS.ON_UPLOAD,
@@ -3605,10 +3628,11 @@ async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_
 
   rel.moderation_message_id = sent.message_id;
   rel.moderation_original_text = orig;
-  const pinRes = await pinModerationMessageNow(sent.message_id, { immediateRetry: true });
+  const pinRes = await pinModerationMessageNow(sent.message_id, { immediateRetry: true, disableNotification: false });
   rel.moderation_pinned = !!pinRes.ok;
   rel.pin_pending = !pinRes.ok && !pinRes.missingRights;
-  db[uid].push(rel);
+  if (reuseExisting) db[uid][idx] = rel;
+  else db[uid].push(rel);
   saveDb();
 
   if (!pinRes.ok) {
@@ -5754,12 +5778,14 @@ async function onMessage(msg) {
         const onUploadRefs = collectOnUploadReleaseRefs().filter((it) => Number(it.rel?.moderation_message_id || 0) > 0);
         const toRepin = onUploadRefs.slice(0, 15).reverse();
         let repinned = 0;
-        for (const item of toRepin) {
+        for (let rIdx = 0; rIdx < toRepin.length; rIdx += 1) {
+          const item = toRepin[rIdx];
           const mid = Number(item.rel.moderation_message_id || 0);
-          let pRes = await pinModerationMessage(mid, { silent: true });
+          const isLatest = rIdx === toRepin.length - 1;
+          let pRes = await pinModerationMessage(mid, { silent: !isLatest, disableNotification: !isLatest });
           if (!pRes.ok && pRes.retryAfter > 0 && pRes.retryAfter <= 35) {
             await delay((pRes.retryAfter + 1) * 1000);
-            pRes = await pinModerationMessage(mid, { silent: true });
+            pRes = await pinModerationMessage(mid, { silent: !isLatest, disableNotification: !isLatest });
           }
           if (pRes.ok) {
             item.rel.moderation_pinned = true;
@@ -5787,6 +5813,54 @@ async function onMessage(msg) {
           `❌ Не удалось выполнить /unpin_all: <code>${esc(errText)}</code>${hint ? `\n${esc(hint)}` : ''}`
         );
       }
+      return;
+    }
+
+    if (cmd === '/pins') {
+      if (Number(chatId) !== Number(MOD_CHAT)) {
+        await replyInChat(msg, 'Команда /pins работает только в группе модерации.');
+        return;
+      }
+      if (!(await canModerate(msg.from?.id, msg))) {
+        await replyInChat(msg, 'Доступ только участникам группы модерации.');
+        return;
+      }
+      await reconcilePendingWebFormsAndPins().catch(() => {});
+      const onUploadRefs = collectOnUploadReleaseRefs().filter((it) => Number(it.rel?.moderation_message_id || 0) > 0);
+      const pinnedNow = onUploadRefs.filter((it) => it.rel?.moderation_pinned);
+      const unpinnedNow = onUploadRefs.filter((it) => !it.rel?.moderation_pinned && !it.rel?.manual_unpinned);
+      let repinned = 0;
+      for (const item of unpinnedNow.slice(0, 8)) {
+        const mid = Number(item.rel.moderation_message_id || 0);
+        const pRes = await pinModerationMessage(mid, { silent: true, disableNotification: false });
+        if (pRes.ok) {
+          item.rel.moderation_pinned = true;
+          item.rel.pin_pending = false;
+          syncModerationMirror(item.uid, item.idx, item.rel);
+          repinned += 1;
+        }
+        await delay(300);
+      }
+      if (repinned > 0) {
+        saveDb();
+        saveModDb();
+      }
+      const allPinned = collectOnUploadReleaseRefs().filter((it) => Number(it.rel?.moderation_message_id || 0) > 0 && it.rel?.moderation_pinned);
+      const lines = [
+        `📌 <b>Закреплённые анкеты «На отгрузке»: ${allPinned.length}</b>`,
+        repinned > 0 ? `✅ Дозакреплено сейчас: <b>${repinned}</b>` : '',
+        ''
+      ].filter((x) => x !== '');
+      for (let i = 0; i < Math.min(15, allPinned.length); i += 1) {
+        const it = allPinned[i];
+        const link = buildModerationMessageLink(it.rel?.moderation_message_id);
+        const title = esc(shortTitle(it.rel?.name || 'Без названия', 26));
+        const nick = esc(shortTitle(it.rel?.nick || '—', 18));
+        lines.push(`${i + 1}. ${link ? `<a href="${esc(link)}">${title}</a>` : `<b>${title}</b>`} — ${nick}`);
+      }
+      if (!allPinned.length) lines.push('Активных закреплённых анкет «На отгрузке» сейчас нет.');
+      lines.push('', '<i>Если панель закрепов сверху скрыта на iPhone — нажмите на заголовок группы → «Закреплённые» или сделайте /unpin_all (оставит только актуальные).</i>');
+      await replyInChat(msg, lines.join('\n'), { reply_to_message_id: msg.message_id });
       return;
     }
 
@@ -9307,6 +9381,7 @@ async function loop() {
 async function registerModerationCommands() {
   const modCommands = [
     { command: 'queue', description: 'Очередь релизов на отгрузку и модерацию' },
+    { command: 'pins', description: 'Синхронизировать и показать актуальные закреплённые анкеты' },
     { command: 'find', description: 'Поиск релиза по названию, нику или UPC' },
     { command: 'status', description: 'Версия деплоя, отклик и состояние бота' },
     { command: 'unpin_all', description: 'Сбросить все старые закрепы и оставить только «На отгрузке»' },
