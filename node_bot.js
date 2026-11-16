@@ -322,7 +322,7 @@ const FORM_STATUS = {
   APPROVED: 'approved',
   REJECTED: 'rejected'
 };
-const BOT_BUILD_VERSION = '2026-11-16-ui-v8';
+const BOT_BUILD_VERSION = '2026-11-16-ui-v9';
 const BOT_BUILD_RELEASE_NOTE = 'Mini App 4.0 (Liquid Glass, 60 FPS DROP roulette, Путь чемпиона / друзья, Admin Control Center), автозакрепление и кэш-синхронизация';
 const BOT_STARTED_AT_MS = Date.now();
 const BOT_STARTED_AT = new Date(BOT_STARTED_AT_MS).toISOString();
@@ -1765,6 +1765,21 @@ function hasValidWebAppUrl() {
   return !!WEBAPP_URL && !WEBAPP_URL.includes('example.com');
 }
 
+function webAppLaunchUrl(extraParams = {}) {
+  if (!hasValidWebAppUrl()) return '';
+  try {
+    const u = new URL(WEBAPP_URL);
+    u.searchParams.set('v', BOT_BUILD_VERSION);
+    for (const [k, v] of Object.entries(extraParams || {})) {
+      if (v !== undefined && v !== null && v !== '') u.searchParams.set(k, String(v));
+    }
+    return u.toString();
+  } catch {
+    const sep = WEBAPP_URL.includes('?') ? '&' : '?';
+    return `${WEBAPP_URL}${sep}v=${encodeURIComponent(BOT_BUILD_VERSION)}`;
+  }
+}
+
 function shortTgError(err) {
   const raw = clean(err?.message || err);
   const m = /\[[^\]]+\]\s*(.+)$/.exec(raw);
@@ -1850,7 +1865,7 @@ function sendModerationText(text, extra = {}) {
 
 function keyboardMain() {
   return { inline_keyboard: [
-    ...(hasValidWebAppUrl() ? [[{ text: '🚀 Открыть CXRNER Mini App', web_app: { url: WEBAPP_URL }, style: 'primary' }]] : []),
+    ...(hasValidWebAppUrl() ? [[{ text: '🚀 Открыть CXRNER Mini App', web_app: { url: webAppLaunchUrl() }, style: 'primary' }]] : []),
     [
       { text: '📀 Дистрибуция', callback_data: 'menu_distribution', style: 'primary' },
       { text: '📁 Мои релизы', callback_data: 'my_releases' }
@@ -1865,7 +1880,7 @@ function keyboardMain() {
 function keyboardDist() {
   return { inline_keyboard: [
     [{ text: '🎵 Отправить релиз (анкета)', callback_data: 'report_text', style: 'success' }],
-    ...(hasValidWebAppUrl() ? [[{ text: '📱 Отправить в Mini App', web_app: { url: WEBAPP_URL }, style: 'primary' }]] : []),
+    ...(hasValidWebAppUrl() ? [[{ text: '📱 Отправить в Mini App', web_app: { url: webAppLaunchUrl() }, style: 'primary' }]] : []),
     [
       { text: '📁 Мои релизы', callback_data: 'my_releases' },
       { text: '⬅️ Меню', callback_data: 'main' }
@@ -2101,7 +2116,7 @@ async function linkTelegramToWebCabinet(chatId, uid, from, codeOrToken) {
 
 function keyboardCabinet() {
   return { inline_keyboard: [
-    ...(hasValidWebAppUrl() ? [[{ text: '📱 Открыть Mini App', web_app: { url: WEBAPP_URL }, style: 'primary' }]] : []),
+    ...(hasValidWebAppUrl() ? [[{ text: '📱 Открыть Mini App', web_app: { url: webAppLaunchUrl() }, style: 'primary' }]] : []),
     [
       { text: '📁 Мои релизы', callback_data: 'my_releases' },
       { text: '🔗 Привязать сайт', callback_data: 'cabinet_sync_site', style: 'primary' }
@@ -3022,7 +3037,7 @@ async function notifyArtistAboutRelease(uid, rel, status) {
 
     const rows = [];
     if (hasValidWebAppUrl()) {
-      rows.push([{ text: '📱 Открыть Mini App', web_app: { url: WEBAPP_URL }, style: 'primary' }]);
+      rows.push([{ text: '📱 Открыть Mini App', web_app: { url: webAppLaunchUrl() }, style: 'primary' }]);
     }
     if (canon === STATUS.REJECTED || canon === STATUS.NEEDS_FIX) {
       rows.push([
@@ -4455,10 +4470,11 @@ async function sendWebappButton(chatId) {
   let text = '🎵 Mini App открывается кнопкой ниже или через системную кнопку «Приложение» внизу чата.';
   const extra = {};
   if (hasValidWebAppUrl()) {
+    const launchUrl = webAppLaunchUrl();
     text += `\n\nСсылка: ${esc(WEBAPP_URL)}`;
     extra.reply_markup = {
       inline_keyboard: [
-        [{ text: '🚀 Открыть Mini App', web_app: { url: WEBAPP_URL }, style: 'primary' }],
+        [{ text: '🚀 Открыть Mini App', web_app: { url: launchUrl }, style: 'primary' }],
         [{ text: '⬅️ Главное меню', callback_data: 'main' }]
       ]
     };
@@ -4501,7 +4517,7 @@ function buildMyCabinetView(uid, requestedPage = 0) {
         'Нажмите «➕ Новый», чтобы отправить первую анкету.',
       keyboard: {
         inline_keyboard: [
-          ...(hasValidWebAppUrl() ? [[{ text: '📱 Открыть Mini App', web_app: { url: WEBAPP_URL }, style: 'primary' }]] : []),
+          ...(hasValidWebAppUrl() ? [[{ text: '📱 Открыть Mini App', web_app: { url: webAppLaunchUrl() }, style: 'primary' }]] : []),
           [
             { text: '➕ Новый', callback_data: 'report_text', style: 'primary' },
             { text: '◀️ Меню', callback_data: 'main' }
@@ -6421,7 +6437,7 @@ async function onCallback(query) {
     const kb = {
       inline_keyboard: [
         [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard', style: 'primary' }],
-        ...(hasValidWebAppUrl() ? [[{ text: '📱 Открыть Mini App', web_app: { url: WEBAPP_URL }, style: 'primary' }]] : []),
+        ...(hasValidWebAppUrl() ? [[{ text: '📱 Открыть Mini App', web_app: { url: webAppLaunchUrl() }, style: 'primary' }]] : []),
         [{ text: '⬅️ Назад в кабинет', callback_data: 'menu_cabinet' }]
       ]
     };
@@ -9157,7 +9173,12 @@ function startStaticServer() {
       if (/^\/link\/[a-z0-9-]+$/i.test(u.pathname || '')) {
         const linkFile = path.join(root, 'link.html');
         if (fs.existsSync(linkFile)) {
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+          res.writeHead(200, {
+            'content-type': 'text/html; charset=utf-8',
+            'cache-control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
+            'pragma': 'no-cache',
+            'expires': '0'
+          });
           fs.createReadStream(linkFile).pipe(res);
           return;
         }
@@ -9176,7 +9197,10 @@ function startStaticServer() {
         'x-content-type-options': 'nosniff'
       };
       if (['.html', '.js', '.css'].includes(ext)) {
-        headers['cache-control'] = 'no-cache, must-revalidate';
+        headers['cache-control'] = 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0';
+        headers['pragma'] = 'no-cache';
+        headers['expires'] = '0';
+        headers['surrogate-control'] = 'no-store';
       }
       res.writeHead(200, headers);
       fs.createReadStream(f).pipe(res);
@@ -9299,6 +9323,20 @@ async function registerModerationCommands() {
       await tg('setMyCommands', { commands: modCommands, scope });
     } catch (err) {
       console.warn(`[bot] setMyCommands (${scope.type}) warning: ${shortTgError(err)}`);
+    }
+  }
+  if (hasValidWebAppUrl()) {
+    try {
+      await tg('setChatMenuButton', {
+        menu_button: {
+          type: 'web_app',
+          text: 'CXRNER 4.0',
+          web_app: { url: webAppLaunchUrl() }
+        }
+      });
+      console.info(`[bot] setChatMenuButton updated: ${webAppLaunchUrl()}`);
+    } catch (err) {
+      console.warn(`[bot] setChatMenuButton warning: ${shortTgError(err)}`);
     }
   }
 }

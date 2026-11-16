@@ -1,6 +1,7 @@
 (() => {
   'use strict';
 
+  const CLIENT_BUILD_VERSION = '2026-11-16-ui-v9';
   const $ = (s, root = document) => root.querySelector(s);
   const $$ = (s, root = document) => Array.from(root.querySelectorAll(s));
 
@@ -1578,6 +1579,18 @@
         api('/api/miniapp/drop/state').catch(() => null)
       ]);
       if (home) {
+        if (home.build_version && home.build_version !== CLIENT_BUILD_VERSION) {
+          const reloadKey = `cxr_reloaded_${home.build_version}`;
+          if (!sessionStorage.getItem(reloadKey)) {
+            sessionStorage.setItem(reloadKey, '1');
+            try {
+              const nextUrl = new URL(window.location.href);
+              nextUrl.searchParams.set('v', home.build_version);
+              window.location.replace(nextUrl.toString());
+              return;
+            } catch {}
+          }
+        }
         state.homeData = home;
         state.isAdmin = Boolean(home.is_admin);
         sessionStorage.setItem('cxrner_home_v4', JSON.stringify(home));
