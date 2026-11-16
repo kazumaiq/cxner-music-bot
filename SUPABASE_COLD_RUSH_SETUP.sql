@@ -1,6 +1,6 @@
 -- =============================================================================
--- CXRNER MUSIC · COLD RUSH 001 COMPILATION SUBMISSIONS (SUPABASE MIGRATION)
--- Идемпотентная таблица для приёма и модерации заявок в сборник COLD RUSH 001.
+-- CXRNER MUSIC · COLD RUSH COMPILATION SUBMISSIONS (SUPABASE MIGRATION)
+-- Идемпотентная таблица для приёма и модерации заявок в сборник COLD RUSH.
 -- Выполните этот скрипт в Supabase Dashboard -> SQL Editor -> Run.
 -- =============================================================================
 

@@ -333,8 +333,8 @@ const FORM_STATUS = {
   APPROVED: 'approved',
   REJECTED: 'rejected'
 };
-const BOT_BUILD_VERSION = '2026-11-16-ui-v15';
-const BOT_BUILD_RELEASE_NOTE = 'COLD RUSH 001 (модуль подачи и модерации заявок в сборник) + Design System 5.0';
+const BOT_BUILD_VERSION = '2026-11-16-ui-v16';
+const BOT_BUILD_RELEASE_NOTE = 'COLD RUSH (модуль подачи и модерации заявок в сборник) + Design System 5.0';
 const BOT_STARTED_AT_MS = Date.now();
 const BOT_STARTED_AT = new Date(BOT_STARTED_AT_MS).toISOString();
 
@@ -1880,7 +1880,7 @@ function sendModerationText(text, extra = {}) {
 function keyboardMain() {
   return { inline_keyboard: [
     ...(hasValidWebAppUrl() ? [[{ text: '🚀 Открыть CXRNER Mini App', web_app: { url: webAppLaunchUrl() }, style: 'primary' }]] : []),
-    [{ text: '❄️ Подать трек в COLD RUSH 001', callback_data: 'cold_rush_open', style: 'primary' }],
+    [{ text: '❄️ Подать трек в COLD RUSH', callback_data: 'cold_rush_open', style: 'primary' }],
     [
       { text: '📀 Дистрибуция', callback_data: 'menu_distribution', style: 'primary' },
       { text: '📁 Мои релизы', callback_data: 'my_releases' }
@@ -2419,7 +2419,7 @@ function welcomeText() {
     '⚡ <b>CXRNER MUSIC</b>\n' +
     '<i>Экосистема дистрибуции, модерации и релизов.</i>\n\n' +
     'Отправляй музыку, управляй релизами и следи за статусами прямо в боте.\n\n' +
-    '❄️ <b>Открыт набор в COLD RUSH 001!</b>\n' +
+    '❄️ <b>Открыт набор в COLD RUSH!</b>\n' +
     '10 артистов · Приём до 3 декабря · Релиз 25 декабря.'
   );
 }
@@ -4667,7 +4667,7 @@ async function handlePromoCallback(query, data) {
 }
 
 // =============================================================================
-// COLD RUSH 001 — ISOLATED COMPILATION SUBMISSION & MODERATION MODULE
+// COLD RUSH — ISOLATED COMPILATION SUBMISSION & MODERATION MODULE
 // Does NOT modify regular distribution DB, release forms, or Mini App flows.
 // =============================================================================
 
@@ -4766,14 +4766,12 @@ function findColdRushSubmissionById(id) {
 function generateColdRushId() {
   ensureColdRushDbShape();
   const existing = new Set(coldRushDb.submissions.map((item) => item.id));
-  const seqNum = coldRushDb.submissions.length + 1;
   for (let attempt = 0; attempt < 25; attempt += 1) {
-    const seqPart = String(seqNum + attempt).padStart(3, '0');
-    const randPart = crypto.randomBytes(2).toString('hex').toUpperCase();
-    const candidate = `CR001-${seqPart}${randPart}`;
+    const randPart = crypto.randomBytes(3).toString('hex').toUpperCase();
+    const candidate = `CR-${randPart}`;
     if (!existing.has(candidate)) return candidate;
   }
-  return `CR001-${Date.now().toString(36).toUpperCase()}`;
+  return `CR-${Date.now().toString(36).toUpperCase()}`;
 }
 
 function getColdRushSession(uid) {
@@ -4923,10 +4921,10 @@ function buildColdRushModerationCardText(sub) {
       ? 'REJECTED'
       : 'NEW SUBMISSION';
   const headline = n.status === 'approved'
-    ? '❄️ <b>COLD RUSH 001 · Заявка принята</b>'
+    ? '❄️ <b>COLD RUSH · Заявка принята</b>'
     : n.status === 'rejected'
-      ? '❄️ <b>COLD RUSH 001 · Заявка отклонена</b>'
-      : '❄️ <b>COLD RUSH 001 · Новая подача от артиста</b>';
+      ? '❄️ <b>COLD RUSH · Заявка отклонена</b>'
+      : '❄️ <b>COLD RUSH · Новая подача от артиста</b>';
   const tgHandle = n.telegram_username
     ? `@${esc(n.telegram_username)} (<code>${esc(n.telegram_id)}</code>)`
     : `<a href="tg://user?id=${esc(n.telegram_id)}">ID ${esc(n.telegram_id)}</a>`;
@@ -4978,11 +4976,11 @@ function buildColdRushIntroView(uid) {
       ? `<a href="${esc(blocking.audio_url)}">Ссылка на демо</a>`
       : esc(blocking.audio_file_name || 'Аудиофайл прикреплён');
     const note = blocking.status === 'approved'
-      ? '🎉 Поздравляем! Этот трек уже отобран в сборник COLD RUSH 001. Повторная подача не требуется.'
+      ? '🎉 Поздравляем! Этот трек уже отобран в сборник COLD RUSH. Повторная подача не требуется.'
       : '⏳ Заявка находится на рассмотрении у модераторов CXRNER MUSIC. Как только будет решение, бот пришлёт уведомление сюда.\n\nПовторная отправка заблокирована, пока текущая заявка активна.';
     return {
       text:
-        `❄️ <b>COLD RUSH 001 — Статус твоей заявки</b>\n\n` +
+        `❄️ <b>COLD RUSH — Статус твоей заявки</b>\n\n` +
         `🆔 ID заявки: <code>${esc(blocking.id)}</code>\n` +
         `📌 Статус: <b>${coldRushStatusLabel(blocking.status)}</b>\n\n` +
         `👤 Артист: <b>${esc(blocking.artist_name)}</b>\n` +
@@ -5000,7 +4998,7 @@ function buildColdRushIntroView(uid) {
 
   return {
     text:
-      `❄️ <b>COLD RUSH 001 — Набор в сборник</b>\n\n` +
+      `❄️ <b>COLD RUSH — Набор в сборник</b>\n\n` +
       `👥 <b>Участники:</b> 10 артистов\n` +
       `⏳ <b>Приём заявок:</b> до 3 декабря\n` +
       `📀 <b>Релиз сборника:</b> 25 декабря\n\n` +
@@ -5011,7 +5009,7 @@ function buildColdRushIntroView(uid) {
       `• Один артист — одна активная заявка в отбор`,
     reply_markup: {
       inline_keyboard: [
-        [{ text: '❄️ Подать трек в COLD RUSH 001', callback_data: 'cold_rush_start', style: 'primary' }],
+        [{ text: '❄️ Подать трек в COLD RUSH', callback_data: 'cold_rush_start', style: 'primary' }],
         [{ text: '⬅️ Главное меню', callback_data: 'main' }]
       ]
     }
@@ -5053,7 +5051,7 @@ function buildColdRushSummaryText(s) {
     : `🎵 <code>${esc(d.audio_file_name || 'track_demo')}</code>`;
   return (
     `❄️ <b>Шаг 7/7 — Проверка и отправка заявки</b>\n\n` +
-    `Проверь данные перед отправкой в отбор <b>COLD RUSH 001</b>:\n\n` +
+    `Проверь данные перед отправкой в отбор <b>COLD RUSH</b>:\n\n` +
     `👤 Артист: <b>${esc(d.artist_name)}</b>\n` +
     `🎵 Трек: <b>${esc(d.track_name)}</b>\n` +
     `🎛 Жанр: <b>${esc(d.genre)}</b>\n` +
@@ -5071,7 +5069,7 @@ async function sendColdRushStepPrompt(chatId, uid) {
   if (s.step === 'artist') {
     await sendText(
       chatId,
-      `👤 <b>Шаг 2/7 — Имя / ник артиста</b>\n\nВведите сценическое имя (как оно должно быть указано в сборнике <b>COLD RUSH 001</b>):`,
+      `👤 <b>Шаг 2/7 — Имя / ник артиста</b>\n\nВведите сценическое имя (как оно должно быть указано в сборнике <b>COLD RUSH</b>):`,
       { reply_markup: coldRushCancelKeyboard() }
     );
     return;
@@ -5124,7 +5122,7 @@ async function sendColdRushStepPrompt(chatId, uid) {
       `Нажимая кнопку ниже, вы подтверждаете, что:\n` +
       `• являетесь автором и правообладателем отправленного материала;\n` +
       `• трек очищен от прав третьих лиц (биты/сэмплы без разрешения);\n` +
-      `• разрешаете CXRNER MUSIC рассмотреть и издать трек в сборнике <b>COLD RUSH 001</b> при успешном прохождении отбора.`,
+      `• разрешаете CXRNER MUSIC рассмотреть и издать трек в сборнике <b>COLD RUSH</b> при успешном прохождении отбора.`,
       {
         reply_markup: {
           inline_keyboard: [
@@ -5144,7 +5142,7 @@ async function sendColdRushStepPrompt(chatId, uid) {
       {
         reply_markup: {
           inline_keyboard: [
-            [{ text: '🚀 Отправить заявку в COLD RUSH 001', callback_data: 'cold_rush_submit', style: 'primary' }],
+            [{ text: '🚀 Отправить заявку в COLD RUSH', callback_data: 'cold_rush_submit', style: 'primary' }],
             [{ text: '🔄 Заполнить заново', callback_data: 'cold_rush_start' }],
             [{ text: '❌ Отменить подачу', callback_data: 'cold_rush_cancel' }]
           ]
@@ -5231,7 +5229,7 @@ async function handleColdRushMessage(msg) {
 
   if (text === '/cancel') {
     resetColdRushSession(uid);
-    await sendText(chatId, 'Подача заявки в <b>COLD RUSH 001</b> отменена.', {
+    await sendText(chatId, 'Подача заявки в <b>COLD RUSH</b> отменена.', {
       reply_markup: { inline_keyboard: [[{ text: '⬅️ Главное меню', callback_data: 'main' }]] }
     });
     return true;
@@ -5307,7 +5305,7 @@ async function handleColdRushMessage(msg) {
   }
 
   if (s.step === 'confirm') {
-    await sendText(chatId, 'Нажмите «🚀 Отправить заявку в COLD RUSH 001» на сообщении выше или /cancel.');
+    await sendText(chatId, 'Нажмите «🚀 Отправить заявку в COLD RUSH» на сообщении выше или /cancel.');
     return true;
   }
 
@@ -5345,7 +5343,7 @@ async function handleColdRushCallback(query, data) {
   if (data === 'cold_rush_cancel') {
     resetColdRushSession(uid);
     await safeAnswerCallback(query.id, { text: 'Подача отменена' });
-    await sendText(chatId, 'Подача заявки в <b>COLD RUSH 001</b> отменена.', {
+    await sendText(chatId, 'Подача заявки в <b>COLD RUSH</b> отменена.', {
       reply_markup: { inline_keyboard: [[{ text: '⬅️ Главное меню', callback_data: 'main' }]] }
     });
     return true;
@@ -5385,7 +5383,7 @@ async function handleColdRushCallback(query, data) {
   if (data === 'cold_rush_rights_confirm') {
     const s = getColdRushSession(uid);
     if (!s) {
-      await safeAnswerCallback(query.id, { text: 'Сессия подачи устарела. Откройте COLD RUSH 001 заново.', show_alert: true });
+      await safeAnswerCallback(query.id, { text: 'Сессия подачи устарела. Откройте COLD RUSH заново.', show_alert: true });
       return true;
     }
     s.data.rights_confirmed = true;
@@ -5476,7 +5474,7 @@ async function handleColdRushCallback(query, data) {
 
       await sendText(
         chatId,
-        `✅ <b>Заявка в COLD RUSH 001 отправлена!</b>\n\n` +
+        `✅ <b>Заявка в COLD RUSH отправлена!</b>\n\n` +
         `🆔 ID заявки: <code>${esc(sub.id)}</code>\n` +
         `👤 Артист: <b>${esc(sub.artist_name)}</b>\n` +
         `🎵 Трек: <b>${esc(sub.track_name)}</b>\n` +
@@ -5550,15 +5548,15 @@ async function handleColdRushCallback(query, data) {
 
       if (sub.telegram_id) {
         const artistMsg = nextStatus === 'approved'
-          ? `❄️ <b>COLD RUSH 001 — Заявка принята!</b>\n\n` +
-            `Поздравляем! Трек <b>«${esc(sub.track_name)}»</b> (${esc(sub.artist_name)}) прошёл отбор в сборник <b>COLD RUSH 001</b>.\n` +
+          ? `❄️ <b>COLD RUSH — Заявка принята!</b>\n\n` +
+            `Поздравляем! Трек <b>«${esc(sub.track_name)}»</b> (${esc(sub.artist_name)}) прошёл отбор в сборник <b>COLD RUSH</b>.\n` +
             `🆔 ID заявки: <code>${esc(sub.id)}</code>\n\n` +
             `Команда CXRNER MUSIC свяжется с тобой в Telegram для следующих шагов к релизу 25 декабря.`
-          : `❄️ <b>COLD RUSH 001 — Результат отбора</b>\n\n` +
+          : `❄️ <b>COLD RUSH — Результат отбора</b>\n\n` +
             `Спасибо за подачу трека <b>«${esc(sub.track_name)}»</b> (${esc(sub.artist_name)}).\n` +
             `🆔 ID заявки: <code>${esc(sub.id)}</code>\n` +
             `📌 Статус: <b>❌ Отклонено</b>\n\n` +
-            `К сожалению, трек не вошёл в текущий сборник COLD RUSH 001. Вы можете выпустить его через обычную 📀 Дистрибуцию или подать другой материал.`;
+            `К сожалению, трек не вошёл в текущий сборник COLD RUSH. Вы можете выпустить его через обычную 📀 Дистрибуцию или подать другой материал.`;
         await sendText(sub.telegram_id, artistMsg, {
           reply_markup: { inline_keyboard: [[{ text: '⬅️ Главное меню', callback_data: 'main' }]] }
         }).catch((dmErr) => {
@@ -10486,7 +10484,7 @@ async function registerModerationCommands() {
   ];
   const privateCommands = [
     { command: 'start', description: 'Главное меню CXRNER MUSIC' },
-    { command: 'coldrush', description: 'Подать трек в COLD RUSH 001' },
+    { command: 'coldrush', description: 'Подать трек в COLD RUSH' },
     { command: 'link', description: 'Привязать кабинет сайта по коду (/link CX-...)' },
     { command: 'release', description: 'Отправить релиз на дистрибуцию' },
     { command: 'my', description: 'Мои релизы и статусы' },
