@@ -333,8 +333,8 @@ const FORM_STATUS = {
   APPROVED: 'approved',
   REJECTED: 'rejected'
 };
-const BOT_BUILD_VERSION = '2026-11-16-ui-v16';
-const BOT_BUILD_RELEASE_NOTE = 'COLD RUSH (модуль подачи и модерации заявок в сборник) + Design System 5.0';
+const BOT_BUILD_VERSION = '2026-11-16-ui-v17';
+const BOT_BUILD_RELEASE_NOTE = 'Медиа-рассылки с фото/подписью + защита от отправки команд (/start) + COLD RUSH';
 const BOT_STARTED_AT_MS = Date.now();
 const BOT_STARTED_AT = new Date(BOT_STARTED_AT_MS).toISOString();
 
@@ -3867,6 +3867,7 @@ function resetAllSessions(uid, except = '') {
   if (except !== 'cover') delete coverSessions[key];
   if (except !== 'promo') delete promoSessions[key];
   if (except !== 'cold_rush') delete coldRushSessions[key];
+  if (except !== 'broadcast') setBroadcastSession(key, false);
   if (except !== 'link') delete linkAwaitSessions[key];
 }
 
@@ -6040,8 +6041,19 @@ function runServiceCleanup() {
 
 function setBroadcastSession(uid, active) {
   const key = String(uid);
+  const prev = broadcastSessions[key];
+  if (prev?.album_timer) {
+    try { clearTimeout(prev.album_timer); } catch {}
+  }
   if (active) {
-    broadcastSessions[key] = { created_at: new Date().toISOString() };
+    broadcastSessions[key] = {
+      created_at: new Date().toISOString(),
+      draft: null,
+      media_group_id: '',
+      media_group_ids: [],
+      album_timer: null,
+      sending: false
+    };
   } else {
     delete broadcastSessions[key];
   }
@@ -6051,29 +6063,250 @@ function hasBroadcastSession(uid) {
   return !!broadcastSessions[String(uid)];
 }
 
+function broadcastPromptText() {
+  return (
+    '📢 <b>Рассылка пользователям</b>\n\n' +
+    'Отправьте следующим сообщением пост для рассылки:\n' +
+    '• <b>Фото, видео, GIF, документ или аудио</b> (включая подпись и форматирование)\n' +
+    '• Или <b>текстовое сообщение</b> со ссылками и эмодзи\n\n' +
+    'Бот сохранит пост целиком и перед запуском попросит подтверждение.\n' +
+    'Для отмены: /cancel'
+  );
+}
+
 function collectBroadcastUsers() {
   const ids = new Set();
   for (const uid of Object.keys(db || {})) ids.add(String(uid));
   for (const uid of Object.keys(cabUsers || {})) ids.add(String(uid));
+  for (const sub of coldRushDb?.submissions || []) {
+    if (sub?.telegram_id) ids.add(String(sub.telegram_id));
+  }
   return Array.from(ids)
     .map((v) => Number(v))
     .filter((v) => Number.isFinite(v) && v > 0);
 }
 
-async function runBroadcast(text) {
+async function deliverBroadcastToUser(uid, payload) {
+  if (typeof payload === 'string') {
+    await sendTextPlain(uid, payload);
+    return;
+  }
+  const fromChatId = payload?.from_chat_id;
+  const messageIds = Array.isArray(payload?.message_ids) ? payload.message_ids.filter(Boolean) : [];
+  if (!fromChatId || !messageIds.length) {
+    throw new Error('empty broadcast payload');
+  }
+  if (messageIds.length === 1) {
+    const req = {
+      chat_id: uid,
+      from_chat_id: fromChatId,
+      message_id: messageIds[0]
+    };
+    if (payload.reply_markup) req.reply_markup = payload.reply_markup;
+    await tg('copyMessage', req);
+    return;
+  }
+  try {
+    await tg('copyMessages', {
+      chat_id: uid,
+      from_chat_id: fromChatId,
+      message_ids: messageIds
+    });
+  } catch (err) {
+    const errTxt = clean(err?.message || err).toLowerCase();
+    if (errTxt.includes('forbidden') || errTxt.includes('blocked') || errTxt.includes('deactivated') || errTxt.includes('chat not found')) {
+      throw err;
+    }
+    for (const mid of messageIds) {
+      await tg('copyMessage', {
+        chat_id: uid,
+        from_chat_id: fromChatId,
+        message_id: mid
+      });
+    }
+  }
+}
+
+async function runBroadcast(payload) {
   const users = collectBroadcastUsers();
   let sent = 0;
   let failed = 0;
   for (const uid of users) {
     try {
-      await sendTextPlain(uid, text);
+      await deliverBroadcastToUser(uid, payload);
       sent += 1;
     } catch {
       failed += 1;
     }
-    await new Promise((r) => setTimeout(r, 22));
+    await new Promise((r) => setTimeout(r, 35));
   }
   return { total: users.length, sent, failed };
+}
+
+function buildBroadcastConfirmMarkup(recipientCount, isAlbum = false) {
+  const rows = [
+    [{ text: `🚀 Отправить всем (${recipientCount})`, callback_data: 'broadcast_send', style: 'primary' }]
+  ];
+  if (!isAlbum) {
+    rows.push([{ text: `❄️ Отправить + кнопка «COLD RUSH»`, callback_data: 'broadcast_send_cr', style: 'success' }]);
+  }
+  rows.push([{ text: '❌ Отменить', callback_data: 'broadcast_cancel', style: 'danger' }]);
+  return { inline_keyboard: rows };
+}
+
+async function promptBroadcastConfirmation(chatId, uid, replyToMessageId = 0) {
+  const s = broadcastSessions[String(uid)];
+  if (!s || !s.draft || !s.draft.message_ids?.length) return;
+  const usersCount = collectBroadcastUsers().length;
+  const extra = {
+    reply_markup: buildBroadcastConfirmMarkup(usersCount, s.draft.is_album)
+  };
+  if (Number(replyToMessageId) > 0) extra.reply_to_message_id = Number(replyToMessageId);
+  const albumNote = s.draft.is_album
+    ? `\n🖼 Формат: <b>медиагруппа (${s.draft.message_ids.length} влож.)</b>`
+    : '';
+  await sendText(
+    chatId,
+    `👀 <b>Пост подготовлен к рассылке</b>\n\n` +
+    `Получателей в базе: <b>${usersCount}</b>${albumNote}\n` +
+    `Медиа, подпись, ссылки и форматирование сохранятся без изменений.\n\n` +
+    `Подтвердите отправку или пришлите другой вариант поста:`,
+    extra
+  );
+}
+
+async function handleBroadcastMessage(msg) {
+  const uid = clean(msg?.from?.id);
+  if (!uid || !isAdmin(uid) || !hasBroadcastSession(uid)) return false;
+
+  const chatId = msg.chat?.id;
+  const text = clean(msg.text);
+  const s = broadcastSessions[uid];
+  if (s.sending) {
+    await sendText(chatId, '⏳ Сейчас уже идёт рассылка, дождитесь завершения.');
+    return true;
+  }
+
+  if (text === '/cancel') {
+    setBroadcastSession(uid, false);
+    await sendText(chatId, '📢 Рассылка отменена.');
+    return true;
+  }
+  // Never broadcast slash commands like /start, /admin, /coldrush — exit broadcast mode and handle command normally
+  if (text.startsWith('/')) {
+    setBroadcastSession(uid, false);
+    return false;
+  }
+
+  const groupId = clean(msg.media_group_id);
+  if (groupId) {
+    if (s.album_timer) {
+      try { clearTimeout(s.album_timer); } catch {}
+      s.album_timer = null;
+    }
+    if (s.media_group_id !== groupId) {
+      s.media_group_id = groupId;
+      s.media_group_ids = [];
+    }
+    s.media_group_ids.push(msg.message_id);
+    s.draft = {
+      from_chat_id: chatId,
+      message_ids: [...s.media_group_ids],
+      is_album: s.media_group_ids.length > 1
+    };
+    const firstMsgId = s.media_group_ids[0];
+    s.album_timer = setTimeout(() => {
+      const cur = broadcastSessions[uid];
+      if (!cur || cur.sending) return;
+      cur.album_timer = null;
+      void promptBroadcastConfirmation(chatId, uid, firstMsgId).catch((err) => {
+        console.warn('[broadcast] confirm prompt warning:', clean(err?.message || err));
+      });
+    }, 450);
+    if (typeof s.album_timer?.unref === 'function') s.album_timer.unref();
+    return true;
+  }
+
+  s.media_group_id = '';
+  s.media_group_ids = [];
+  s.draft = {
+    from_chat_id: chatId,
+    message_ids: [msg.message_id],
+    is_album: false
+  };
+  await promptBroadcastConfirmation(chatId, uid, msg.message_id);
+  return true;
+}
+
+async function handleBroadcastCallback(query, data) {
+  if (!data.startsWith('broadcast_')) return false;
+  const uid = clean(query?.from?.id);
+  const chatId = query?.message?.chat?.id;
+  if (!isAdmin(uid)) {
+    await safeAnswerCallback(query.id, { text: 'Доступ запрещён.', show_alert: true });
+    return true;
+  }
+
+  const editStatus = async (text) => {
+    try {
+      await tg('editMessageText', {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: [] }
+      });
+    } catch {}
+  };
+
+  if (data === 'broadcast_cancel') {
+    setBroadcastSession(uid, false);
+    await safeAnswerCallback(query.id, { text: 'Рассылка отменена' });
+    await editStatus('📢 Рассылка отменена.');
+    return true;
+  }
+
+  if (data === 'broadcast_send' || data === 'broadcast_send_cr') {
+    const s = broadcastSessions[uid];
+    if (!s || !s.draft || !s.draft.message_ids?.length) {
+      await safeAnswerCallback(query.id, { text: 'Пост не найден или рассылка уже завершена.', show_alert: true });
+      return true;
+    }
+    if (s.sending) {
+      await safeAnswerCallback(query.id, { text: 'Рассылка уже выполняется...' });
+      return true;
+    }
+
+    const payload = {
+      from_chat_id: s.draft.from_chat_id,
+      message_ids: [...s.draft.message_ids],
+      ...(data === 'broadcast_send_cr' && !s.draft.is_album
+        ? {
+            reply_markup: {
+              inline_keyboard: [[
+                { text: '❄️ Подать трек в COLD RUSH', callback_data: 'cold_rush_open', style: 'primary' }
+              ]]
+            }
+          }
+        : {})
+    };
+    setBroadcastSession(uid, false);
+    await safeAnswerCallback(query.id, { text: 'Запускаю рассылку...' });
+    await editStatus('📢 Запускаю рассылку...');
+
+    const result = await runBroadcast(payload);
+    await sendText(
+      chatId,
+      `📢 <b>Рассылка завершена</b>\n\n` +
+      `Всего получателей: <b>${result.total}</b>\n` +
+      `✅ Доставлено: <b>${result.sent}</b>\n` +
+      `❌ Ошибок: <b>${result.failed}</b>`
+    );
+    return true;
+  }
+
+  return false;
 }
 
 async function runCleanbase() {
@@ -7161,6 +7394,7 @@ async function onMessage(msg) {
   }
 
   if (await handleModerationReplyMessage(msg)) return;
+  if (await handleBroadcastMessage(msg)) return;
   if (!(text && (isDirectSyncCodeText(text) || (Number(linkAwaitSessions[uid] || 0) > 0 && (Date.now() - Number(linkAwaitSessions[uid] || 0)) < 300000)))) {
     if (await handleColdRushMessage(msg)) return;
   }
@@ -7198,25 +7432,6 @@ async function onMessage(msg) {
 
   // Active form session for distributing tracks
   if (await handleFormTextMessage(msg)) return;
-
-  if (isAdmin(uid) && hasBroadcastSession(uid)) {
-    if (text === '/cancel') {
-      setBroadcastSession(uid, false);
-      await sendText(chatId, '📢 Рассылка отменена.');
-      return;
-    }
-    setBroadcastSession(uid, false);
-    await sendText(chatId, '📢 Запускаю рассылку...');
-    const result = await runBroadcast(text);
-    await sendText(
-      chatId,
-      `📢 <b>Рассылка завершена</b>\n\n` +
-      `Всего получателей: <b>${result.total}</b>\n` +
-      `✅ Доставлено: <b>${result.sent}</b>\n` +
-      `❌ Ошибок: <b>${result.failed}</b>`
-    );
-    return;
-  }
 
   if (text === '/start' || text.startsWith('/start ')) {
     resetAllSessions(uid);
@@ -7315,7 +7530,7 @@ async function onMessage(msg) {
       return;
     }
     setBroadcastSession(uid, true);
-    await sendText(chatId, '📢 Отправьте текст рассылки следующим сообщением.\n\nДля отмены: /cancel');
+    await sendText(chatId, broadcastPromptText());
     return;
   }
   if (text === '/release') {
@@ -7354,11 +7569,12 @@ async function onCallback(query) {
   const data = clean(query.data);
   const chatId = query?.message?.chat?.id;
   if (!data || !chatId) return;
-  const deferAnswer = /^(?:m_|cr001_|cold_rush_)/.test(data);
+  const deferAnswer = /^(?:m_|cr001_|cold_rush_|broadcast_)/.test(data);
   if (!deferAnswer) {
     try { await tg('answerCallbackQuery', { callback_query_id: query.id }, { noRateLimitRetry: true }); } catch {}
   }
 
+  if (await handleBroadcastCallback(query, data)) return;
   if (await handleFormCallback(query, data)) return;
   if (await handlePromoCallback(query, data)) return;
   if (await handleColdRushCallback(query, data)) return;
@@ -7449,7 +7665,7 @@ async function onCallback(query) {
       return;
     }
     setBroadcastSession(String(query.from.id), true);
-    await sendText(chatId, '📢 Отправьте текст рассылки следующим сообщением.\n\nДля отмены: /cancel');
+    await sendText(chatId, broadcastPromptText());
     return;
   }
   if (data === 'admin_cleanbase_confirm') {
@@ -10529,6 +10745,10 @@ if (process.env.CXRNER_BOT_TEST_MODE === '1') {
     welcomeText,
     onMessage,
     onCallback,
+    db,
+    cabUsers,
+    broadcastSessions,
+    collectBroadcastUsers,
     coldRushDb,
     coldRushSessions,
     getBlockingColdRushSubmission,
