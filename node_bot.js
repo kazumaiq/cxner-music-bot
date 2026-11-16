@@ -295,6 +295,7 @@ const userForms = {};
 const coverSessions = {};
 const promoSessions = {};
 const broadcastSessions = {};
+const linkAwaitSessions = {};
 const PENDING_ACTION_TTL_MS = 1000 * 60 * 60 * 6; // 6 hours
 const SUPABASE_RELEASES_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_RELEASES_TABLE_RAW)
   ? SUPABASE_RELEASES_TABLE_RAW
@@ -322,8 +323,8 @@ const FORM_STATUS = {
   APPROVED: 'approved',
   REJECTED: 'rejected'
 };
-const BOT_BUILD_VERSION = '2026-11-16-ui-v12';
-const BOT_BUILD_RELEASE_NOTE = 'Mini App 4.0 (Liquid Glass, 60 FPS DROP roulette, Путь чемпиона / друзья, Admin Control Center), автозакрепление и кэш-синхронизация';
+const BOT_BUILD_VERSION = '2026-11-16-ui-v13';
+const BOT_BUILD_RELEASE_NOTE = 'Мгновенная синхронизация Telegram ↔ сайт (исправлен прямой Supabase link, команда /link и глубокие ссылки), Mini App 4.0';
 const BOT_STARTED_AT_MS = Date.now();
 const BOT_STARTED_AT = new Date(BOT_STARTED_AT_MS).toISOString();
 
@@ -1894,22 +1895,102 @@ function keyboardServices() {
     [{ text: '⬅️ Главное меню', callback_data: 'main' }]
   ]};
 }
+function normalizeLinkInput(codeOrToken) {
+  let raw = clean(codeOrToken || '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim();
+
+  // Extract start parameter if full t.me deep link was pasted
+  const tgUrlMatch = /(?:https?:\/\/)?(?:t\.me|telegram\.me)\/[A-Za-z0-9_]+\?start=([^\s&#]+)/i.exec(raw);
+  if (tgUrlMatch && tgUrlMatch[1]) {
+    raw = decodeURIComponent(tgUrlMatch[1]);
+  }
+
+  raw = raw
+    .replace(/^\/(?:start|link|sync)(?:@[A-Za-z0-9_]+)?[_\s]*/i, '')
+    .replace(/[`'"«»]/g, '')
+    .trim();
+
+  // Normalize Cyrillic C/X lookalikes and typographic dashes
+  const normalized = raw
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
+    .replace(/С/g, 'C')
+    .replace(/с/g, 'c')
+    .replace(/Х/g, 'X')
+    .replace(/х/g, 'x')
+    .replace(/\s+/g, '');
+
+  const cleanToken = normalized.replace(/^link_/i, '').trim();
+  let cleanCode = normalized.toUpperCase();
+  if (/^[0-9]{4,8}$/.test(cleanCode)) {
+    cleanCode = `CX-${cleanCode}`;
+  } else if (/^CX[0-9]{4,8}$/.test(cleanCode)) {
+    cleanCode = `CX-${cleanCode.slice(2)}`;
+  }
+
+  return { raw: normalized, cleanToken, cleanCode };
+}
+
+function isDirectSyncCodeText(rawText) {
+  const s = clean(rawText || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim();
+  if (!s || s.startsWith('/')) return false;
+  if (/(?:https?:\/\/)?(?:t\.me|telegram\.me)\/[A-Za-z0-9_]+\?start=(?:link_|cx[-_]?)/i.test(s)) {
+    return true;
+  }
+  const { raw } = normalizeLinkInput(s);
+  return (
+    /^cx-?[0-9]{4,8}$/i.test(raw) ||
+    /^[0-9]{6}$/.test(raw) ||
+    /^link_[0-9a-f]{16,64}$/i.test(raw) ||
+    /^[0-9a-f]{32}$/i.test(raw)
+  );
+}
+
+async function fetchCabinetRowsForLinkLookup() {
+  try {
+    return await supabaseSelectAll(SUPABASE_CABINET_TABLE, 'user_id,profile,updated_at', 'updated_at.desc');
+  } catch (orderedErr) {
+    console.warn('[bot] cabinet ordered lookup fallback:', clean(orderedErr?.message || orderedErr));
+    return await supabaseSelectAll(SUPABASE_CABINET_TABLE, 'user_id,profile');
+  }
+}
+
+async function countSyncedReleasesForUser(tgUid, webUserId) {
+  const localCount = Array.isArray(db[String(tgUid)])
+    ? db[String(tgUid)].filter((r) => r && !r.user_deleted && canonicalStatus(r.status) !== STATUS.DELETED).length
+    : 0;
+  if (!SUPABASE_SYNC_ENABLED) return localCount;
+  try {
+    const ids = Array.from(new Set([String(tgUid || '').trim(), String(webUserId || '').trim()].filter(Boolean)));
+    const filterExpr = `(${ids.map((id) => `"${id.replace(/"/g, '')}"`).join(',')})`;
+    const rows = await supabaseRequest(
+      `${SUPABASE_FORMS_TABLE}?select=id,user_deleted&telegram_id=in.${encodeURIComponent(filterExpr)}`
+    );
+    if (Array.isArray(rows)) {
+      const activeRows = rows.filter((r) => r && r.user_deleted !== true).length;
+      return Math.max(localCount, activeRows);
+    }
+  } catch {}
+  return localCount;
+}
+
 async function linkTelegramToWebCabinet(chatId, uid, from, codeOrToken) {
-  let raw = clean(codeOrToken).trim();
-  raw = raw.replace(/^\/(?:start|link)[_\s]*/i, '').trim();
+  const { raw, cleanToken, cleanCode } = normalizeLinkInput(codeOrToken);
+  const uidStr = String(uid);
 
   if (!raw) {
+    linkAwaitSessions[uidStr] = Date.now();
     await sendText(
       chatId,
-      '⚠️ <b>Укажите код привязки</b>\n\n' +
-      'Пример: <code>CX-849201</code> или <code>/link CX-849201</code>\n\n' +
-      'Скопируйте 6-значный код на сайте в разделе «Синхронизация с Telegram»:\n' +
+      '🔗 <b>Привязка кабинета сайта к Telegram</b>\n\n' +
+      'Отправьте следующим сообщением 6-значный код с сайта (например: <code>CX-849201</code>) или команду <code>/link CX-849201</code>.\n\n' +
+      'Получить код можно в личном кабинете на сайте:\n' +
       'https://cxrnermusic.vercel.app/dashboard',
       {
         reply_markup: {
           inline_keyboard: [
             [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }],
-            [{ text: '⬅️ Главное меню', callback_data: 'main' }]
+            [{ text: '❌ Отмена', callback_data: 'main' }]
           ]
         }
       }
@@ -1917,66 +1998,70 @@ async function linkTelegramToWebCabinet(chatId, uid, from, codeOrToken) {
     return;
   }
 
-  // Normalization
-  let cleanToken = raw.replace(/^link_/i, '').trim();
-  let cleanCode = raw.toUpperCase();
-  if (/^[0-9]{6}$/.test(raw)) {
-    cleanCode = 'CX-' + raw;
-  }
+  delete linkAwaitSessions[uidStr];
+  console.info(`[bot] linking telegram uid=${uidStr} username=${from?.username || ''} code=${cleanCode} tokenLen=${cleanToken.length}`);
 
-  console.info(`[bot] linking telegram uid=${uid} username=${from?.username || ''} with code=${cleanCode} token=${cleanToken}`);
+  // Give instant UI feedback in Telegram so the bot never looks frozen
+  await tg('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
+  let statusMessageId = 0;
+  try {
+    const pendingMsg = await sendText(chatId, '⏳ <b>Проверяю код привязки...</b>');
+    statusMessageId = Number(pendingMsg?.message_id || 0);
+  } catch {}
+
+  const deliverReply = async (htmlText, replyMarkup = null, plainText = '') => {
+    const extra = replyMarkup ? { reply_markup: replyMarkup } : {};
+    if (statusMessageId > 0) {
+      try {
+        await tg('editMessageText', {
+          chat_id: chatId,
+          message_id: statusMessageId,
+          text: htmlText,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+          ...extra
+        });
+        return;
+      } catch {}
+    }
+    try {
+      await sendText(chatId, htmlText, extra);
+    } catch {
+      await sendTextPlain(chatId, plainText || htmlText.replace(/<[^>]+>/g, '')).catch(() => {});
+    }
+  };
 
   const websiteApiUrl = envStr('WEBSITE_API_URL', 'https://cxrnermusic.vercel.app').replace(/\/+$/, '');
+  const compactCode = cleanCode.replace(/[^A-Z0-9]/g, '');
+  let dbSuccess = false;
+  let dbMatchedUserId = '';
+  let dbArtistName = '';
   let apiSuccess = false;
   let apiData = null;
+  let explicitErrorMsg = '';
+  let expiredCodeFound = false;
 
-  // Step 1: Call website verify API
-  try {
-    const controller = typeof AbortController === 'function' ? new AbortController() : null;
-    const timeoutId = controller ? setTimeout(() => controller.abort(), 9000) : null;
-    const res = await fetch(`${websiteApiUrl}/api/cabinet/verify-link`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'user-agent': 'cxner-music-bot/1.0'
-      },
-      body: JSON.stringify({
-        code: cleanCode,
-        token: cleanToken,
-        telegram_id: String(uid),
-        username: clean(from?.username || ''),
-        first_name: clean(from?.first_name || '')
-      }),
-      signal: controller ? controller.signal : undefined
-    });
-    if (timeoutId) clearTimeout(timeoutId);
-
-    apiData = await res.json().catch(() => null);
-    if (res.ok && apiData && apiData.ok) {
-      apiSuccess = true;
-      console.info(`[bot] verify-link API success for user_id=${apiData.user_id}`);
-    } else {
-      console.warn(`[bot] verify-link API response: status=${res.status}`, apiData);
-    }
-  } catch (apiErr) {
-    console.warn('[bot] verify-link API call failed, falling back to direct Supabase:', apiErr?.message || apiErr);
-  }
-
-  // Step 2: Fallback to direct Supabase if website API did not succeed
-  let dbSuccess = false;
-  let dbArtistName = '';
-  if (!apiSuccess && SUPABASE_SYNC_ENABLED) {
+  // Step 1: Fast direct Supabase verification/update using service_role (typically ~150-300ms)
+  if (SUPABASE_SYNC_ENABLED) {
     try {
-      const allCabinet = await supabaseSelectAll(SUPABASE_CABINET_TABLE, 'user_id,profile,updated_at', 'updated_at.desc').catch(() => []);
+      const allCabinet = await fetchCabinetRowsForLinkLookup();
       const matchedUser = (allCabinet || []).find((u) => {
         const p = (u && typeof u.profile === 'object') ? u.profile : {};
-        const matchesCode = p.link_code && (
-          String(p.link_code).trim().toUpperCase() === cleanCode ||
-          String(p.link_code).trim().toUpperCase() === raw.toUpperCase()
+        const storedCode = clean(p.link_code || '').toUpperCase();
+        const storedCompact = storedCode.replace(/[^A-Z0-9]/g, '');
+        const storedToken = clean(p.link_token || '').toLowerCase();
+        const matchesCode = Boolean(
+          storedCode && (
+            storedCode === cleanCode ||
+            storedCode === raw.toUpperCase() ||
+            (compactCode && storedCompact === compactCode)
+          )
         );
-        const matchesToken = p.link_token && (
-          String(p.link_token).trim().toLowerCase() === cleanToken.toLowerCase() ||
-          String(p.link_token).trim().toLowerCase() === raw.toLowerCase()
+        const matchesToken = Boolean(
+          storedToken && (
+            storedToken === cleanToken.toLowerCase() ||
+            storedToken === raw.toLowerCase()
+          )
         );
         return matchesCode || matchesToken;
       });
@@ -1987,131 +2072,196 @@ async function linkTelegramToWebCabinet(chatId, uid, from, codeOrToken) {
 
         if (currentProfile.link_created_at) {
           const createdAt = new Date(currentProfile.link_created_at).getTime();
-          const diffMinutes = (Date.now() - createdAt) / (1000 * 60);
-          if (diffMinutes > 15) {
-            await sendText(
-              chatId,
-              '⌛ <b>Срок действия кода истёк (15 минут)</b>\n\n' +
-              'Пожалуйста, откройте страницу кабинета на сайте и нажмите «Связать с ботом» заново:\n' +
-              'https://cxrnermusic.vercel.app/dashboard',
-              {
-                reply_markup: {
-                  inline_keyboard: [
-                    [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }],
-                    [{ text: '⬅️ Главное меню', callback_data: 'main' }]
-                  ]
-                }
-              }
-            );
-            return;
+          if (Number.isFinite(createdAt)) {
+            const diffMinutes = (Date.now() - createdAt) / (1000 * 60);
+            if (diffMinutes > 15) {
+              expiredCodeFound = true;
+              explicitErrorMsg = 'Срок действия кода истёк (15 минут). Нажмите «Обновить код» в кабинете на сайте.';
+            }
           }
         }
 
-        const updatedProfile = {
-          ...currentProfile,
-          telegram_id: String(uid),
-          telegram_username: clean(from?.username || ''),
-          telegram_first_name: clean(from?.first_name || ''),
-          telegram_linked_at: now,
-          link_code: null,
-          link_token: null,
-          link_created_at: null
-        };
-        dbArtistName = clean(currentProfile.artist_name || '');
+        if (!expiredCodeFound) {
+          const existingEcoId = (currentProfile.cxrner_id && typeof currentProfile.cxrner_id === 'object')
+            ? currentProfile.cxrner_id
+            : null;
+          const tgUsername = clean(from?.username || '') || clean(currentProfile.telegram_username || '');
+          const tgFirstName = clean(from?.first_name || '') || clean(currentProfile.telegram_first_name || '');
 
-        await supabaseRequest(
-          `${SUPABASE_CABINET_TABLE}?user_id=eq.${encodeURIComponent(matchedUser.user_id)}`,
-          {
-            method: 'PATCH',
-            headers: { Prefer: 'return=representation' },
-            body: {
-              profile: updatedProfile,
-              updated_at: now
+          const updatedProfile = {
+            ...currentProfile,
+            telegram_id: uidStr,
+            telegram_username: tgUsername,
+            telegram_first_name: tgFirstName,
+            telegram_linked_at: now,
+            link_code: null,
+            link_token: null,
+            link_created_at: null,
+            ...(existingEcoId
+              ? {
+                  cxrner_id: {
+                    ...existingEcoId,
+                    telegram_id: uidStr,
+                    telegram_username: tgUsername || existingEcoId.telegram_username || null,
+                    telegram_linked: true,
+                    updated_at: now
+                  }
+                }
+              : {})
+          };
+
+          await supabaseRequest(
+            `${SUPABASE_CABINET_TABLE}?user_id=eq.${encodeURIComponent(matchedUser.user_id)}`,
+            {
+              method: 'PATCH',
+              headers: { Prefer: 'return=representation' },
+              body: {
+                profile: updatedProfile,
+                updated_at: now
+              }
             }
-          }
-        );
+          );
 
-        await supabaseRequest(
-          `${SUPABASE_TABLE}?telegram_id=eq.${encodeURIComponent(String(uid))}`,
-          {
-            method: 'PATCH',
-            body: { telegram_id: matchedUser.user_id }
-          }
-        ).catch(() => {});
+          dbMatchedUserId = String(matchedUser.user_id || '');
+          dbArtistName = clean(currentProfile.artist_name || existingEcoId?.display_name || '');
+          dbSuccess = true;
+          console.info(`[bot] direct Supabase cabinet link success uid=${uidStr} -> user_id=${dbMatchedUserId}`);
 
-        dbSuccess = true;
+          // Sync local bot cabinet cache & cxrner_users/cxrner_profiles non-fatally
+          cabUsers[uidStr] = {
+            ...(cabUsers[uidStr] && typeof cabUsers[uidStr] === 'object' ? cabUsers[uidStr] : {}),
+            approved: true,
+            web_user_id: dbMatchedUserId,
+            username: tgUsername || cabUsers[uidStr]?.username || '',
+            first_name: tgFirstName || cabUsers[uidStr]?.first_name || '',
+            synced_at: now
+          };
+          saveCab();
+
+          supabaseRequest(
+            `${SUPABASE_USERS_TABLE}?telegram_id=eq.${encodeURIComponent(uidStr)}`,
+            {
+              method: 'PATCH',
+              headers: { Prefer: 'return=minimal' },
+              body: {
+                cabinet_active: true,
+                username: tgUsername || undefined,
+                first_name: tgFirstName || undefined,
+                updated_at: now
+              }
+            }
+          ).catch(() => {});
+
+          supabaseRequest(
+            `cxrner_profiles?id=eq.${encodeURIComponent(dbMatchedUserId)}`,
+            {
+              method: 'PATCH',
+              headers: { Prefer: 'return=minimal' },
+              body: {
+                telegram_id: uidStr,
+                telegram_username: tgUsername || null,
+                telegram_linked: true,
+                updated_at: now
+              }
+            }
+          ).catch(() => {});
+        }
       }
     } catch (dbErr) {
-      console.error('[bot] direct Supabase link failed:', dbErr);
+      console.warn('[bot] direct Supabase link check error:', clean(dbErr?.message || dbErr));
     }
   }
 
-  // Step 3: Handle Result
-  if (apiSuccess || dbSuccess) {
-    const artistName = apiData?.artist_name || dbArtistName;
-    const nameLabel = artistName ? ` (<b>${esc(artistName)}</b>)` : '';
-    const syncedCount = apiData?.synced_releases_count ?? '';
+  // Step 2: Call website verify-link (either to finalize referral milestones or as full fallback)
+  if (!expiredCodeFound) {
+    try {
+      const controller = typeof AbortController === 'function' ? new AbortController() : null;
+      const timeoutMs = dbSuccess ? 4000 : 6500;
+      const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+      const res = await fetch(`${websiteApiUrl}/api/cabinet/verify-link`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'user-agent': 'cxner-music-bot/1.0'
+        },
+        body: JSON.stringify({
+          code: cleanCode,
+          token: cleanToken,
+          telegram_id: uidStr,
+          username: clean(from?.username || ''),
+          first_name: clean(from?.first_name || ''),
+          ...(dbSuccess && dbMatchedUserId ? { finalizeOnly: true, user_id: dbMatchedUserId } : {})
+        }),
+        signal: controller ? controller.signal : undefined
+      });
+      if (timeoutId) clearTimeout(timeoutId);
 
-    // Clear any pending form session so user is in a fresh synchronized state
-    try { resetFormSession(uid); } catch {}
+      apiData = await res.json().catch(() => null);
+      if (res.ok && apiData && apiData.ok) {
+        apiSuccess = true;
+        console.info(`[bot] verify-link API success for user_id=${apiData.user_id || dbMatchedUserId}`);
+      } else if (!dbSuccess && apiData?.error) {
+        console.warn(`[bot] verify-link API response: status=${res.status}`, apiData);
+        if (res.status === 410 || res.status === 404) {
+          explicitErrorMsg = clean(apiData.error);
+        }
+      }
+    } catch (apiErr) {
+      if (!dbSuccess) {
+        console.warn('[bot] verify-link API call failed:', clean(apiErr?.message || apiErr));
+      }
+    }
+  }
+
+  // Step 3: Deliver clear confirmation or actionable error
+  if (dbSuccess || apiSuccess) {
+    const artistName = clean(apiData?.artist_name || dbArtistName);
+    const nameLabel = artistName ? ` (<b>${esc(artistName)}</b>)` : '';
+    const resolvedWebId = dbMatchedUserId || clean(apiData?.user_id || '');
+    const syncedCount = Number.isFinite(Number(apiData?.synced_releases_count))
+      ? Number(apiData.synced_releases_count)
+      : await countSyncedReleasesForUser(uidStr, resolvedWebId);
+
+    try { resetAllSessions(uidStr); } catch {}
 
     const confirmationText =
       '🎉 <b>Аккаунты успешно синхронизированы!</b>\n\n' +
       `Ваш профиль Telegram и личный кабинет на сайте CXRNER MUSIC${nameLabel} теперь объединены в единую систему.\n\n` +
-      '• Все релизы, отправленные через Telegram или Mini App, синхронизированы с сайтом.\n' +
-      '• Все релизы, загруженные на сайте (включая CXRNER LINK), доступны из вашего аккаунта.\n' +
-      '• Статусы модерации и официальные коды UPC обновляются синхронно.\n' +
-      (syncedCount ? `\n📦 <i>Синхронизировано релизов: <b>${syncedCount}</b></i>\n` : '');
+      '• Все релизы из Telegram и Mini App автоматически отображаются на сайте.\n' +
+      '• Релизы и смарт-ссылки с сайта связаны с вашим аккаунтом.\n' +
+      '• Статусы модерации и UPC обновляются синхронно.\n' +
+      (syncedCount > 0 ? `\n📦 <i>Синхронизировано релизов: <b>${syncedCount}</b></i>\n` : '');
 
-    try {
-      await sendText(
-        chatId,
-        confirmationText,
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }],
-              [{ text: '📁 Мои релизы в боте', callback_data: 'my_releases' }],
-              [{ text: '⬅️ Главное меню', callback_data: 'main' }]
-            ]
-          }
-        }
-      );
-      console.info(`[bot] sync confirmation delivered to chatId=${chatId}`);
-    } catch (sendErr) {
-      console.warn(`[bot] rich sync message failed, sending plain fallback:`, sendErr?.message || sendErr);
-      await sendTextPlain(
-        chatId,
-        '🎉 Аккаунты успешно синхронизированы!\n\nВаш профиль Telegram и личный кабинет на сайте CXRNER MUSIC теперь объединены.'
-      ).catch(() => {});
-    }
+    await deliverReply(
+      confirmationText,
+      {
+        inline_keyboard: [
+          [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }],
+          [{ text: '📁 Мои релизы в боте', callback_data: 'my_releases' }],
+          [{ text: '⬅️ Главное меню', callback_data: 'main' }]
+        ]
+      },
+      '🎉 Аккаунты успешно синхронизированы!\n\nВаш профиль Telegram и личный кабинет на сайте CXRNER MUSIC теперь объединены.'
+    );
+    console.info(`[bot] sync confirmation delivered to chatId=${chatId}`);
     return;
   }
 
-  const errMsg = apiData?.error || 'Код привязки не найден или срок его действия истёк (15 минут).';
-  try {
-    await sendText(
-      chatId,
-      `❌ <b>Не удалось привязать аккаунт</b>\n\n` +
-      `${esc(errMsg)}\n\n` +
-      'Перейдите в личный кабинет на сайте, нажмите «Привязать Telegram» и отправьте свежий 6-значный код:\n' +
-      'https://cxrnermusic.vercel.app/dashboard',
-      {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }],
-            [{ text: '🔄 Попробовать снова', callback_data: 'cabinet_sync_site' }],
-            [{ text: '⬅️ Главное меню', callback_data: 'main' }]
-          ]
-        }
-      }
-    );
-  } catch (err) {
-    await sendTextPlain(
-      chatId,
-      `❌ Не удалось привязать аккаунт: ${errMsg}\n\nПолучите новый код на сайте: https://cxrnermusic.vercel.app/dashboard`
-    ).catch(() => {});
-  }
+  const errMsg = explicitErrorMsg || 'Код привязки не найден или срок его действия истёк (15 минут).';
+  await deliverReply(
+    `❌ <b>Не удалось привязать аккаунт</b>\n\n` +
+    `${esc(errMsg)}\n\n` +
+    'Откройте личный кабинет на сайте, нажмите «Привязать Telegram» (или «Обновить код») и отправьте новый код:\n' +
+    'https://cxrnermusic.vercel.app/dashboard',
+    {
+      inline_keyboard: [
+        [{ text: '🌐 Открыть кабинет на сайте', url: 'https://cxrnermusic.vercel.app/dashboard' }],
+        [{ text: '🔄 Попробовать снова', callback_data: 'cabinet_sync_site' }],
+        [{ text: '⬅️ Главное меню', callback_data: 'main' }]
+      ]
+    },
+    `❌ Не удалось привязать аккаунт: ${errMsg}\n\nПолучите новый код на сайте: https://cxrnermusic.vercel.app/dashboard`
+  );
 }
 
 function keyboardCabinet() {
@@ -3700,6 +3850,7 @@ function resetAllSessions(uid, except = '') {
   if (except !== 'release') delete userForms[key];
   if (except !== 'cover') delete coverSessions[key];
   if (except !== 'promo') delete promoSessions[key];
+  if (except !== 'link') delete linkAwaitSessions[key];
 }
 
 function createFormSession(uid, user) {
@@ -6083,39 +6234,37 @@ async function onMessage(msg) {
   }
 
   if (await handleModerationReplyMessage(msg)) return;
-  if (await handleCoverMessage(msg)) return;
-  if (await handlePromoMessage(msg)) return;
-
   if (!text) return;
 
   // PRIORITY 1: Account synchronization commands and codes
-  // Must run BEFORE handleFormTextMessage so stale form sessions never eat link codes!
+  // Must run BEFORE handleCoverMessage / handlePromoMessage / handleFormTextMessage so stale sessions never swallow codes!
   const trimmedText = text.trim();
-  if (text.startsWith('/start link_') || text.startsWith('/start CX-') || text.startsWith('/start cx-')) {
-    const token = text.slice('/start '.length).trim();
-    await linkTelegramToWebCabinet(chatId, uid, msg.from, token);
+  const isModGroup = Number(chatId) === Number(MOD_CHAT);
+  if (parsedCmd && (parsedCmd.command === '/link' || parsedCmd.command === '/sync')) {
+    await linkTelegramToWebCabinet(chatId, uid, msg.from, parsedCmd.arg);
     return;
   }
-  if (text.startsWith('/start ') && (text.includes('link_') || text.includes('cx-') || text.includes('CX-'))) {
-    const token = text.slice('/start '.length).trim();
-    await linkTelegramToWebCabinet(chatId, uid, msg.from, token);
-    return;
-  }
-  if (text === '/link' || text.startsWith('/link ') || text.startsWith('/link_')) {
-    const code = text.replace(/^\/link[_\s]*/i, '').trim();
+  if (/^\/link_[A-Za-z0-9_-]+$/i.test(trimmedText)) {
+    const code = trimmedText.replace(/^\/link_/i, '').trim();
     await linkTelegramToWebCabinet(chatId, uid, msg.from, code);
     return;
   }
-  // Raw sync codes pasted directly in chat (e.g. "CX-360449", "cx-360449", "360449", "link_...", or 32-hex tokens)
-  if (
-    /^cx-[0-9]{4,8}$/i.test(trimmedText) ||
-    /^[0-9]{6}$/.test(trimmedText) ||
-    /^link_[0-9a-f]{16,64}$/i.test(trimmedText) ||
-    /^[0-9a-f]{32}$/i.test(trimmedText)
-  ) {
+  if (parsedCmd && parsedCmd.command === '/start' && /^(?:link_|cx[-_]?)/i.test(parsedCmd.arg)) {
+    await linkTelegramToWebCabinet(chatId, uid, msg.from, parsedCmd.arg);
+    return;
+  }
+  const awaitTs = Number(linkAwaitSessions[uid] || 0);
+  if (!isModGroup && awaitTs > 0 && (Date.now() - awaitTs) < (5 * 60 * 1000) && !trimmedText.startsWith('/')) {
     await linkTelegramToWebCabinet(chatId, uid, msg.from, trimmedText);
     return;
   }
+  if (!isModGroup && isDirectSyncCodeText(trimmedText)) {
+    await linkTelegramToWebCabinet(chatId, uid, msg.from, trimmedText);
+    return;
+  }
+
+  if (await handleCoverMessage(msg)) return;
+  if (await handlePromoMessage(msg)) return;
 
   // Active form session for distributing tracks
   if (await handleFormTextMessage(msg)) return;
@@ -6252,10 +6401,10 @@ async function onMessage(msg) {
     return;
   }
   if (text === '/cancel') {
-    const hadAny = !!(getFormSession(uid) || getCoverSession(uid) || getPromoSession(uid) || hasBroadcastSession(uid));
+    const hadAny = !!(getFormSession(uid) || getCoverSession(uid) || getPromoSession(uid) || hasBroadcastSession(uid) || linkAwaitSessions[uid]);
     resetAllSessions(uid);
     setBroadcastSession(uid, false);
-    await sendText(chatId, hadAny ? 'Текущая анкета отменена.' : 'Нет активной анкеты.');
+    await sendText(chatId, hadAny ? 'Текущее действие отменено.' : 'Нет активной анкеты.');
     return;
   }
   if (text === '/app' || text === 'Открыть приложение') {
@@ -9398,6 +9547,19 @@ async function registerModerationCommands() {
     { command: 'new', description: 'Пометить анкеты «На отгрузке» свободными' },
     { command: 'modtest', description: 'Проверить права бота в группе модерации' }
   ];
+  const privateCommands = [
+    { command: 'start', description: 'Главное меню CXRNER MUSIC' },
+    { command: 'link', description: 'Привязать кабинет сайта по коду (/link CX-...)' },
+    { command: 'release', description: 'Отправить релиз на дистрибуцию' },
+    { command: 'my', description: 'Мои релизы и статусы' },
+    { command: 'app', description: 'Открыть Mini App CXRNER 4.0' },
+    { command: 'cancel', description: 'Отменить текущую анкету' }
+  ];
+  try {
+    await tg('setMyCommands', { commands: privateCommands, scope: { type: 'all_private_chats' } });
+  } catch (err) {
+    console.warn(`[bot] setMyCommands (all_private_chats) warning: ${shortTgError(err)}`);
+  }
   for (const scope of [
     { type: 'chat', chat_id: MOD_CHAT },
     { type: 'chat_administrators', chat_id: MOD_CHAT }
