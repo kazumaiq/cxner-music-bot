@@ -322,7 +322,7 @@ const FORM_STATUS = {
   APPROVED: 'approved',
   REJECTED: 'rejected'
 };
-const BOT_BUILD_VERSION = '2026-11-16-ui-v11';
+const BOT_BUILD_VERSION = '2026-11-16-ui-v12';
 const BOT_BUILD_RELEASE_NOTE = 'Mini App 4.0 (Liquid Glass, 60 FPS DROP roulette, Путь чемпиона / друзья, Admin Control Center), автозакрепление и кэш-синхронизация';
 const BOT_STARTED_AT_MS = Date.now();
 const BOT_STARTED_AT = new Date(BOT_STARTED_AT_MS).toISOString();
@@ -2817,16 +2817,19 @@ function findExistingReleaseByFormOrSubmission(uid, formId = '', submissionKey =
   return null;
 }
 
+const reconciledFormIdsInMemory = new Set();
+
 async function reconcilePendingWebFormsAndPins() {
   if (stopping || autoPinSweepRunning) return;
   autoPinSweepRunning = true;
-  const recentCutoffMs = Date.now() - 7 * 24 * 3600 * 1000;
-  const recentCutoffIso = new Date(recentCutoffMs).toISOString();
+  // Only reconcile website forms submitted since 10 minutes before boot (never dump multi-day backlog on restart)
+  const webSyncCutoffMs = BOT_STARTED_AT_MS - 10 * 60 * 1000;
+  const webSyncCutoffIso = new Date(webSyncCutoffMs).toISOString();
   try {
-    // 1. Retry pinning any recent (7d) / pending local ON_UPLOAD cards that aren't pinned yet
-    // and auto-unpin up to 3 resolved cards per sweep so only live ON_UPLOAD stay pinned at top.
+    // 1. Retry pinning any recently failed local ON_UPLOAD cards and auto-unpin up to 3 resolved cards
     let localChanged = false;
     let autoUnpinnedCount = 0;
+    let autoPinnedCount = 0;
     for (const [ownerId, listRaw] of Object.entries(db || {})) {
       const list = Array.isArray(listRaw) ? listRaw : [];
       for (let idx = 0; idx < list.length; idx += 1) {
@@ -2850,15 +2853,16 @@ async function reconcilePendingWebFormsAndPins() {
           continue;
         }
 
-        if (rel.manual_unpinned || rel.moderation_pinned) continue;
+        if (rel.manual_unpinned || rel.moderation_pinned || autoPinnedCount >= 3) continue;
         const subMs = parseIsoTime(rel.submission_time || rel.moderation_time || '');
-        const isRecent = !subMs || subMs >= recentCutoffMs;
-        if (!rel.pin_pending && !isRecent) continue;
+        const isFresh = subMs >= webSyncCutoffMs;
+        if (!rel.pin_pending && !isFresh) continue;
 
-        const pRes = await pinModerationMessage(mid, { silent: true });
+        const pRes = await pinModerationMessage(mid, { silent: true, disableNotification: true });
         if (pRes.ok) {
           rel.moderation_pinned = true;
           rel.pin_pending = false;
+          autoPinnedCount += 1;
           localChanged = true;
           syncModerationMirror(ownerId, idx, rel);
           await refreshModerationMessage(ownerId, idx, rel, mid).catch(() => {});
@@ -2877,28 +2881,31 @@ async function reconcilePendingWebFormsAndPins() {
       saveModDb();
     }
 
-    // 2. Catch any recent website/pending forms (including forms created before bot restart) that need posting or pinning
+    // 2. Catch only brand-new / restart-window website forms (last 10m before boot onward)
     if (SUPABASE_SYNC_ENABLED && supabaseFeatureState.forms) {
       const rows = await supabaseSelectWhere(
         SUPABASE_FORMS_TABLE,
         'id,telegram_id,username,artist_name,track_name,genre,release_type,status,upc,moderation_message_id,submission_key,source,created_at,updated_at,form_payload',
         [
           { key: 'status', value: FORM_STATUS.PENDING },
-          { key: 'created_at', op: 'gte', value: recentCutoffIso }
+          { key: 'created_at', op: 'gte', value: webSyncCutoffIso }
         ],
-        'created_at.desc',
-        30
+        'created_at.asc',
+        15
       ).catch(() => []);
 
-      for (const row of (rows || []).slice().reverse()) {
+      for (const row of rows || []) {
         const uid = clean(row?.telegram_id || '');
         if (!uid) continue;
         const formId = clean(row?.id || '');
+        if (formId && reconciledFormIdsInMemory.has(formId)) continue;
         const payloadForm = row?.form_payload && typeof row.form_payload === 'object' ? row.form_payload : {};
         const existing = findExistingReleaseByFormOrSubmission(uid, formId, row?.submission_key || '', Number(row?.moderation_message_id || 0));
         const msgId = Number(row?.moderation_message_id || payloadForm.moderation_message_id || existing?.rel?.moderation_message_id || 0);
 
         if (!msgId) {
+          if (existing?.rel?.available_marked_at || existing?.rel?.moderation_original_text) continue;
+          if (formId) reconciledFormIdsInMemory.add(formId);
           const releaseData = normalizeRelease({
             ...payloadForm,
             type: normalizeType(payloadForm.type || row.release_type) || 'сингл',
@@ -2927,7 +2934,7 @@ async function reconcilePendingWebFormsAndPins() {
           const alreadyPinnedInDb = Boolean(existing?.rel?.moderation_pinned);
           const alreadyPinnedInPayload = Boolean(payloadForm.moderation_pinned);
           if (!alreadyPinnedInDb && !alreadyPinnedInPayload) {
-            const pRes = await pinModerationMessage(msgId, { silent: true });
+            const pRes = await pinModerationMessage(msgId, { silent: true, disableNotification: true });
             if (pRes.ok) {
               if (existing?.rel) {
                 existing.rel.moderation_pinned = true;
@@ -3629,7 +3636,7 @@ async function submitReleaseToModeration(user, uid, releaseData, source = 'mini_
 
   rel.moderation_message_id = sent.message_id;
   rel.moderation_original_text = orig;
-  const pinRes = await pinModerationMessageNow(sent.message_id, { immediateRetry: true, disableNotification: false });
+  const pinRes = await pinModerationMessageNow(sent.message_id, { immediateRetry: true, disableNotification: true });
   rel.moderation_pinned = !!pinRes.ok;
   rel.pin_pending = !pinRes.ok && !pinRes.missingRights;
   if (reuseExisting) db[uid][idx] = rel;
