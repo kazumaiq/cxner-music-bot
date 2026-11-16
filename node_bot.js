@@ -231,6 +231,8 @@ const SUPABASE_FORMS_TABLE_RAW = envStr('SUPABASE_FORMS_TABLE', 'cxrner_forms') 
 const SUPABASE_USERS_TABLE_RAW = envStr('SUPABASE_USERS_TABLE', 'cxrner_users') || 'cxrner_users';
 const SUPABASE_PUBLIC_RELEASES_TABLE_RAW = envStr('SUPABASE_PUBLIC_RELEASES_TABLE', 'cxrner_public_releases') || 'cxrner_public_releases';
 const SUPABASE_INTERACTIONS_TABLE_RAW = envStr('SUPABASE_INTERACTIONS_TABLE', 'cxrner_interactions') || 'cxrner_interactions';
+const SUPABASE_COLD_RUSH_TABLE_RAW = envStr('SUPABASE_COLD_RUSH_TABLE', 'cxrner_cold_rush_submissions') || 'cxrner_cold_rush_submissions';
+const COLD_RUSH_CAMPAIGN = 'COLD_RUSH_001';
 const SUPABASE_SYNC_ENABLED = !!SUPABASE_URL && !!SUPABASE_SERVICE_ROLE_KEY;
 const SUPABASE_FETCH_TIMEOUT_MS = envInt('SUPABASE_FETCH_TIMEOUT_MS', 25000);
 const SUPABASE_FETCH_RETRIES = envInt('SUPABASE_FETCH_RETRIES', 4);
@@ -243,6 +245,7 @@ const IMPORT_RELEASES_BACKUP_FILE = envStr('IMPORT_RELEASES_BACKUP_FILE', '');
 const DB_FILE = 'releases.json';
 const MOD_DB_FILE = 'moderation_releases.json';
 const CAB_FILE = 'cabinet_users.json';
+const COLD_RUSH_FILE = 'cold_rush_001.json';
 const EXP_REL = 'webapp/data/releases-public.json';
 const EXP_CAB = 'webapp/data/cabinet-users.json';
 const CLEANUP_KEEP_DAYS = envInt('CLEANUP_KEEP_DAYS', 180);
@@ -291,11 +294,15 @@ const LEGACY_STATUS_MAP = {
 let db = loadJson(DB_FILE, {});
 let modDb = loadJson(MOD_DB_FILE, { moderation_messages: [], pending_actions: [] });
 let cabUsers = loadJson(CAB_FILE, {});
+let coldRushDb = loadJson(COLD_RUSH_FILE, { submissions: [] });
 const userForms = {};
 const coverSessions = {};
 const promoSessions = {};
+const coldRushSessions = {};
 const broadcastSessions = {};
 const linkAwaitSessions = {};
+const coldRushSubmittingUsers = new Set();
+const coldRushModLocks = new Set();
 const PENDING_ACTION_TTL_MS = 1000 * 60 * 60 * 6; // 6 hours
 const SUPABASE_RELEASES_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_RELEASES_TABLE_RAW)
   ? SUPABASE_RELEASES_TABLE_RAW
@@ -315,6 +322,9 @@ const SUPABASE_PUBLIC_RELEASES_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_
 const SUPABASE_INTERACTIONS_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_INTERACTIONS_TABLE_RAW)
   ? SUPABASE_INTERACTIONS_TABLE_RAW
   : 'cxrner_interactions';
+const SUPABASE_COLD_RUSH_TABLE = /^[A-Za-z_][A-Za-z0-9_]*$/.test(SUPABASE_COLD_RUSH_TABLE_RAW)
+  ? SUPABASE_COLD_RUSH_TABLE_RAW
+  : 'cxrner_cold_rush_submissions';
 const SUPABASE_LINKS_TABLE = 'cxrner_links';
 const SUPABASE_LINK_EVENTS_TABLE = 'cxrner_link_events';
 const FORM_STATUS = {
@@ -323,8 +333,8 @@ const FORM_STATUS = {
   APPROVED: 'approved',
   REJECTED: 'rejected'
 };
-const BOT_BUILD_VERSION = '2026-11-16-ui-v14';
-const BOT_BUILD_RELEASE_NOTE = 'Design System 5.0 (Onest + Manrope, яркий контраст, онбординг для новичков, упрощённая навигация) + мгновенная синхронизация ТГ ↔ сайт';
+const BOT_BUILD_VERSION = '2026-11-16-ui-v15';
+const BOT_BUILD_RELEASE_NOTE = 'COLD RUSH 001 (модуль подачи и модерации заявок в сборник) + Design System 5.0';
 const BOT_STARTED_AT_MS = Date.now();
 const BOT_STARTED_AT = new Date(BOT_STARTED_AT_MS).toISOString();
 
@@ -455,9 +465,11 @@ const supabaseFeatureState = {
   users: true,
   cabinet: true,
   public_releases: true,
-  interactions: true
+  interactions: true,
+  cold_rush: true
 };
 ensureModDbShape();
+ensureColdRushDbShape();
 
 const API = `${TELEGRAM_API_BASE}/bot${TOKEN}`;
 
@@ -1466,8 +1478,9 @@ async function hydrateFromSupabase() {
     saveJson(CAB_FILE, cabUsers);
     exportReleases();
     exportCabinet();
+    await hydrateColdRushFromSupabase();
     console.info(
-      `[supabase] hydrated: releases=${releaseRows.length}, cabinet=${cabinetRows.length}, forms=${formsRows.length}, users=${userRows.length}`
+      `[supabase] hydrated: releases=${releaseRows.length}, cabinet=${cabinetRows.length}, forms=${formsRows.length}, users=${userRows.length}, cold_rush=${coldRushDb.submissions.length}`
     );
   } catch (e) {
     console.error('[supabase] hydrate failed:', clean(e?.message || e));
@@ -1867,6 +1880,7 @@ function sendModerationText(text, extra = {}) {
 function keyboardMain() {
   return { inline_keyboard: [
     ...(hasValidWebAppUrl() ? [[{ text: '🚀 Открыть CXRNER Mini App', web_app: { url: webAppLaunchUrl() }, style: 'primary' }]] : []),
+    [{ text: '❄️ Подать трек в COLD RUSH 001', callback_data: 'cold_rush_open', style: 'primary' }],
     [
       { text: '📀 Дистрибуция', callback_data: 'menu_distribution', style: 'primary' },
       { text: '📁 Мои релизы', callback_data: 'my_releases' }
@@ -2404,7 +2418,9 @@ function welcomeText() {
   return (
     '⚡ <b>CXRNER MUSIC</b>\n' +
     '<i>Экосистема дистрибуции, модерации и релизов.</i>\n\n' +
-    'Отправляй треки через Mini App или прямо в боте, отслеживай статусы модерации и получай UPC.'
+    'Отправляй музыку, управляй релизами и следи за статусами прямо в боте.\n\n' +
+    '❄️ <b>Открыт набор в COLD RUSH 001!</b>\n' +
+    '10 артистов · Приём до 3 декабря · Релиз 25 декабря.'
   );
 }
 
@@ -3850,6 +3866,7 @@ function resetAllSessions(uid, except = '') {
   if (except !== 'release') delete userForms[key];
   if (except !== 'cover') delete coverSessions[key];
   if (except !== 'promo') delete promoSessions[key];
+  if (except !== 'cold_rush') delete coldRushSessions[key];
   if (except !== 'link') delete linkAwaitSessions[key];
 }
 
@@ -4646,6 +4663,918 @@ async function handlePromoCallback(query, data) {
     await sendPromoStep(query.message.chat.id, uid);
     return true;
   }
+  return false;
+}
+
+// =============================================================================
+// COLD RUSH 001 — ISOLATED COMPILATION SUBMISSION & MODERATION MODULE
+// Does NOT modify regular distribution DB, release forms, or Mini App flows.
+// =============================================================================
+
+const COLD_RUSH_GENRES = [
+  'Jumpstyle',
+  'Phonk',
+  'Electronic',
+  'Hyperpop',
+  'Dark Wave',
+  'Hardstyle'
+];
+const COLD_RUSH_AUDIO_EXT_RE = /\.(wav|mp3|flac|m4a|aac|ogg|aiff|aif|opus|wma|zip|rar)$/i;
+
+function normalizeColdRushStatus(status) {
+  const s = clean(status).toLowerCase();
+  if (s === 'approved' || s === 'accepted') return 'approved';
+  if (s === 'rejected' || s === 'declined') return 'rejected';
+  return 'pending';
+}
+
+function coldRushStatusLabel(status) {
+  const s = normalizeColdRushStatus(status);
+  if (s === 'approved') return '✅ Принято в сборник';
+  if (s === 'rejected') return '❌ Отклонено';
+  return '🕓 На модерации';
+}
+
+function normalizeColdRushSubmission(raw = {}) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  const createdAt = clean(src.created_at) || new Date().toISOString();
+  const updatedAt = clean(src.updated_at) || createdAt;
+  return {
+    id: clean(src.id),
+    campaign_code: clean(src.campaign_code || COLD_RUSH_CAMPAIGN) || COLD_RUSH_CAMPAIGN,
+    telegram_id: clean(src.telegram_id),
+    telegram_username: clean(src.telegram_username).replace(/^@/, ''),
+    first_name: clean(src.first_name),
+    artist_name: clean(src.artist_name),
+    track_name: clean(src.track_name),
+    genre: clean(src.genre),
+    audio_source_type: clean(src.audio_source_type || (src.audio_file_id ? 'audio' : 'url')) || 'url',
+    audio_file_id: clean(src.audio_file_id),
+    audio_file_name: clean(src.audio_file_name),
+    audio_url: clean(src.audio_url),
+    social_url: clean(src.social_url),
+    rights_confirmed: src.rights_confirmed !== false,
+    status: normalizeColdRushStatus(src.status),
+    moderation_chat_id: clean(src.moderation_chat_id),
+    moderation_message_id: Number(src.moderation_message_id || 0) || 0,
+    moderator_id: clean(src.moderator_id),
+    moderator_username: clean(src.moderator_username).replace(/^@/, ''),
+    moderator_note: clean(src.moderator_note),
+    decided_at: clean(src.decided_at),
+    created_at: createdAt,
+    updated_at: updatedAt
+  };
+}
+
+function ensureColdRushDbShape() {
+  if (!coldRushDb || typeof coldRushDb !== 'object' || Array.isArray(coldRushDb)) {
+    coldRushDb = { submissions: [] };
+  }
+  const list = Array.isArray(coldRushDb.submissions) ? coldRushDb.submissions : [];
+  coldRushDb.submissions = list
+    .map((item) => normalizeColdRushSubmission(item))
+    .filter((item) => item.id && item.telegram_id);
+  return coldRushDb;
+}
+
+function saveColdRushDb() {
+  ensureColdRushDbShape();
+  saveJson(COLD_RUSH_FILE, coldRushDb);
+}
+
+function getUserColdRushSubmissions(uid) {
+  ensureColdRushDbShape();
+  const key = clean(uid);
+  return coldRushDb.submissions
+    .filter((item) => item.telegram_id === key && item.campaign_code === COLD_RUSH_CAMPAIGN)
+    .sort((a, b) => parseIsoTime(b.created_at) - parseIsoTime(a.created_at));
+}
+
+function getBlockingColdRushSubmission(uid) {
+  const list = getUserColdRushSubmissions(uid);
+  return list.find((item) => item.status === 'approved')
+    || list.find((item) => item.status === 'pending')
+    || null;
+}
+
+function findColdRushSubmissionById(id) {
+  ensureColdRushDbShape();
+  const key = clean(id);
+  return coldRushDb.submissions.find((item) => item.id === key) || null;
+}
+
+function generateColdRushId() {
+  ensureColdRushDbShape();
+  const existing = new Set(coldRushDb.submissions.map((item) => item.id));
+  const seqNum = coldRushDb.submissions.length + 1;
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    const seqPart = String(seqNum + attempt).padStart(3, '0');
+    const randPart = crypto.randomBytes(2).toString('hex').toUpperCase();
+    const candidate = `CR001-${seqPart}${randPart}`;
+    if (!existing.has(candidate)) return candidate;
+  }
+  return `CR001-${Date.now().toString(36).toUpperCase()}`;
+}
+
+function getColdRushSession(uid) {
+  return coldRushSessions[String(uid)] || null;
+}
+
+function resetColdRushSession(uid) {
+  delete coldRushSessions[String(uid)];
+}
+
+function createColdRushSession(uid, user) {
+  resetAllSessions(uid, 'cold_rush');
+  coldRushSessions[String(uid)] = {
+    uid: String(uid),
+    user,
+    step: 'artist',
+    data: {
+      artist_name: '',
+      track_name: '',
+      genre: '',
+      audio_source_type: '',
+      audio_file_id: '',
+      audio_file_name: '',
+      audio_url: '',
+      social_url: '',
+      rights_confirmed: false
+    }
+  };
+  return coldRushSessions[String(uid)];
+}
+
+function isColdRushSchemaMissingError(err) {
+  const txt = clean(err?.message || err);
+  return isSupabaseSchemaError(err) || /pgrst205|->\s*404\b/i.test(txt);
+}
+
+function buildColdRushSupabasePayload(sub) {
+  const n = normalizeColdRushSubmission(sub);
+  return {
+    id: n.id,
+    campaign_code: n.campaign_code,
+    telegram_id: n.telegram_id,
+    telegram_username: n.telegram_username,
+    first_name: n.first_name,
+    artist_name: n.artist_name,
+    track_name: n.track_name,
+    genre: n.genre,
+    audio_source_type: n.audio_source_type,
+    audio_file_id: n.audio_file_id,
+    audio_file_name: n.audio_file_name,
+    audio_url: n.audio_url,
+    social_url: n.social_url,
+    rights_confirmed: !!n.rights_confirmed,
+    status: n.status,
+    moderation_chat_id: n.moderation_chat_id,
+    moderation_message_id: n.moderation_message_id > 0 ? n.moderation_message_id : null,
+    moderator_id: n.moderator_id,
+    moderator_username: n.moderator_username,
+    moderator_note: n.moderator_note,
+    decided_at: clean(n.decided_at) || null,
+    created_at: n.created_at,
+    updated_at: n.updated_at
+  };
+}
+
+async function supabaseUpsertColdRushSubmission(sub) {
+  if (!SUPABASE_SYNC_ENABLED || !supabaseFeatureState.cold_rush) return false;
+  const row = buildColdRushSupabasePayload(sub);
+  if (!row.id || !row.telegram_id) return false;
+  try {
+    await supabaseRequest(`${SUPABASE_COLD_RUSH_TABLE}?on_conflict=id`, {
+      method: 'POST',
+      headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+      body: [row]
+    });
+    return true;
+  } catch (e) {
+    const errText = clean(e?.message || e);
+    console.error('[supabase] cold_rush upsert failed:', errText);
+    if (isColdRushSchemaMissingError(e)) disableSupabaseFeature('cold_rush', errText);
+    return false;
+  }
+}
+
+async function hydrateColdRushFromSupabase() {
+  if (!SUPABASE_SYNC_ENABLED || !supabaseFeatureState.cold_rush) return;
+  try {
+    ensureColdRushDbShape();
+    const remoteRows = await supabaseSelectAll(
+      SUPABASE_COLD_RUSH_TABLE,
+      'id,campaign_code,telegram_id,telegram_username,first_name,artist_name,track_name,genre,audio_source_type,audio_file_id,audio_file_name,audio_url,social_url,rights_confirmed,status,moderation_chat_id,moderation_message_id,moderator_id,moderator_username,moderator_note,decided_at,created_at,updated_at',
+      'created_at.asc'
+    );
+    const merged = new Map();
+    for (const localSub of coldRushDb.submissions) {
+      merged.set(localSub.id, normalizeColdRushSubmission(localSub));
+    }
+    for (const rawRow of remoteRows || []) {
+      const rem = normalizeColdRushSubmission(rawRow);
+      if (!rem.id || !rem.telegram_id) continue;
+      const cur = merged.get(rem.id);
+      if (!cur) {
+        merged.set(rem.id, rem);
+        continue;
+      }
+      const curTs = parseIsoTime(cur.updated_at || cur.created_at);
+      const remTs = parseIsoTime(rem.updated_at || rem.created_at);
+      const primary = remTs >= curTs ? rem : cur;
+      const secondary = remTs >= curTs ? cur : rem;
+      merged.set(rem.id, normalizeColdRushSubmission({
+        ...secondary,
+        ...primary,
+        moderation_message_id: primary.moderation_message_id || secondary.moderation_message_id || 0,
+        moderation_chat_id: primary.moderation_chat_id || secondary.moderation_chat_id || ''
+      }));
+    }
+    coldRushDb.submissions = Array.from(merged.values())
+      .sort((a, b) => parseIsoTime(a.created_at) - parseIsoTime(b.created_at));
+    saveColdRushDb();
+
+    // Push local-only submissions created before DB hydration if remote didn't have them
+    const remoteIds = new Set((remoteRows || []).map((r) => clean(r?.id)).filter(Boolean));
+    for (const localSub of coldRushDb.submissions) {
+      if (!remoteIds.has(localSub.id)) {
+        await supabaseUpsertColdRushSubmission(localSub);
+      }
+    }
+  } catch (e) {
+    const errText = clean(e?.message || e);
+    console.error('[supabase] cold_rush hydrate failed:', errText);
+    if (isColdRushSchemaMissingError(e)) disableSupabaseFeature('cold_rush', errText);
+  }
+}
+
+function formatColdRushSocialDisplay(socialRaw) {
+  const s = clean(socialRaw);
+  if (!s) return '—';
+  if (isHttpUrl(s)) return `<a href="${esc(s)}">${esc(shortTitle(s, 48))}</a>`;
+  return esc(s);
+}
+
+function buildColdRushModerationCardText(sub) {
+  const n = normalizeColdRushSubmission(sub);
+  const badge = n.status === 'approved'
+    ? 'APPROVED'
+    : n.status === 'rejected'
+      ? 'REJECTED'
+      : 'NEW SUBMISSION';
+  const headline = n.status === 'approved'
+    ? '❄️ <b>COLD RUSH 001 · Заявка принята</b>'
+    : n.status === 'rejected'
+      ? '❄️ <b>COLD RUSH 001 · Заявка отклонена</b>'
+      : '❄️ <b>COLD RUSH 001 · Новая подача от артиста</b>';
+  const tgHandle = n.telegram_username
+    ? `@${esc(n.telegram_username)} (<code>${esc(n.telegram_id)}</code>)`
+    : `<a href="tg://user?id=${esc(n.telegram_id)}">ID ${esc(n.telegram_id)}</a>`;
+  const audioLine = n.audio_url
+    ? `🔗 <a href="${esc(n.audio_url)}">Открыть демо по ссылке</a>`
+    : `🎵 <code>${esc(n.audio_file_name || 'track_demo.wav')}</code>`;
+
+  const lines = [
+    headline,
+    `🏷 <code>${badge}</code>  ·  🆔 <code>${esc(n.id)}</code>`,
+    '',
+    `Артист: <b>${esc(n.artist_name)}</b>`,
+    `Название трека: <b>${esc(n.track_name)}</b>`,
+    `Жанр: <b>${esc(n.genre)}</b>`,
+    `Telegram: ${tgHandle}`,
+    `Соцсеть / профиль: ${formatColdRushSocialDisplay(n.social_url)}`,
+    '',
+    '<b>Аудиоматериал</b>',
+    audioLine,
+    '<i>Права на материал подтверждены артистом при подаче.</i>',
+    '',
+    `Статус: <b>${coldRushStatusLabel(n.status)}</b>`
+  ];
+  if (n.status !== 'pending' && (n.moderator_username || n.moderator_id)) {
+    const modLabel = n.moderator_username ? `@${esc(n.moderator_username)}` : `ID ${esc(n.moderator_id)}`;
+    const decidedLabel = n.decided_at ? ` · ${esc(n.decided_at.slice(0, 16).replace('T', ' '))} UTC` : '';
+    lines.push(`Модератор: ${modLabel}${decidedLabel}`);
+  }
+  return lines.join('\n');
+}
+
+function buildColdRushModerationKeyboard(sub) {
+  const n = normalizeColdRushSubmission(sub);
+  if (n.status !== 'pending') {
+    return { inline_keyboard: [] };
+  }
+  return {
+    inline_keyboard: [[
+      { text: '✅ Принять', callback_data: `cr001_accept_${n.id}`, style: 'success' },
+      { text: '❌ Отклонить', callback_data: `cr001_reject_${n.id}`, style: 'danger' }
+    ]]
+  };
+}
+
+function buildColdRushIntroView(uid) {
+  const blocking = getBlockingColdRushSubmission(uid);
+  if (blocking) {
+    const audioText = blocking.audio_url
+      ? `<a href="${esc(blocking.audio_url)}">Ссылка на демо</a>`
+      : esc(blocking.audio_file_name || 'Аудиофайл прикреплён');
+    const note = blocking.status === 'approved'
+      ? '🎉 Поздравляем! Этот трек уже отобран в сборник COLD RUSH 001. Повторная подача не требуется.'
+      : '⏳ Заявка находится на рассмотрении у модераторов CXRNER MUSIC. Как только будет решение, бот пришлёт уведомление сюда.\n\nПовторная отправка заблокирована, пока текущая заявка активна.';
+    return {
+      text:
+        `❄️ <b>COLD RUSH 001 — Статус твоей заявки</b>\n\n` +
+        `🆔 ID заявки: <code>${esc(blocking.id)}</code>\n` +
+        `📌 Статус: <b>${coldRushStatusLabel(blocking.status)}</b>\n\n` +
+        `👤 Артист: <b>${esc(blocking.artist_name)}</b>\n` +
+        `🎵 Трек: <b>${esc(blocking.track_name)}</b>\n` +
+        `🎛 Жанр: <b>${esc(blocking.genre)}</b>\n` +
+        `🎧 Материал: ${audioText}\n\n` +
+        note,
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '⬅️ Главное меню', callback_data: 'main' }]
+        ]
+      }
+    };
+  }
+
+  return {
+    text:
+      `❄️ <b>COLD RUSH 001 — Набор в сборник</b>\n\n` +
+      `👥 <b>Участники:</b> 10 артистов\n` +
+      `⏳ <b>Приём заявок:</b> до 3 декабря\n` +
+      `📀 <b>Релиз сборника:</b> 25 декабря\n\n` +
+      `<b>Требования к подаче (Шаг 1/7):</b>\n` +
+      `• Оригинальный трек или актуальное демо (WAV, MP3, FLAC или ссылка)\n` +
+      `• Современное звучание (Jumpstyle, Phonk, Electronic, Hyperpop, Dark Wave и др.)\n` +
+      `• 100% авторские права и возможность коммерческого релиза\n` +
+      `• Один артист — одна активная заявка в отбор`,
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: '❄️ Подать трек в COLD RUSH 001', callback_data: 'cold_rush_start', style: 'primary' }],
+        [{ text: '⬅️ Главное меню', callback_data: 'main' }]
+      ]
+    }
+  };
+}
+
+async function openColdRushMenu(chatId, uid, editFn = null) {
+  const view = buildColdRushIntroView(uid);
+  if (typeof editFn === 'function') {
+    await editFn(view.text, view.reply_markup);
+    return;
+  }
+  await sendText(chatId, view.text, { reply_markup: view.reply_markup });
+}
+
+function coldRushCancelKeyboard() {
+  return {
+    inline_keyboard: [[{ text: '❌ Отменить подачу', callback_data: 'cold_rush_cancel' }]]
+  };
+}
+
+function coldRushGenreKeyboard() {
+  const rows = [];
+  for (let i = 0; i < COLD_RUSH_GENRES.length; i += 2) {
+    const pair = COLD_RUSH_GENRES.slice(i, i + 2).map((label, offset) => ({
+      text: label,
+      callback_data: `cold_rush_genre_${i + offset}`
+    }));
+    rows.push(pair);
+  }
+  rows.push([{ text: '❌ Отменить подачу', callback_data: 'cold_rush_cancel' }]);
+  return { inline_keyboard: rows };
+}
+
+function buildColdRushSummaryText(s) {
+  const d = s.data;
+  const audioLabel = d.audio_url
+    ? `<a href="${esc(d.audio_url)}">${esc(shortTitle(d.audio_url, 48))}</a>`
+    : `🎵 <code>${esc(d.audio_file_name || 'track_demo')}</code>`;
+  return (
+    `❄️ <b>Шаг 7/7 — Проверка и отправка заявки</b>\n\n` +
+    `Проверь данные перед отправкой в отбор <b>COLD RUSH 001</b>:\n\n` +
+    `👤 Артист: <b>${esc(d.artist_name)}</b>\n` +
+    `🎵 Трек: <b>${esc(d.track_name)}</b>\n` +
+    `🎛 Жанр: <b>${esc(d.genre)}</b>\n` +
+    `🎧 Аудиоматериал: ${audioLabel}\n` +
+    `🌐 Соцсеть / профиль: ${formatColdRushSocialDisplay(d.social_url)}\n` +
+    `✅ Авторство и права: <b>Подтверждены</b>\n\n` +
+    `Нажми кнопку ниже, чтобы отправить трек на модерацию.`
+  );
+}
+
+async function sendColdRushStepPrompt(chatId, uid) {
+  const s = getColdRushSession(uid);
+  if (!s) return;
+
+  if (s.step === 'artist') {
+    await sendText(
+      chatId,
+      `👤 <b>Шаг 2/7 — Имя / ник артиста</b>\n\nВведите сценическое имя (как оно должно быть указано в сборнике <b>COLD RUSH 001</b>):`,
+      { reply_markup: coldRushCancelKeyboard() }
+    );
+    return;
+  }
+
+  if (s.step === 'track') {
+    await sendText(
+      chatId,
+      `🎵 <b>Шаг 2/7 — Название трека</b>\n\nВведите название трека для <b>${esc(s.data.artist_name)}</b>:`,
+      { reply_markup: coldRushCancelKeyboard() }
+    );
+    return;
+  }
+
+  if (s.step === 'genre') {
+    await sendText(
+      chatId,
+      `🎛 <b>Шаг 3/7 — Выбор жанра</b>\n\nВыберите жанр кнопкой ниже или напишите свой вариант текстом:`,
+      { reply_markup: coldRushGenreKeyboard() }
+    );
+    return;
+  }
+
+  if (s.step === 'audio') {
+    await sendText(
+      chatId,
+      `🎧 <b>Шаг 4/7 — Загрузка аудиофайла или демо</b>\n\n` +
+      `Отправьте в чат:\n` +
+      `• аудиофайл / документ (<b>WAV, MP3, FLAC, M4A</b>) или голосовое демо\n` +
+      `• <b>либо</b> прямую ссылку (<code>https://...</code> на Google Drive, Яндекс Диск, SoundCloud, Dropbox)`,
+      { reply_markup: coldRushCancelKeyboard() }
+    );
+    return;
+  }
+
+  if (s.step === 'social') {
+    await sendText(
+      chatId,
+      `🌐 <b>Шаг 5/7 — Ссылка на соцсеть / профиль артиста</b>\n\n` +
+      `Отправьте ссылку на ваш профиль (Telegram, VK, SoundCloud, Instagram, Spotify) или <code>@username</code>:`,
+      { reply_markup: coldRushCancelKeyboard() }
+    );
+    return;
+  }
+
+  if (s.step === 'rights') {
+    await sendText(
+      chatId,
+      `🛡 <b>Шаг 6/7 — Подтверждение авторства и прав</b>\n\n` +
+      `Нажимая кнопку ниже, вы подтверждаете, что:\n` +
+      `• являетесь автором и правообладателем отправленного материала;\n` +
+      `• трек очищен от прав третьих лиц (биты/сэмплы без разрешения);\n` +
+      `• разрешаете CXRNER MUSIC рассмотреть и издать трек в сборнике <b>COLD RUSH 001</b> при успешном прохождении отбора.`,
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✅ Подтверждаю авторство и права', callback_data: 'cold_rush_rights_confirm', style: 'success' }],
+            [{ text: '❌ Отменить подачу', callback_data: 'cold_rush_cancel' }]
+          ]
+        }
+      }
+    );
+    return;
+  }
+
+  if (s.step === 'confirm') {
+    await sendText(
+      chatId,
+      buildColdRushSummaryText(s),
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🚀 Отправить заявку в COLD RUSH 001', callback_data: 'cold_rush_submit', style: 'primary' }],
+            [{ text: '🔄 Заполнить заново', callback_data: 'cold_rush_start' }],
+            [{ text: '❌ Отменить подачу', callback_data: 'cold_rush_cancel' }]
+          ]
+        }
+      }
+    );
+  }
+}
+
+function normalizeColdRushSocialInput(raw) {
+  const s = clean(raw);
+  if (!s || s.length < 2 || s.length > 250) return '';
+  if (isHttpUrl(s)) return s;
+  if (/^@[A-Za-z0-9_]{3,32}$/.test(s)) return s;
+  if (/^(?:t\.me|vk\.com|instagram\.com|soundcloud\.com|open\.spotify\.com|music\.yandex\.|youtube\.com|youtu\.be|tiktok\.com)\//i.test(s)) {
+    return `https://${s}`;
+  }
+  return '';
+}
+
+function extractColdRushAudioFromMsg(msg) {
+  if (msg?.audio?.file_id) {
+    const titlePart = clean(msg.audio.title);
+    const perfPart = clean(msg.audio.performer);
+    const fallbackName = titlePart ? `${perfPart ? `${perfPart} - ` : ''}${titlePart}.mp3` : 'track_demo.mp3';
+    return {
+      ok: true,
+      source_type: 'audio',
+      file_id: clean(msg.audio.file_id),
+      file_name: clean(msg.audio.file_name || fallbackName),
+      audio_url: ''
+    };
+  }
+  if (msg?.document?.file_id) {
+    const fname = clean(msg.document.file_name || 'track_demo');
+    const mime = clean(msg.document.mime_type).toLowerCase();
+    if (!mime.startsWith('audio/') && !COLD_RUSH_AUDIO_EXT_RE.test(fname)) {
+      return {
+        ok: false,
+        reason: 'Этот файл не похож на аудио. Отправьте WAV / MP3 / FLAC / M4A или прямую ссылку https://.'
+      };
+    }
+    return {
+      ok: true,
+      source_type: 'document',
+      file_id: clean(msg.document.file_id),
+      file_name: fname,
+      audio_url: ''
+    };
+  }
+  if (msg?.voice?.file_id) {
+    return {
+      ok: true,
+      source_type: 'voice',
+      file_id: clean(msg.voice.file_id),
+      file_name: 'voice_demo.ogg',
+      audio_url: ''
+    };
+  }
+  const text = clean(msg?.text);
+  if (isHttpUrl(text)) {
+    return {
+      ok: true,
+      source_type: 'url',
+      file_id: '',
+      file_name: '',
+      audio_url: text
+    };
+  }
+  return {
+    ok: false,
+    reason: 'Прикрепите аудиофайл (WAV, MP3, FLAC, документ или голосовое) либо отправьте ссылку начинающуюся с https://.'
+  };
+}
+
+async function handleColdRushMessage(msg) {
+  if (Number(msg?.chat?.id || 0) === Number(MOD_CHAT)) return false;
+  const uid = clean(msg?.from?.id);
+  const s = getColdRushSession(uid);
+  if (!s) return false;
+
+  const chatId = msg.chat.id;
+  const text = clean(msg.text);
+
+  if (text === '/cancel') {
+    resetColdRushSession(uid);
+    await sendText(chatId, 'Подача заявки в <b>COLD RUSH 001</b> отменена.', {
+      reply_markup: { inline_keyboard: [[{ text: '⬅️ Главное меню', callback_data: 'main' }]] }
+    });
+    return true;
+  }
+  if (text.startsWith('/') && text !== '/cancel') return false;
+
+  if (s.step === 'artist') {
+    if (!text || text.length > 120) {
+      await sendText(chatId, 'Введите имя артиста текстом (от 1 до 120 символов).');
+      return true;
+    }
+    s.data.artist_name = text;
+    s.step = 'track';
+    await sendColdRushStepPrompt(chatId, uid);
+    return true;
+  }
+
+  if (s.step === 'track') {
+    if (!text || text.length > 150) {
+      await sendText(chatId, 'Введите название трека текстом (от 1 до 150 символов).');
+      return true;
+    }
+    s.data.track_name = text;
+    s.step = 'genre';
+    await sendColdRushStepPrompt(chatId, uid);
+    return true;
+  }
+
+  if (s.step === 'genre') {
+    if (!text || text.length < 2 || text.length > 60) {
+      await sendText(chatId, 'Выберите жанр кнопкой выше или напишите название жанра (2–60 символов).');
+      return true;
+    }
+    s.data.genre = text;
+    s.step = 'audio';
+    await sendColdRushStepPrompt(chatId, uid);
+    return true;
+  }
+
+  if (s.step === 'audio') {
+    const parsed = extractColdRushAudioFromMsg(msg);
+    if (!parsed.ok) {
+      await sendText(chatId, parsed.reason);
+      return true;
+    }
+    s.data.audio_source_type = parsed.source_type;
+    s.data.audio_file_id = parsed.file_id;
+    s.data.audio_file_name = parsed.file_name;
+    s.data.audio_url = parsed.audio_url;
+    s.step = 'social';
+    await sendColdRushStepPrompt(chatId, uid);
+    return true;
+  }
+
+  if (s.step === 'social') {
+    const normalized = normalizeColdRushSocialInput(text);
+    if (!normalized) {
+      await sendText(
+        chatId,
+        'Укажите корректную ссылку на профиль/соцсеть (например <code>https://vk.com/...</code> или <code>https://t.me/...</code>) или <code>@username</code>.'
+      );
+      return true;
+    }
+    s.data.social_url = normalized;
+    s.step = 'rights';
+    await sendColdRushStepPrompt(chatId, uid);
+    return true;
+  }
+
+  if (s.step === 'rights') {
+    await sendText(chatId, 'Для продолжения нажмите кнопку «✅ Подтверждаю авторство и права» выше или /cancel.');
+    return true;
+  }
+
+  if (s.step === 'confirm') {
+    await sendText(chatId, 'Нажмите «🚀 Отправить заявку в COLD RUSH 001» на сообщении выше или /cancel.');
+    return true;
+  }
+
+  return true;
+}
+
+async function handleColdRushCallback(query, data) {
+  if (!data.startsWith('cold_rush_') && !data.startsWith('cr001_')) return false;
+
+  const chatId = query?.message?.chat?.id;
+  const uid = clean(query?.from?.id);
+  const edit = async (text, markup) => {
+    try {
+      await tg('editMessageText', {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: markup
+      });
+    } catch (e) {
+      const em = clean(e?.message || e);
+      if (em.includes('message is not modified')) return;
+      throw e;
+    }
+  };
+
+  if (data === 'cold_rush_open') {
+    await safeAnswerCallback(query.id);
+    await openColdRushMenu(chatId, uid, edit);
+    return true;
+  }
+
+  if (data === 'cold_rush_cancel') {
+    resetColdRushSession(uid);
+    await safeAnswerCallback(query.id, { text: 'Подача отменена' });
+    await sendText(chatId, 'Подача заявки в <b>COLD RUSH 001</b> отменена.', {
+      reply_markup: { inline_keyboard: [[{ text: '⬅️ Главное меню', callback_data: 'main' }]] }
+    });
+    return true;
+  }
+
+  if (data === 'cold_rush_start') {
+    const blocking = getBlockingColdRushSubmission(uid);
+    if (blocking) {
+      await safeAnswerCallback(query.id, {
+        text: `У вас уже есть заявка ${blocking.id} (${coldRushStatusLabel(blocking.status)}).`,
+        show_alert: true
+      });
+      await openColdRushMenu(chatId, uid, edit);
+      return true;
+    }
+    createColdRushSession(uid, query.from);
+    await safeAnswerCallback(query.id);
+    await sendColdRushStepPrompt(chatId, uid);
+    return true;
+  }
+
+  if (data.startsWith('cold_rush_genre_')) {
+    const idx = Number(data.slice('cold_rush_genre_'.length));
+    const genre = COLD_RUSH_GENRES[idx];
+    const s = getColdRushSession(uid);
+    if (!s || !genre) {
+      await safeAnswerCallback(query.id, { text: 'Сессия подачи не найдена. Начните заново.', show_alert: true });
+      return true;
+    }
+    s.data.genre = genre;
+    s.step = 'audio';
+    await safeAnswerCallback(query.id, { text: `Жанр: ${genre}` });
+    await sendColdRushStepPrompt(chatId, uid);
+    return true;
+  }
+
+  if (data === 'cold_rush_rights_confirm') {
+    const s = getColdRushSession(uid);
+    if (!s) {
+      await safeAnswerCallback(query.id, { text: 'Сессия подачи устарела. Откройте COLD RUSH 001 заново.', show_alert: true });
+      return true;
+    }
+    s.data.rights_confirmed = true;
+    s.step = 'confirm';
+    await safeAnswerCallback(query.id, { text: 'Права подтверждены' });
+    await sendColdRushStepPrompt(chatId, uid);
+    return true;
+  }
+
+  if (data === 'cold_rush_submit') {
+    const s = getColdRushSession(uid);
+    if (!s || s.step !== 'confirm' || !s.data.rights_confirmed) {
+      await safeAnswerCallback(query.id, { text: 'Заполните все шаги анкеты сначала.', show_alert: true });
+      return true;
+    }
+    const blocking = getBlockingColdRushSubmission(uid);
+    if (blocking) {
+      resetColdRushSession(uid);
+      await safeAnswerCallback(query.id, {
+        text: `Заявка ${blocking.id} уже отправлена.`,
+        show_alert: true
+      });
+      await openColdRushMenu(chatId, uid);
+      return true;
+    }
+    if (coldRushSubmittingUsers.has(uid)) {
+      await safeAnswerCallback(query.id, { text: 'Отправка уже выполняется...' });
+      return true;
+    }
+
+    coldRushSubmittingUsers.add(uid);
+    try {
+      await safeAnswerCallback(query.id, { text: 'Отправляю заявку...' });
+      await ensureModerationHealth(false);
+      const now = new Date().toISOString();
+      const sub = normalizeColdRushSubmission({
+        id: generateColdRushId(),
+        campaign_code: COLD_RUSH_CAMPAIGN,
+        telegram_id: uid,
+        telegram_username: clean(query.from?.username).replace(/^@/, ''),
+        first_name: clean(query.from?.first_name),
+        artist_name: s.data.artist_name,
+        track_name: s.data.track_name,
+        genre: s.data.genre,
+        audio_source_type: s.data.audio_source_type,
+        audio_file_id: s.data.audio_file_id,
+        audio_file_name: s.data.audio_file_name,
+        audio_url: s.data.audio_url,
+        social_url: s.data.social_url,
+        rights_confirmed: true,
+        status: 'pending',
+        created_at: now,
+        updated_at: now
+      });
+
+      const modCard = await sendModerationText(buildColdRushModerationCardText(sub), {
+        reply_markup: buildColdRushModerationKeyboard(sub)
+      });
+      sub.moderation_chat_id = clean(MOD_CHAT);
+      sub.moderation_message_id = Number(modCard?.message_id || 0) || 0;
+
+      if (sub.audio_file_id) {
+        const mediaPayload = moderationPayload({
+          caption: `🎧 ${sub.artist_name} — ${sub.track_name} · ${sub.id}`,
+          ...(sub.moderation_message_id > 0 ? { reply_to_message_id: sub.moderation_message_id } : {})
+        });
+        try {
+          if (sub.audio_source_type === 'audio') {
+            await tg('sendAudio', { ...mediaPayload, audio: sub.audio_file_id });
+          } else if (sub.audio_source_type === 'voice') {
+            await tg('sendVoice', { ...mediaPayload, voice: sub.audio_file_id });
+          } else {
+            await tg('sendDocument', { ...mediaPayload, document: sub.audio_file_id });
+          }
+        } catch (attachErr) {
+          console.warn(`[cold_rush] audio attach warning (${sub.id}):`, clean(attachErr?.message || attachErr));
+          if (sub.audio_source_type === 'audio') {
+            await tg('sendDocument', { ...mediaPayload, document: sub.audio_file_id }).catch(() => {});
+          }
+        }
+      }
+
+      ensureColdRushDbShape();
+      coldRushDb.submissions.push(sub);
+      saveColdRushDb();
+      await supabaseUpsertColdRushSubmission(sub);
+      resetColdRushSession(uid);
+
+      await sendText(
+        chatId,
+        `✅ <b>Заявка в COLD RUSH 001 отправлена!</b>\n\n` +
+        `🆔 ID заявки: <code>${esc(sub.id)}</code>\n` +
+        `👤 Артист: <b>${esc(sub.artist_name)}</b>\n` +
+        `🎵 Трек: <b>${esc(sub.track_name)}</b>\n` +
+        `🎛 Жанр: <b>${esc(sub.genre)}</b>\n` +
+        `📌 Статус: <b>🕓 На модерации</b>\n\n` +
+        `Мы уведомим вас в этом чате, как только команда рассмотрит заявку.`,
+        { reply_markup: { inline_keyboard: [[{ text: '⬅️ Главное меню', callback_data: 'main' }]] } }
+      );
+    } catch (e) {
+      const msgErr = clean(e?.message || e);
+      console.error('[COLD_RUSH] submit failed:', msgErr || e);
+      await verifyModerationChatAccess(true).catch(() => {});
+      const hint = moderationErrorHint(msgErr);
+      await sendText(
+        chatId,
+        `❌ Не удалось отправить заявку в модерацию.${hint ? `\n${esc(hint)}` : '\nПопробуйте нажать «Отправить» ещё раз.'}`
+      );
+    } finally {
+      coldRushSubmittingUsers.delete(uid);
+    }
+    return true;
+  }
+
+  // Moderation actions: cr001_accept_<ID> / cr001_reject_<ID>
+  const modMatch = /^cr001_(accept|reject)_([A-Za-z0-9_-]+)$/.exec(data);
+  if (modMatch) {
+    const action = modMatch[1];
+    const subId = clean(modMatch[2]);
+    if (!(await canModerate(query.from?.id, query.message))) {
+      await safeAnswerCallback(query.id, { text: 'Доступ только для команды модерации.', show_alert: true });
+      return true;
+    }
+    const sub = findColdRushSubmissionById(subId);
+    if (!sub) {
+      await safeAnswerCallback(query.id, { text: `Заявка ${subId} не найдена.`, show_alert: true });
+      return true;
+    }
+    if (coldRushModLocks.has(subId)) {
+      await safeAnswerCallback(query.id, { text: 'Заявка уже обрабатывается...' });
+      return true;
+    }
+    if (sub.status !== 'pending') {
+      await safeAnswerCallback(query.id, {
+        text: `Заявка уже обработана: ${coldRushStatusLabel(sub.status)}`,
+        show_alert: true
+      });
+      try {
+        await edit(buildColdRushModerationCardText(sub), buildColdRushModerationKeyboard(sub));
+      } catch {}
+      return true;
+    }
+
+    coldRushModLocks.add(subId);
+    try {
+      const nextStatus = action === 'accept' ? 'approved' : 'rejected';
+      const now = new Date().toISOString();
+      sub.status = nextStatus;
+      sub.moderator_id = uid;
+      sub.moderator_username = clean(query.from?.username).replace(/^@/, '');
+      sub.decided_at = now;
+      sub.updated_at = now;
+
+      saveColdRushDb();
+      await supabaseUpsertColdRushSubmission(sub);
+
+      try {
+        await edit(buildColdRushModerationCardText(sub), buildColdRushModerationKeyboard(sub));
+      } catch (editErr) {
+        console.warn(`[cold_rush] moderation edit warning (${subId}):`, clean(editErr?.message || editErr));
+      }
+
+      if (sub.telegram_id) {
+        const artistMsg = nextStatus === 'approved'
+          ? `❄️ <b>COLD RUSH 001 — Заявка принята!</b>\n\n` +
+            `Поздравляем! Трек <b>«${esc(sub.track_name)}»</b> (${esc(sub.artist_name)}) прошёл отбор в сборник <b>COLD RUSH 001</b>.\n` +
+            `🆔 ID заявки: <code>${esc(sub.id)}</code>\n\n` +
+            `Команда CXRNER MUSIC свяжется с тобой в Telegram для следующих шагов к релизу 25 декабря.`
+          : `❄️ <b>COLD RUSH 001 — Результат отбора</b>\n\n` +
+            `Спасибо за подачу трека <b>«${esc(sub.track_name)}»</b> (${esc(sub.artist_name)}).\n` +
+            `🆔 ID заявки: <code>${esc(sub.id)}</code>\n` +
+            `📌 Статус: <b>❌ Отклонено</b>\n\n` +
+            `К сожалению, трек не вошёл в текущий сборник COLD RUSH 001. Вы можете выпустить его через обычную 📀 Дистрибуцию или подать другой материал.`;
+        await sendText(sub.telegram_id, artistMsg, {
+          reply_markup: { inline_keyboard: [[{ text: '⬅️ Главное меню', callback_data: 'main' }]] }
+        }).catch((dmErr) => {
+          console.warn(`[cold_rush] artist DM notify warning (${sub.telegram_id}):`, clean(dmErr?.message || dmErr));
+        });
+      }
+
+      await safeAnswerCallback(query.id, {
+        text: nextStatus === 'approved' ? `✅ Заявка ${sub.id} принята` : `❌ Заявка ${sub.id} отклонена`
+      });
+    } finally {
+      coldRushModLocks.delete(subId);
+    }
+    return true;
+  }
+
   return false;
 }
 
@@ -6234,6 +7163,9 @@ async function onMessage(msg) {
   }
 
   if (await handleModerationReplyMessage(msg)) return;
+  if (!(text && (isDirectSyncCodeText(text) || (Number(linkAwaitSessions[uid] || 0) > 0 && (Date.now() - Number(linkAwaitSessions[uid] || 0)) < 300000)))) {
+    if (await handleColdRushMessage(msg)) return;
+  }
   if (!text) return;
 
   // PRIORITY 1: Account synchronization commands and codes
@@ -6400,8 +7332,12 @@ async function onMessage(msg) {
     await startPromoFlow(chatId, uid, msg.from);
     return;
   }
+  if (text === '/coldrush') {
+    await openColdRushMenu(chatId, uid);
+    return;
+  }
   if (text === '/cancel') {
-    const hadAny = !!(getFormSession(uid) || getCoverSession(uid) || getPromoSession(uid) || hasBroadcastSession(uid) || linkAwaitSessions[uid]);
+    const hadAny = !!(getFormSession(uid) || getCoverSession(uid) || getPromoSession(uid) || getColdRushSession(uid) || hasBroadcastSession(uid) || linkAwaitSessions[uid]);
     resetAllSessions(uid);
     setBroadcastSession(uid, false);
     await sendText(chatId, hadAny ? 'Текущее действие отменено.' : 'Нет активной анкеты.');
@@ -6420,13 +7356,14 @@ async function onCallback(query) {
   const data = clean(query.data);
   const chatId = query?.message?.chat?.id;
   if (!data || !chatId) return;
-  const deferAnswer = /^m_/.test(data);
+  const deferAnswer = /^(?:m_|cr001_|cold_rush_)/.test(data);
   if (!deferAnswer) {
     try { await tg('answerCallbackQuery', { callback_query_id: query.id }, { noRateLimitRetry: true }); } catch {}
   }
 
   if (await handleFormCallback(query, data)) return;
   if (await handlePromoCallback(query, data)) return;
+  if (await handleColdRushCallback(query, data)) return;
 
   const edit = async (text, markup) => {
     try {
@@ -9549,6 +10486,7 @@ async function registerModerationCommands() {
   ];
   const privateCommands = [
     { command: 'start', description: 'Главное меню CXRNER MUSIC' },
+    { command: 'coldrush', description: 'Подать трек в COLD RUSH 001' },
     { command: 'link', description: 'Привязать кабинет сайта по коду (/link CX-...)' },
     { command: 'release', description: 'Отправить релиз на дистрибуцию' },
     { command: 'my', description: 'Мои релизы и статусы' },
@@ -9586,61 +10524,78 @@ async function registerModerationCommands() {
   }
 }
 
-(async () => {
-  fs.mkdirSync(path.resolve(ROOT, 'webapp/data'), { recursive: true });
-  // Start the Mini App before optional remote hydration so a Supabase DNS
-  // outage cannot prevent the web interface and health checks from opening.
-  startStaticServer();
-  const imported = importBackupsIntoDb();
-  console.info(`[bot] CXRNER Node fallback bot started build=${BOT_BUILD_VERSION} commit=${BOT_DEPLOY_INFO.commit || 'none'}`);
-  console.info(`[bot] moderation chat: ${MOD_CHAT}`);
-  console.info(`[bot] admin ids: ${ADMIN_IDS.join(', ')}`);
-  if (imported.added || imported.merged) {
-    console.info(`[bot] backup import: added=${imported.added}, merged=${imported.merged}`);
-  }
-  if (SUPABASE_SYNC_ENABLED) {
-    const keyLen = (SUPABASE_SERVICE_ROLE_KEY || '').length;
-    console.info(`[bot] supabase sync: enabled (${SUPABASE_URL})`);
-    console.info(`[bot] supabase key: length=${keyLen}${keyLen < 180 ? ' (возможно anon или обрезка — нужен service_role)' : ''}`);
-    console.info(
-      `[bot] supabase tables: ${SUPABASE_RELEASES_TABLE}, ${SUPABASE_CABINET_TABLE}, ` +
-      `${SUPABASE_FORMS_TABLE}, ${SUPABASE_USERS_TABLE}, ${SUPABASE_PUBLIC_RELEASES_TABLE}`
-    );
-    console.info(
-      `[bot] supabase fetch: timeout=${SUPABASE_FETCH_TIMEOUT_MS}ms` +
-      ` retries=${SUPABASE_FETCH_RETRIES} delay=${SUPABASE_FETCH_RETRY_DELAY_MS}ms` +
-      ` chunk=${SUPABASE_SYNC_CHUNK_SIZE} chunkDelay=${SUPABASE_SYNC_CHUNK_DELAY_MS}ms`
-    );
-  } else {
-    console.info('[bot] supabase sync: disabled');
-  }
-  console.info(`[bot] telegram api base: ${TELEGRAM_API_BASE}`);
-  console.info(`[bot] tg fetch: timeout=${TG_FETCH_TIMEOUT_MS}ms retries=${TG_FETCH_RETRIES}`);
-  console.info(`[bot] moderation thread: ${MODERATION_THREAD_ID > 0 ? MODERATION_THREAD_ID : 'default'}`);
-  if (WEBAPP_URL) console.info(`[bot] webapp url: ${WEBAPP_URL}`);
+if (process.env.CXRNER_BOT_TEST_MODE === '1') {
+  module.exports = {
+    BOT_BUILD_VERSION,
+    keyboardMain,
+    welcomeText,
+    onMessage,
+    onCallback,
+    coldRushDb,
+    coldRushSessions,
+    getBlockingColdRushSubmission,
+    findColdRushSubmissionById,
+    hydrateColdRushFromSupabase,
+    resetAllSessions,
+    supabaseFeatureState
+  };
+} else {
+  (async () => {
+    fs.mkdirSync(path.resolve(ROOT, 'webapp/data'), { recursive: true });
+    // Start the Mini App before optional remote hydration so a Supabase DNS
+    // outage cannot prevent the web interface and health checks from opening.
+    startStaticServer();
+    const imported = importBackupsIntoDb();
+    console.info(`[bot] CXRNER Node fallback bot started build=${BOT_BUILD_VERSION} commit=${BOT_DEPLOY_INFO.commit || 'none'}`);
+    console.info(`[bot] moderation chat: ${MOD_CHAT}`);
+    console.info(`[bot] admin ids: ${ADMIN_IDS.join(', ')}`);
+    if (imported.added || imported.merged) {
+      console.info(`[bot] backup import: added=${imported.added}, merged=${imported.merged}`);
+    }
+    if (SUPABASE_SYNC_ENABLED) {
+      const keyLen = (SUPABASE_SERVICE_ROLE_KEY || '').length;
+      console.info(`[bot] supabase sync: enabled (${SUPABASE_URL})`);
+      console.info(`[bot] supabase key: length=${keyLen}${keyLen < 180 ? ' (возможно anon или обрезка — нужен service_role)' : ''}`);
+      console.info(
+        `[bot] supabase tables: ${SUPABASE_RELEASES_TABLE}, ${SUPABASE_CABINET_TABLE}, ` +
+        `${SUPABASE_FORMS_TABLE}, ${SUPABASE_USERS_TABLE}, ${SUPABASE_PUBLIC_RELEASES_TABLE}, ${SUPABASE_COLD_RUSH_TABLE}`
+      );
+      console.info(
+        `[bot] supabase fetch: timeout=${SUPABASE_FETCH_TIMEOUT_MS}ms` +
+        ` retries=${SUPABASE_FETCH_RETRIES} delay=${SUPABASE_FETCH_RETRY_DELAY_MS}ms` +
+        ` chunk=${SUPABASE_SYNC_CHUNK_SIZE} chunkDelay=${SUPABASE_SYNC_CHUNK_DELAY_MS}ms`
+      );
+    } else {
+      console.info('[bot] supabase sync: disabled');
+    }
+    console.info(`[bot] telegram api base: ${TELEGRAM_API_BASE}`);
+    console.info(`[bot] tg fetch: timeout=${TG_FETCH_TIMEOUT_MS}ms retries=${TG_FETCH_RETRIES}`);
+    console.info(`[bot] moderation thread: ${MODERATION_THREAD_ID > 0 ? MODERATION_THREAD_ID : 'default'}`);
+    if (WEBAPP_URL) console.info(`[bot] webapp url: ${WEBAPP_URL}`);
 
-  // Register commands & verify chat access BEFORE slower Supabase sync so the
-  // Telegram / command menu and health state update within ~1s of boot.
-  await verifyModerationChatAccess();
-  await registerModerationCommands();
-  if (SUPABASE_SYNC_ENABLED) {
-    await hydrateFromSupabase();
-  }
-  exportReleases();
-  exportCabinet();
-  if (SUPABASE_SYNC_ENABLED) {
-    void syncSupabaseNow('startup').catch((err) => {
-      console.warn(`[bot] background startup supabase sync warning: ${shortTgError(err)}`);
-    });
-  }
-  try { await tg('deleteWebhook', { drop_pending_updates: false }); } catch (err) {
-    console.warn(`[bot] deleteWebhook warning: ${shortTgError(err)}`);
-  }
-  const bootAutoPinTimer = setTimeout(() => void reconcilePendingWebFormsAndPins().catch(() => {}), 4000);
-  if (typeof bootAutoPinTimer?.unref === 'function') bootAutoPinTimer.unref();
-  const periodicAutoPinTimer = setInterval(() => void reconcilePendingWebFormsAndPins().catch(() => {}), 45000);
-  if (typeof periodicAutoPinTimer?.unref === 'function') periodicAutoPinTimer.unref();
-  process.on('SIGINT', () => { stopping = true; process.exit(0); });
-  process.on('SIGTERM', () => { stopping = true; process.exit(0); });
-  await loop();
-})();
+    // Register commands & verify chat access BEFORE slower Supabase sync so the
+    // Telegram / command menu and health state update within ~1s of boot.
+    await verifyModerationChatAccess();
+    await registerModerationCommands();
+    if (SUPABASE_SYNC_ENABLED) {
+      await hydrateFromSupabase();
+    }
+    exportReleases();
+    exportCabinet();
+    if (SUPABASE_SYNC_ENABLED) {
+      void syncSupabaseNow('startup').catch((err) => {
+        console.warn(`[bot] background startup supabase sync warning: ${shortTgError(err)}`);
+      });
+    }
+    try { await tg('deleteWebhook', { drop_pending_updates: false }); } catch (err) {
+      console.warn(`[bot] deleteWebhook warning: ${shortTgError(err)}`);
+    }
+    const bootAutoPinTimer = setTimeout(() => void reconcilePendingWebFormsAndPins().catch(() => {}), 4000);
+    if (typeof bootAutoPinTimer?.unref === 'function') bootAutoPinTimer.unref();
+    const periodicAutoPinTimer = setInterval(() => void reconcilePendingWebFormsAndPins().catch(() => {}), 45000);
+    if (typeof periodicAutoPinTimer?.unref === 'function') periodicAutoPinTimer.unref();
+    process.on('SIGINT', () => { stopping = true; process.exit(0); });
+    process.on('SIGTERM', () => { stopping = true; process.exit(0); });
+    await loop();
+  })();
+}
