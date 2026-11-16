@@ -322,7 +322,7 @@ const FORM_STATUS = {
   APPROVED: 'approved',
   REJECTED: 'rejected'
 };
-const BOT_BUILD_VERSION = '2026-11-16-ui-v10';
+const BOT_BUILD_VERSION = '2026-11-16-ui-v11';
 const BOT_BUILD_RELEASE_NOTE = 'Mini App 4.0 (Liquid Glass, 60 FPS DROP roulette, Путь чемпиона / друзья, Admin Control Center), автозакрепление и кэш-синхронизация';
 const BOT_STARTED_AT_MS = Date.now();
 const BOT_STARTED_AT = new Date(BOT_STARTED_AT_MS).toISOString();
@@ -2292,7 +2292,8 @@ function formatCardUrl(rawUrl, maxLabel = 44) {
 }
 
 function fmtForm(user, uid, r) {
-  const u = user?.username ? `@${user.username}` : 'нет';
+  const cleanUname = clean(user?.username || '').replace(/^@+/, '');
+  const u = cleanUname ? `@${cleanUname}` : 'нет';
   const src = clean(r.source || '');
   let sourceLabel = '🤖 TELEGRAM';
   if (src === 'web') sourceLabel = '🌐 САЙТ';

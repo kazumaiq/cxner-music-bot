@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const CLIENT_BUILD_VERSION = '2026-11-16-ui-v10';
+  const CLIENT_BUILD_VERSION = '2026-11-16-ui-v11';
   const $ = (s, root = document) => root.querySelector(s);
   const $$ = (s, root = document) => Array.from(root.querySelectorAll(s));
 
