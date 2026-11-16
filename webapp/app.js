@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const CLIENT_BUILD_VERSION = '2026-11-16-ui-v12';
+  const CLIENT_BUILD_VERSION = '2026-11-16-ui-v14';
   const $ = (s, root = document) => root.querySelector(s);
   const $$ = (s, root = document) => Array.from(root.querySelectorAll(s));
 
@@ -49,6 +49,7 @@
     authFailed: false,
     homeData: null,
     catalogReleases: [],
+    musicTab: 'catalog',
     catalogGenre: 'all',
     catalogSearch: '',
     catalogSort: 'newest',
@@ -313,7 +314,18 @@
     else if (name === 'calendar') loadCalendar();
     else if (name === 'activity') loadActivity();
     else if (name === 'admin') loadAdmin();
-    else if (name === 'catalog') renderCatalog();
+    else if (name === 'catalog') setMusicTab(state.musicTab || 'catalog');
+  }
+
+  function setMusicTab(tab = 'catalog') {
+    state.musicTab = tab;
+    $$('#musicModeTabs .seg-btn').forEach((b) => b.classList.toggle('is-active', b.dataset.musicTab === tab));
+    $('#musicCatalogPane')?.classList.toggle('is-hidden', tab !== 'catalog');
+    $('#musicRankingPane')?.classList.toggle('is-hidden', tab !== 'ranking');
+    $('#musicCalendarPane')?.classList.toggle('is-hidden', tab !== 'calendar');
+    if (tab === 'catalog') renderCatalog();
+    else if (tab === 'ranking') loadRanking();
+    else if (tab === 'calendar') loadCalendar();
   }
 
   function releaseCardHtml(item, horizontal = false) {
@@ -390,28 +402,70 @@
     const lastForm = forms[0];
 
     if (state.authFailed && !getInitData()) {
-      $('#homeUserSummary').innerHTML = `<div class="glass-card" style="border-color:rgba(245,158,11,0.4)">
+      $('#homeUserSummary').innerHTML = `<div class="glass-card" style="border-color:rgba(245,158,11,0.45)">
         <strong>Предпросмотр без Telegram авторизации</strong>
-        <p class="muted-sm">Каталог доступен, а профиль, DROP и админка открываются автоматически при запуске Mini App внутри Telegram.</p>
+        <p class="muted-sm">Каталог открыт. Кабинет артиста, DROP и админка загружаются автоматически при открытии внутри Telegram.</p>
+      </div>`;
+    } else if (forms.length === 0 && !(stats.releases > 0)) {
+      $('#homeUserSummary').innerHTML = `<div class="onboard-card">
+        <div class="hero-top-row">
+          <div>
+            <div class="eyebrow">ДЛЯ НОВЫХ АРТИСТОВ</div>
+            <h2 style="margin-top:4px">Привет, ${esc(u.first_name || u.username || 'артист')}!</h2>
+          </div>
+          ${isCeo ? '<span class="ceo-badge">👑 CEO</span>' : ''}
+        </div>
+        <div class="onboard-steps">
+          <div class="onboard-step">
+            <div class="onboard-num">1</div>
+            <div class="onboard-copy">
+              <strong>Отправь трек</strong>
+              <span>Нажми «Выпустить трек» выше или «+» внизу — 5 простых шагов.</span>
+            </div>
+          </div>
+          <div class="onboard-step">
+            <div class="onboard-num">2</div>
+            <div class="onboard-copy">
+              <strong>Отслеживай модерацию</strong>
+              <span>Статус обновляется прямо в этом боте и в твоём кабинете на сайте.</span>
+            </div>
+          </div>
+          <div class="onboard-step">
+            <div class="onboard-num">3</div>
+            <div class="onboard-copy">
+              <strong>Сделай Smart Link</strong>
+              <span>После одобрения получишь UPC и красивую ссылку на все площадки.</span>
+            </div>
+          </div>
+        </div>
+        <div class="wrap-gap">
+          <button class="btn btn-outline btn-sm" style="flex:1" data-screen="link" type="button">🔗 Smart Link</button>
+          <button class="btn btn-outline btn-sm" style="flex:1" data-action="open-friends" type="button">🤝 Друзья +75 CXP</button>
+        </div>
       </div>`;
     } else {
       $('#homeUserSummary').innerHTML = `<div class="glass-card">
         <div class="hero-top-row">
           <div>
-            <div class="eyebrow">ТВОЙ DASHBOARD</div>
+            <div class="eyebrow">ТВОЙ КАБИНЕТ</div>
             <h2 style="margin-top:4px">${esc(u.first_name || u.username || 'Артист')}</h2>
           </div>
           <div class="wrap-gap" style="justify-content:flex-end">
-            ${isCeo ? '<span class="ceo-badge">👑 CEO / ADMIN</span>' : ''}
+            ${isCeo ? '<span class="ceo-badge">👑 CEO</span>' : ''}
             ${isVerif ? '<span class="verified-pill">✓ VERIFIED</span>' : ''}
           </div>
         </div>
-        <div class="muted-sm">${lastForm ? `Последний релиз: <b>${esc(lastForm.track_name || 'Без названия')}</b> — ${esc(statusText(lastForm.status))}` : 'Загрузи свой первый трек на модерацию через кнопку «+ Релиз».'}</div>
+        <div class="muted-sm">${lastForm ? `Последний релиз: <b style="color:#fff">${esc(lastForm.track_name || 'Без названия')}</b> — ${esc(statusText(lastForm.status))}` : 'Все твои треки и смарт-ссылки под рукой.'}</div>
         <div class="kpi-grid-4">
           <div class="kpi-box"><strong>${stats.releases || 0}</strong><span>${pluralRu(stats.releases || 0, 'Релиз', 'Релиза', 'Релизов')}</span></div>
           <div class="kpi-box"><strong>${stats.moderation || 0}</strong><span>Модерация</span></div>
           <div class="kpi-box"><strong>${stats.links || 0}</strong><span>Ссылки</span></div>
           <div class="kpi-box"><strong>${data.inventory_count || 0}</strong><span>Артефакты</span></div>
+        </div>
+        <div class="wrap-gap">
+          <button class="btn btn-outline btn-xs" style="flex:1" data-screen="link" type="button">🔗 Smart Link</button>
+          <button class="btn btn-outline btn-xs" style="flex:1" data-action="open-friends" type="button">🤝 Друзья +75</button>
+          <button class="btn btn-outline btn-xs" style="flex:1" data-screen="profile" type="button">Профиль</button>
         </div>
       </div>`;
     }
@@ -1051,8 +1105,9 @@
         <div class="profile-avatar-xl frame-${esc(frame)}">
           ${avatar ? `<img src="${esc(avatar)}" alt="" data-fallback-char="${esc(displayName[0].toUpperCase())}" onerror="this.style.display='none';this.parentElement.textContent=this.dataset.fallbackChar||'C'">` : esc(displayName[0].toUpperCase())}
         </div>
-        <div class="profile-btn-pair">
+        <div class="profile-btn-pair wrap-gap" style="justify-content:flex-end">
           <button class="btn btn-outline btn-xs" data-action="edit-profile" type="button">Настроить ID</button>
+          <button class="btn btn-outline btn-xs" data-screen="link" type="button">Smart Link</button>
           <button class="btn btn-outline btn-xs" data-screen="verification" type="button">Верификация</button>
         </div>
       </div>
@@ -1260,13 +1315,15 @@
     try {
       const res = await api(`/api/miniapp/platform/rankings?sort=${encodeURIComponent(state.rankSort)}`);
       const rows = res.rankings || [];
-      $('#rankingList').innerHTML = rows.length
+      const html = rows.length
         ? rows.map((r, i) => `<div class="list-row" data-action="open-artist" data-id="${esc(r.telegram_id)}">
             <strong class="mono" style="width:28px;text-align:center;color:${i < 3 ? '#FDE68A' : 'var(--muted)'}">#${i + 1}</strong>
             <div class="list-meta"><strong>${esc(r.artist)}</strong><small>${r.releases} ${pluralRu(r.releases, 'релиз', 'релиза', 'релизов')} · ${r.listens} прослушиваний</small></div>
             <strong class="mono" style="color:var(--cyan)">♥ ${r.likes}</strong>
           </div>`).join('')
         : '<div class="empty-box">Чарт пуст.</div>';
+      if ($('#rankingList')) $('#rankingList').innerHTML = html;
+      if ($('#musicRankingList')) $('#musicRankingList').innerHTML = html;
     } catch {}
   }
 
@@ -1274,13 +1331,15 @@
     try {
       const res = await api('/api/miniapp/platform/calendar');
       const rows = res.releases || [];
-      $('#calendarList').innerHTML = rows.length
+      const html = rows.length
         ? rows.slice(0, 40).map((r) => `<div class="list-row" data-release-id="${esc(r.id)}">
             <img class="list-thumb" src="${esc(coverUrl(r))}" alt="" data-cover-title="${esc(r.title || '')}" data-cover-artist="${esc(r.artist || '')}" onerror="window.__cxrCoverErr(this)">
             <div class="list-meta"><strong>${esc(r.title)}</strong><small>${esc(r.artist)}</small></div>
             <span class="btn-chip mono" style="font-size:11px">${esc(r.date || 'Скоро')}</span>
           </div>`).join('')
         : '<div class="empty-box">Календарь пуст.</div>';
+      if ($('#calendarList')) $('#calendarList').innerHTML = html;
+      if ($('#musicCalendarList')) $('#musicCalendarList').innerHTML = html;
     } catch {}
   }
 
@@ -1686,10 +1745,16 @@
       return;
     }
 
+    const mTab = e.target.closest('[data-music-tab]');
+    if (mTab) {
+      setMusicTab(mTab.dataset.musicTab);
+      return;
+    }
+
     const rSort = e.target.closest('[data-rank-sort]');
     if (rSort) {
       state.rankSort = rSort.dataset.rankSort;
-      $$('#ranking .seg-btn').forEach((b) => b.classList.toggle('is-active', b === rSort));
+      $$('#ranking .seg-btn, #musicRankSortTabs .seg-btn').forEach((b) => b.classList.toggle('is-active', b.dataset.rankSort === state.rankSort));
       loadRanking();
       return;
     }
@@ -1697,6 +1762,12 @@
     const actEl = e.target.closest('[data-action]');
     if (!actEl) return;
     const action = actEl.dataset.action;
+
+    if (action === 'open-ranking-tab') {
+      state.musicTab = 'ranking';
+      switchScreen('catalog');
+      return;
+    }
 
     if (action === 'open-friends') {
       state.profileTab = 'friends';

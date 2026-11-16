@@ -323,8 +323,8 @@ const FORM_STATUS = {
   APPROVED: 'approved',
   REJECTED: 'rejected'
 };
-const BOT_BUILD_VERSION = '2026-11-16-ui-v13';
-const BOT_BUILD_RELEASE_NOTE = 'Мгновенная синхронизация Telegram ↔ сайт (исправлен прямой Supabase link, команда /link и глубокие ссылки), Mini App 4.0';
+const BOT_BUILD_VERSION = '2026-11-16-ui-v14';
+const BOT_BUILD_RELEASE_NOTE = 'Design System 5.0 (Onest + Manrope, яркий контраст, онбординг для новичков, упрощённая навигация) + мгновенная синхронизация ТГ ↔ сайт';
 const BOT_STARTED_AT_MS = Date.now();
 const BOT_STARTED_AT = new Date(BOT_STARTED_AT_MS).toISOString();
 

@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-  <meta name="theme-color" content="#0B0816">
+  <meta name="theme-color" content="#0D081D">
   <title>CXRNER MUSIC — Ecosystem Mini App</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&family=Manrope:wght@500;600;700;800&family=Unbounded:wght@600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=4.0.1">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&family=Manrope:wght@500;600;700;800&family=Onest:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=5.0.0">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <script defer src="app.js?v=4.0.1"></script>
+  <script defer src="app.js?v=5.0.0"></script>
 </head>
 <body>
   <div class="ambient-bg" aria-hidden="true"></div>
@@ -46,7 +46,7 @@
         </span>
         <span class="brand-meta">
           <strong>CXRNER</strong>
-          <small>ECOSYSTEM 4.0</small>
+          <small>MUSIC ECOSYSTEM</small>
         </span>
       </button>
 
@@ -63,11 +63,7 @@
           <span id="notifBadge" class="badge-count is-hidden">0</span>
         </button>
 
-        <button class="icon-circle" data-screen="more" type="button" aria-label="Все сервисы">
-          <span class="ico-wrap" data-icon="grid"></span>
-        </button>
-
-        <button class="avatar-btn" data-screen="profile" type="button" aria-label="Мой профиль">
+        <button class="avatar-btn" data-screen="profile" type="button" aria-label="Мой кабинет">
           <img id="topAvatar" alt="">
           <span id="topAvatarFallback" class="avatar-fallback">C</span>
         </button>
@@ -87,16 +83,11 @@
             <span class="pill-live"><span class="live-dot"></span>LIVE</span>
           </div>
           <h1>Твоя музыка.<br><span class="grad-text">Без границ.</span></h1>
-          <p class="hero-desc">Дистрибуция на 120+ площадок, смарт-ссылки CXRNER LINK, коллекционные артефакты DROP и живая модерация в Telegram.</p>
-          <div class="hero-stats-row">
-            <div class="h-stat"><strong>120+</strong><span>Площадок</span></div>
-            <div class="h-stat"><strong>24/7</strong><span>Модерация TG</span></div>
-            <div class="h-stat"><strong>FREE</strong><span>Смарт-ссылки</span></div>
-          </div>
+          <p class="hero-desc">Выпусти трек на 150+ площадок за 2 минуты, следи за модерацией в Telegram и получай 70% роялти.</p>
           <div class="hero-cta-row">
             <button class="btn btn-white" data-screen="submit" type="button">
               <span class="btn-ico" data-icon="upload"></span>
-              <span>Отправить релиз</span>
+              <span>Выпустить трек</span>
             </button>
             <button class="btn btn-glass-lite" data-screen="drop" type="button">
               <span class="btn-ico" data-icon="cube"></span>
@@ -107,108 +98,81 @@
 
         <div id="homeUserSummary"></div>
 
-        <div class="promo-duo-grid">
-          <button class="promo-tile promo-emerald" data-action="open-friends" type="button">
-            <div class="pt-icon">🤝</div>
-            <div class="pt-copy">
-              <strong>Зови друзей</strong>
-              <span>+75 CXP и кейсы в Пути чемпиона</span>
-            </div>
-            <span class="pt-arrow">›</span>
-          </button>
-          <button class="promo-tile promo-amber" data-screen="link" type="button">
-            <div class="pt-icon">🔗</div>
-            <div class="pt-copy">
-              <strong>CXRNER LINK</strong>
-              <span>Мультиссылка для любого релиза</span>
-            </div>
-            <span class="pt-arrow">›</span>
-          </button>
-        </div>
-
         <div class="sec-head">
           <div>
             <h2>Свежие релизы</h2>
-            <p class="sec-sub">Новое в официальном каталоге лейбла</p>
+            <p class="sec-sub">Новинки каталога лейбла</p>
           </div>
-          <button class="link-btn" data-screen="catalog" type="button">Весь каталог ›</button>
+          <button class="link-btn" data-screen="catalog" type="button">Вся музыка ›</button>
         </div>
         <div class="h-scroll" id="homeLatestRow"></div>
 
         <div class="sec-head">
           <div>
             <h2>В тренде</h2>
-            <p class="sec-sub">Лидеры по прослушиваниям и реакциям</p>
+            <p class="sec-sub">Популярные треки недели</p>
           </div>
-          <button class="link-btn" data-screen="ranking" type="button">Чарт артистов ›</button>
+          <button class="link-btn" data-action="open-ranking-tab" type="button">Чарт артистов ›</button>
         </div>
         <div class="h-scroll" id="homePopularRow"></div>
 
         <div class="sec-head">
           <div>
             <h2>Новости лейбла</h2>
-            <p class="sec-sub">Релизные анонсы, апдейты и питчинг</p>
+            <p class="sec-sub">Анонсы и обновления</p>
           </div>
         </div>
         <div id="homeNewsList" class="stack-list"></div>
-
-        <div class="sec-head">
-          <div>
-            <h2>Быстрые сервисы</h2>
-            <p class="sec-sub">Всё для релиза и роста аудитории</p>
-          </div>
-        </div>
-        <div class="quick-grid">
-          <button class="quick-card qc-cyan" data-screen="drop" type="button">
-            <span class="qc-ico" data-icon="cube"></span>
-            <strong>CXRNER DROP</strong>
-            <small>Кейсы и дуэли</small>
-          </button>
-          <button class="quick-card qc-amber" data-screen="verification" type="button">
-            <span class="qc-ico" data-icon="shield"></span>
-            <strong>Верификация</strong>
-            <small>Галочка артиста</small>
-          </button>
-          <button class="quick-card qc-purple" data-screen="calendar" type="button">
-            <span class="qc-ico" data-icon="calendar"></span>
-            <strong>Календарь</strong>
-            <small>График премьер</small>
-          </button>
-          <button class="quick-card qc-rose" data-screen="ranking" type="button">
-            <span class="qc-ico" data-icon="trophy"></span>
-            <strong>Топ чарт</strong>
-            <small>Рейтинг лейбла</small>
-          </button>
-        </div>
       </section>
 
-      <!-- CATALOG -->
+      <!-- CATALOG (UNIFIED MUSIC TAB: КАТАЛОГ / ЧАРТ / ПРЕМЬЕРЫ) -->
       <section class="screen" id="catalog">
         <div class="page-head">
-          <div class="eyebrow">ОФИЦИАЛЬНЫЙ КАТАЛОГ</div>
-          <h1>Музыка CXRNER</h1>
-          <p class="muted">Слушай треки на площадках, сохраняй в избранное и открывай страницы артистов.</p>
+          <div class="eyebrow">МУЗЫКА CXRNER</div>
+          <h1>Каталог и чарты</h1>
+          <p class="muted">Слушай треки лейбла, следи за чартом артистов и графиком премьер.</p>
         </div>
 
-        <div class="search-bar">
-          <span class="ico-wrap" data-icon="search"></span>
-          <input id="catalogSearchInput" type="search" placeholder="Поиск трека, артиста или жанра…">
-          <button id="catalogSearchClear" class="clear-btn is-hidden" type="button" aria-label="Очистить">✕</button>
+        <div class="seg-tabs" id="musicModeTabs">
+          <button class="seg-btn is-active" data-music-tab="catalog" type="button">Все треки</button>
+          <button class="seg-btn" data-music-tab="ranking" type="button">Топ чарт</button>
+          <button class="seg-btn" data-music-tab="calendar" type="button">Премьеры</button>
         </div>
 
-        <div class="chip-scroll" id="catalogGenreChips"></div>
+        <div id="musicCatalogPane" class="stack-list">
+          <div class="search-bar">
+            <span class="ico-wrap" data-icon="search"></span>
+            <input id="catalogSearchInput" type="search" placeholder="Поиск трека, артиста или жанра…">
+            <button id="catalogSearchClear" class="clear-btn is-hidden" type="button" aria-label="Очистить">✕</button>
+          </div>
 
-        <div class="filter-bar">
-          <select id="catalogSort" class="select-sm">
-            <option value="newest">Сначала новые</option>
-            <option value="popular">Популярные</option>
-            <option value="title">По названию А–Я</option>
-          </select>
-          <button id="catalogFavOnly" class="btn-chip" type="button">★ Избранное</button>
-          <span id="catalogCount" class="mono muted-count">0 релизов</span>
+          <div class="chip-scroll" id="catalogGenreChips"></div>
+
+          <div class="filter-bar">
+            <select id="catalogSort" class="select-sm">
+              <option value="newest">Сначала новые</option>
+              <option value="popular">Популярные</option>
+              <option value="title">По названию А–Я</option>
+            </select>
+            <button id="catalogFavOnly" class="btn-chip" type="button">★ Избранное</button>
+            <span id="catalogCount" class="mono muted-count">0 релизов</span>
+          </div>
+
+          <div class="release-grid" id="catalogGrid"></div>
         </div>
 
-        <div class="release-grid" id="catalogGrid"></div>
+        <div id="musicRankingPane" class="stack-list is-hidden">
+          <div class="seg-tabs" id="musicRankSortTabs">
+            <button class="seg-btn is-active" data-rank-sort="likes" type="button">По лайкам</button>
+            <button class="seg-btn" data-rank-sort="listens" type="button">По стримам</button>
+            <button class="seg-btn" data-rank-sort="releases" type="button">По релизам</button>
+          </div>
+          <div id="musicRankingList" class="stack-list"></div>
+        </div>
+
+        <div id="musicCalendarPane" class="stack-list is-hidden">
+          <div id="musicCalendarList" class="stack-list"></div>
+        </div>
       </section>
 
       <!-- SUBMIT RELEASE (WIZARD) -->
@@ -534,7 +498,7 @@
       </button>
       <button class="nav-item" data-screen="catalog" type="button">
         <span class="nav-ico" data-icon="music"></span>
-        <span>Каталог</span>
+        <span>Музыка</span>
       </button>
       <button class="nav-item nav-release" data-screen="submit" type="button">
         <span class="nav-ico-fab" data-icon="plus"></span>
@@ -547,7 +511,7 @@
       </button>
       <button class="nav-item" data-screen="profile" type="button">
         <span class="nav-ico" data-icon="user"></span>
-        <span>Профиль</span>
+        <span>Кабинет</span>
       </button>
     </nav>
   </div>
